@@ -30,6 +30,7 @@ jobs:
       - name: Mint Fuko PR Review app token
         id: app-token
         if: ${{ vars.FUKO_APP_ID != '' }}
+        continue-on-error: true # if minting fails (App uninstalled, etc.), fall back to github-actions[bot] rather than failing the PR check
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ vars.FUKO_APP_ID }}
