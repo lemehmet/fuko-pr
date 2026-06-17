@@ -132,7 +132,9 @@ jobs:
           config.model: "openai/glm-5.2"
           config.fallback_models: '["openai/glm-5.2"]'
           OPENAI.KEY: ${{ secrets.ZAI_KEY }}
-          OPENAI.API_BASE: "https://api.z.ai/api/paas/v4"
+          # GLM Coding-plan subscription is served from the coding endpoint; the
+          # standard /api/paas/v4 is pay-per-token and 429s without a balance.
+          OPENAI.API_BASE: "https://api.z.ai/api/coding/paas/v4"
           # fuko knowledge injection (no-fork seam):
           pr_reviewer.extra_instructions: ${{ steps.fuko.outputs.extra_instructions }}
           pr_code_suggestions.extra_instructions: ${{ steps.fuko.outputs.extra_instructions }}
