@@ -11,9 +11,13 @@ on:
 
 jobs:
   handle:
+    # Only repo-trusted authors may mutate the knowledge base: learnings are
+    # injected verbatim into the reviewer LLM, so an untrusted /remember is a
+    # prompt-injection vector and /forget all could wipe the store.
     if: >
       github.event.issue.pull_request
       && github.event.sender.type != 'Bot'
+      && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
       && (contains(github.event.comment.body, '/remember')
           || contains(github.event.comment.body, '/forget'))
     runs-on: self-hosted

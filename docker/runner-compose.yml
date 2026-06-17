@@ -40,7 +40,7 @@ services:
       FUKO_DATABASE_URL: postgresql://fuko:secret@pg:5432/fuko
       FUKO_EMBED_BASE_URL: http://ollama:11434/v1
       FUKO_EMBED_MODEL: bge-m3
-      FUKO_AUTH_TOKEN: ${FUKO_AUTH_TOKEN:-changeme}
+      FUKO_AUTH_TOKEN: ${FUKO_AUTH_TOKEN:?set FUKO_AUTH_TOKEN (e.g. openssl rand -hex 16) before starting the stack}
     restart: unless-stopped
     ports:
       - "8000:8000"

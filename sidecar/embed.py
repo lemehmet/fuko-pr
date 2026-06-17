@@ -15,6 +15,7 @@ class Embedder:
     def __init__(self) -> None:
         """Configure the endpoint URL, auth header, and HTTP client."""
         self._client = httpx.Client(timeout=120.0)
+        self._dim: int | None = None
         self._url = f"{settings.embed_base_url.rstrip('/')}/embeddings"
         self._headers = {"Content-Type": "application/json"}
         if settings.embed_api_key:
@@ -50,6 +51,17 @@ class Embedder:
     def embed_one(self, text: str) -> list[float]:
         """Embed a single string."""
         return self.embed([text])[0]
+
+    def probe_dim(self) -> int:
+        """Return the embedding dimension reported by the configured model.
+
+        Embeds a tiny probe string and caches the resulting vector length, so
+        the pgvector column can be sized to whatever the model actually returns
+        instead of a hard-coded guess.
+        """
+        if self._dim is None:
+            self._dim = len(self.embed_one("dimension probe"))
+        return self._dim
 
 
 _embedder: Embedder | None = None

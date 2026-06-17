@@ -33,6 +33,7 @@ jobs:
           python3 - <<'PY'
           import json
           import os
+          import secrets
           import sys
           import urllib.error
           import urllib.request
@@ -111,10 +112,13 @@ jobs:
 
           out = os.environ.get("GITHUB_OUTPUT")
           if out:
+              # Random heredoc delimiter: the learning text is attacker-influenceable
+              # (via /remember), so a fixed marker would allow Actions output injection.
+              delim = "FKO_" + secrets.token_hex(16)
               with open(out, "a") as f:
-                  f.write("extra_instructions<<FKO_EOF\n")
+                  f.write(f"extra_instructions<<{delim}\n")
                   f.write(extra + "\n")
-                  f.write("FKO_EOF\n")
+                  f.write(f"{delim}\n")
           print(f"fuko: injected {len(results)} learnings")
           if extra:
               print(extra)
