@@ -128,20 +128,26 @@ jobs:
         uses: the-pr-agent/pr-agent@v0.36.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Reviewer model: GLM-5.2 via z.ai (OpenAI-compatible). Adjust as needed.
-          config.model: "openai/glm-5.2"
-          config.fallback_models: '["openai/glm-5.2"]'
+          # IMPORTANT: PR-Agent loads settings via dynaconf with envvar_prefix=False,
+          # so nested settings MUST use the DUNDER form (SECTION__KEY). Dotted keys
+          # (config.model, pr_reviewer.extra_instructions, ...) are SILENTLY IGNORED
+          # and fall back to defaults — including the OpenAI base and fuko injection.
+          # Only github_action_config.* below stays dotted (read via get_setting_or_env).
+          #
+          # Reviewer model: GLM-5.2 via z.ai's coding endpoint.
+          CONFIG__MODEL: "openai/glm-5.2"
+          CONFIG__FALLBACK_MODELS: '["openai/glm-5.2"]'
           # glm-5.2 isn't in PR-Agent's built-in MAX_TOKENS table; a custom model
           # needs its context window declared explicitly or every call errors.
-          config.custom_model_max_tokens: "128000"
-          OPENAI.KEY: ${{ secrets.ZAI_KEY }}
+          CONFIG__CUSTOM_MODEL_MAX_TOKENS: "128000"
+          OPENAI__KEY: ${{ secrets.ZAI_KEY }}
           # GLM Coding-plan subscription is served from the coding endpoint; the
           # standard /api/paas/v4 is pay-per-token and 429s without a balance.
-          OPENAI.API_BASE: "https://api.z.ai/api/coding/paas/v4"
+          OPENAI__API_BASE: "https://api.z.ai/api/coding/paas/v4"
           # fuko knowledge injection (no-fork seam):
-          pr_reviewer.extra_instructions: ${{ steps.fuko.outputs.extra_instructions }}
-          pr_code_suggestions.extra_instructions: ${{ steps.fuko.outputs.extra_instructions }}
-          # Tools:
+          PR_REVIEWER__EXTRA_INSTRUCTIONS: ${{ steps.fuko.outputs.extra_instructions }}
+          PR_CODE_SUGGESTIONS__EXTRA_INSTRUCTIONS: ${{ steps.fuko.outputs.extra_instructions }}
+          # Tools (read via get_setting_or_env — dotted lowercase is honored here):
           github_action_config.auto_review: "true"
           github_action_config.auto_describe: "true"
           github_action_config.auto_improve: "true"
