@@ -22,10 +22,21 @@ jobs:
       pull-requests: write
       issues: write
     steps:
+      # Post as the "Fuko PR Review" GitHub App when configured (set repo
+      # secrets FUKO_APP_ID + FUKO_APP_PRIVATE_KEY and install the App on the
+      # repo). Falls back to github-actions[bot] when the App isn't set up.
+      - name: Mint Fuko PR Review app token
+        id: app-token
+        if: ${{ secrets.FUKO_APP_ID != '' }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.FUKO_APP_ID }}
+          private-key: ${{ secrets.FUKO_APP_PRIVATE_KEY }}
+
       - name: Build repo knowledge (fuko)
         id: fuko
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
           FUKO_URL: ${{ secrets.FUKO_URL }}
           FUKO_TOKEN: ${{ secrets.FUKO_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -127,7 +138,7 @@ jobs:
       - name: PR-Agent
         uses: the-pr-agent/pr-agent@v0.36.1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
           # IMPORTANT: PR-Agent loads settings via dynaconf with envvar_prefix=False,
           # so nested settings MUST use the DUNDER form (SECTION__KEY). Dotted keys
           # (config.model, pr_reviewer.extra_instructions, ...) are SILENTLY IGNORED
