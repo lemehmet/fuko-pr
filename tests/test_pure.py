@@ -70,3 +70,10 @@ def test_format_extra_instructions_with_globs():
 
 def test_chunk_markdown_single_when_no_heading():
     assert len(chunk_markdown("plain text only")) == 1
+
+
+def test_forget_invalid_uuid_is_noop():
+    from sidecar.ingest import forget
+
+    assert forget("owner/repo", id="not-a-uuid") == 0
+    assert forget("owner/repo", id="/forget all") == 0

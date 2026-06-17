@@ -1,6 +1,7 @@
 """Ingestion of learnings with idempotent dedup via ON CONFLICT."""
 
 from datetime import datetime
+from uuid import UUID
 
 from .db import db, vector_literal
 from .embed import get_embedder
@@ -62,6 +63,10 @@ def forget(
 ) -> int:
     """Delete learnings for ``repo`` by id, source, or wholesale; returns the count deleted."""
     if id:
+        try:
+            UUID(id)
+        except ValueError:
+            return 0
         stmt, params = "DELETE FROM learnings WHERE repo = %s AND id = %s", (repo, id)
     elif source:
         stmt, params = "DELETE FROM learnings WHERE repo = %s AND source = %s", (repo, source)
