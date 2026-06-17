@@ -1,0 +1,97 @@
+# fuko-pr resolved-thread sweep.
+#
+# Copy into your app repo as `.github/workflows/sweep-threads.yml`.
+# Runs hourly on the default branch, mines resolved review threads from the 20
+# most-recently-updated open PRs, and forwards them to the fuko sidecar, which
+# keeps the last human comment of each resolved thread as a learning.
+#
+# Dedup is automatic: re-sweeping a thread is a no-op (UNIQUE on repo,text,source).
+# For GitHub Enterprise Server, set FUKO_GRAPHQL_URL.
+
+name: fuko-pr thread sweep
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+jobs:
+  sweep:
+    runs-on: self-hosted
+    permissions:
+      pull-requests: read
+      contents: read
+    steps:
+      - name: Mine resolved threads
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          FUKO_URL: ${{ secrets.FUKO_URL }}
+          FUKO_TOKEN: ${{ secrets.FUKO_TOKEN }}
+          # FUKO_BOT_LOGIN: my-reviewer-app   # also exclude a non-[bot] reviewer app
+          # FUKO_GRAPHQL_URL: https://ghes.example/api/graphql
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.request
+
+          token = os.environ["GITHUB_TOKEN"]
+          repo = os.environ["REPO"]
+          owner, _, name = repo.partition("/")
+          fuko_url = os.environ["FUKO_URL"].rstrip("/")
+          fuko_token = os.environ.get("FUKO_TOKEN", "")
+          bot_login = os.environ.get("FUKO_BOT_LOGIN")
+          graphql_url = os.environ.get("FUKO_GRAPHQL_URL", "https://api.github.com/graphql")
+
+          query = """query {
+            repository(owner: "%s", name: "%s") {
+              pullRequests(states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}, first: 20) {
+                nodes { number reviewThreads(first: 100) {
+                  nodes { isResolved path comments(first: 50) {
+                    nodes { author { login } body url } } } } } } } }""" % (owner, name)
+
+          req = urllib.request.Request(
+              graphql_url,
+              data=json.dumps({"query": query}).encode(),
+              headers={
+                  "Authorization": "Bearer " + token,
+                  "Content-Type": "application/json",
+              },
+          )
+          with urllib.request.urlopen(req, timeout=60) as r:
+              data = json.load(r)
+
+          errors = data.get("errors")
+          if errors:
+              print("GitHub GraphQL errors: " + json.dumps(errors), file=sys.stderr)
+
+          repo_node = ((data.get("data") or {}).get("repository")) or {}
+          prs = (repo_node.get("pullRequests") or {}).get("nodes") or []
+          threads = []
+          for pr in prs:
+              for t in (pr.get("reviewThreads") or {}).get("nodes", []):
+                  if t.get("isResolved"):
+                      threads.append(t)
+
+          payload = json.dumps(
+              {"repo": repo, "threads": threads, "bot_login": bot_login}
+          ).encode()
+          headers = {"Content-Type": "application/json"}
+          if fuko_token:
+              headers["Authorization"] = "Bearer " + fuko_token
+          try:
+              req = urllib.request.Request(
+                  fuko_url + "/ingest-threads", data=payload, headers=headers
+              )
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  resp = json.load(r)
+              print(
+                  "fuko: considered %s threads, inserted %s"
+                  % (resp.get("considered"), resp.get("inserted"))
+              )
+          except Exception as e:
+              print("fuko /ingest-threads failed: " + str(e), file=sys.stderr)
+              sys.exit(1)
+          PY

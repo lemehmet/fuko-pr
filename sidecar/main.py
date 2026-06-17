@@ -1,0 +1,93 @@
+"""FastAPI app exposing ``/ingest`` ``/query`` ``/forget`` ``/healthz``."""
+
+from fastapi import Depends, FastAPI, Header, HTTPException, status
+
+from . import ingest as ingest_mod
+from . import models
+from . import retrieve
+from . import threads as threads_mod
+from .config import settings
+
+app = FastAPI(title="fuko-pr sidecar", version="0.1.0")
+
+
+def _auth(authorization: str | None = Header(default=None)) -> None:
+    """Bearer-token dependency; a no-op when ``FUKO_AUTH_TOKEN`` is unset."""
+    if settings.auth_token and authorization != f"Bearer {settings.auth_token}":
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid token")
+
+
+@app.get("/healthz")
+def healthz() -> dict:
+    """Liveness probe (does not touch the database)."""
+    return {"ok": True}
+
+
+@app.post("/ingest", response_model=models.IngestResponse, dependencies=[Depends(_auth)])
+def ingest_endpoint(req: models.IngestRequest) -> dict:
+    """Store learnings for a repository."""
+    inserted, skipped = ingest_mod.ingest(req.repo, req.items)
+    return {"inserted": inserted, "skipped": skipped}
+
+
+@app.post("/query", response_model=models.QueryResponse, dependencies=[Depends(_auth)])
+def query_endpoint(req: models.QueryRequest) -> dict:
+    """Retrieve the most relevant learnings for a pull request."""
+    results = retrieve.query(req.repo, req.files, req.pr_body, req.query_text, req.top_k)
+    return {"results": results}
+
+
+@app.post("/forget", dependencies=[Depends(_auth)])
+def forget_endpoint(req: models.ForgetRequest) -> dict:
+    """Delete learnings by id, source, or wholesale for a repository."""
+    if not (req.id or req.source or req.all):
+        raise HTTPException(400, "provide id, source, or all=true")
+    deleted = ingest_mod.forget(req.repo, id=req.id, source=req.source, all_=req.all)
+    return {"deleted": deleted}
+
+
+@app.post("/comment", dependencies=[Depends(_auth)])
+def comment_endpoint(req: models.CommentRequest) -> dict:
+    """Interpret a raw PR comment as ``/remember`` or ``/forget`` and act on it."""
+    from .commands import parse_forget, parse_remember
+
+    remembered = parse_remember(req.body)
+    if remembered is not None:
+        text, globs = remembered
+        inserted, skipped = ingest_mod.ingest(
+            req.repo,
+            [
+                models.IngestItem(
+                    text=text,
+                    source="remember",
+                    source_url=req.source_url,
+                    file_globs=globs,
+                    origin_user=req.origin_user,
+                )
+            ],
+        )
+        return {"action": "remember", "inserted": inserted, "skipped": skipped}
+
+    forgotten = parse_forget(req.body)
+    if forgotten is not None:
+        deleted = ingest_mod.forget(
+            req.repo,
+            id=forgotten.get("id"),
+            source=forgotten.get("source"),
+            all_=bool(forgotten.get("all")),
+        )
+        return {"action": "forget", "deleted": deleted}
+
+    return {"action": "ignored"}
+
+
+@app.post("/ingest-threads", dependencies=[Depends(_auth)])
+def ingest_threads_endpoint(req: models.IngestThreadsRequest) -> dict:
+    """Mine resolved review threads for learnings and ingest them."""
+    items = [
+        it
+        for it in (threads_mod.select_learning(t, req.bot_login) for t in req.threads)
+        if it is not None
+    ]
+    inserted, skipped = ingest_mod.ingest(req.repo, items)
+    return {"considered": len(req.threads), "inserted": inserted, "skipped": skipped}

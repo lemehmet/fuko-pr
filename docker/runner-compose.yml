@@ -1,0 +1,50 @@
+# Full fuko stack for a self-hosted runner: sidecar + pgvector + Ollama.
+#
+# From a clone of fuko-pr on the runner:
+#   docker compose -f docker/runner-compose.yml up -d --build
+#   docker compose -f docker/runner-compose.yml exec ollama ollama pull bge-m3
+# The sidecar then listens on the host at http://<runner>:8000.
+
+services:
+  pg:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fuko
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: fuko
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fuko"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama:/root/.ollama
+
+  sidecar:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.sidecar
+    depends_on:
+      pg:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    environment:
+      FUKO_DATABASE_URL: postgresql://fuko:secret@pg:5432/fuko
+      FUKO_EMBED_BASE_URL: http://ollama:11434/v1
+      FUKO_EMBED_MODEL: bge-m3
+      FUKO_AUTH_TOKEN: ${FUKO_AUTH_TOKEN:-changeme}
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+
+volumes:
+  pgdata: {}
+  ollama: {}

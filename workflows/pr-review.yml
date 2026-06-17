@@ -1,0 +1,138 @@
+# fuko-pr review workflow (Path A: no-fork PR-Agent integration).
+#
+# Copy this file into your application repo as `.github/workflows/pr-review.yml`.
+# Adjust `runs-on` to match a label on your self-hosted runner fleet.
+
+name: fuko-pr review
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+concurrency:
+  group: fuko-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: github.event.pull_request.draft == false
+    runs-on: self-hosted
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Build repo knowledge (fuko)
+        id: fuko
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FUKO_URL: ${{ secrets.FUKO_URL }}
+          FUKO_TOKEN: ${{ secrets.FUKO_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          api = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+          token = os.environ["GITHUB_TOKEN"]
+          pr = os.environ["PR_NUMBER"]
+          fuko_url = os.environ["FUKO_URL"].rstrip("/")
+          fuko_token = os.environ.get("FUKO_TOKEN", "")
+
+
+          def gh(path):
+              req = urllib.request.Request(
+                  api + path,
+                  headers={
+                      "Authorization": "Bearer " + token,
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return json.load(r)
+
+
+          try:
+              body = gh(f"/repos/{repo}/pulls/{pr}").get("body") or ""
+              files = []
+              page = 1
+              while True:
+                  batch = gh(
+                      f"/repos/{repo}/pulls/{pr}/files?page={page}&per_page=100"
+                  )
+                  if not batch:
+                      break
+                  files.extend(f["filename"] for f in batch)
+                  if len(batch) < 100:
+                      break
+                  page += 1
+
+              payload = json.dumps(
+                  {"repo": repo, "files": files, "pr_body": body}
+              ).encode()
+              headers = {"Content-Type": "application/json"}
+              if fuko_token:
+                  headers["Authorization"] = "Bearer " + fuko_token
+              req = urllib.request.Request(
+                  fuko_url + "/query", data=payload, headers=headers
+              )
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  results = json.load(r).get("results", [])
+          except Exception as e:
+              print(
+                  "fuko: context build failed, proceeding without knowledge: "
+                  + str(e),
+                  file=sys.stderr,
+              )
+              results = []
+
+          if results:
+              lines = [
+                  "Apply these repo-specific learnings where relevant to this PR. "
+                  "When you act on one, mention its source link.",
+                  "",
+              ]
+              for r in results:
+                  cite = (
+                      " (source: " + r["source_url"] + ")"
+                      if r.get("source_url")
+                      else ""
+                  )
+                  lines.append("- " + r["text"] + cite)
+              extra = "\n".join(lines)
+          else:
+              extra = ""
+
+          out = os.environ.get("GITHUB_OUTPUT")
+          if out:
+              with open(out, "a") as f:
+                  f.write("extra_instructions<<FKO_EOF\n")
+                  f.write(extra + "\n")
+                  f.write("FKO_EOF\n")
+          print(f"fuko: injected {len(results)} learnings")
+          if extra:
+              print(extra)
+          PY
+
+      - name: PR-Agent
+        uses: the-pr-agent/pr-agent@v0.36.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Reviewer model: GLM-5.2 via z.ai (OpenAI-compatible). Adjust as needed.
+          config.model: "openai/glm-5.2"
+          config.fallback_models: '["openai/glm-5.2"]'
+          OPENAI.KEY: ${{ secrets.ZAI_KEY }}
+          OPENAI.API_BASE: "https://api.z.ai/api/paas/v4"
+          # fuko knowledge injection (no-fork seam):
+          pr_reviewer.extra_instructions: ${{ steps.fuko.outputs.extra_instructions }}
+          pr_code_suggestions.extra_instructions: ${{ steps.fuko.outputs.extra_instructions }}
+          # Tools:
+          github_action_config.auto_review: "true"
+          github_action_config.auto_describe: "true"
+          github_action_config.auto_improve: "true"

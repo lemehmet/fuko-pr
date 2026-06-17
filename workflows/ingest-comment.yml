@@ -1,0 +1,96 @@
+# fuko-pr /remember + /forget workflow.
+#
+# Copy into your app repo as `.github/workflows/ingest-comment.yml`.
+# Listens for PR comments and forwards commands to the fuko sidecar.
+
+name: fuko-pr ingest
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  handle:
+    if: >
+      github.event.issue.pull_request
+      && github.event.sender.type != 'Bot'
+      && (contains(github.event.comment.body, '/remember')
+          || contains(github.event.comment.body, '/forget'))
+    runs-on: self-hosted
+    permissions:
+      issues: write
+      pull-requests: read
+    steps:
+      - name: Handle /remember and /forget
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FUKO_URL: ${{ secrets.FUKO_URL }}
+          FUKO_TOKEN: ${{ secrets.FUKO_TOKEN }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_URL: ${{ github.event.comment.html_url }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          SENDER: ${{ github.event.comment.user.login }}
+          REPO: ${{ github.repository }}
+          API: ${{ github.api_url }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.request
+
+          body = os.environ["COMMENT_BODY"]
+          low = body.strip().lower()
+          if not (low.startswith("/remember") or low.startswith("/forget")):
+              sys.exit(0)
+
+          repo = os.environ["REPO"]
+          api = os.environ["API"]
+          token = os.environ["GITHUB_TOKEN"]
+          fuko_url = os.environ["FUKO_URL"].rstrip("/")
+          fuko_token = os.environ.get("FUKO_TOKEN", "")
+          comment_id = os.environ["COMMENT_ID"]
+
+          payload = json.dumps({
+              "repo": repo,
+              "body": body,
+              "source_url": os.environ.get("COMMENT_URL"),
+              "origin_user": os.environ.get("SENDER"),
+          }).encode()
+          headers = {"Content-Type": "application/json"}
+          if fuko_token:
+              headers["Authorization"] = "Bearer " + fuko_token
+
+          reaction = "confused"
+          try:
+              req = urllib.request.Request(
+                  fuko_url + "/comment", data=payload, headers=headers
+              )
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  resp = json.load(r)
+              action = resp.get("action")
+              if action == "remember":
+                  reaction = "+1"
+              elif action == "forget":
+                  reaction = "rocket" if resp.get("deleted", 0) else "-1"
+              else:
+                  reaction = "confused"
+          except Exception as e:
+              print("fuko /comment failed: " + str(e), file=sys.stderr)
+              reaction = "-1"
+
+          try:
+              req = urllib.request.Request(
+                  api + f"/repos/{repo}/issues/comments/{comment_id}/reactions",
+                  data=json.dumps({"content": reaction}).encode(),
+                  headers={
+                      "Authorization": "Bearer " + token,
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+                  method="POST",
+              )
+              urllib.request.urlopen(req, timeout=30).read()
+          except Exception as e:
+              print("reaction failed: " + str(e), file=sys.stderr)
+          PY

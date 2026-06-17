@@ -1,0 +1,87 @@
+"""Hybrid retrieval: semantic cosine search plus explicit file-glob filtering."""
+
+import fnmatch
+
+from .config import settings
+from .db import db, vector_literal
+from .embed import get_embedder
+
+
+def _build_query(files: list[str], pr_body: str | None, query_text: str | None) -> str:
+    parts: list[str] = []
+    if query_text:
+        parts.append(query_text.strip())
+    if pr_body:
+        parts.append(pr_body.strip())
+    if files:
+        parts.append("Changed files:\n" + "\n".join(files))
+    return "\n".join(p for p in parts if p).strip()
+
+
+def query(
+    repo: str,
+    files: list[str],
+    pr_body: str | None = None,
+    query_text: str | None = None,
+    top_k: int | None = None,
+) -> list[dict]:
+    """Return up to ``top_k`` relevant learnings for ``repo`` given changed files.
+
+    Combines a semantic cosine pass with explicitly file-scoped learnings, then
+    keeps scoped learnings only where their globs match a changed path.
+    """
+    q = _build_query(files, pr_body, query_text)
+    if not q:
+        return []
+    vec = vector_literal(get_embedder().embed_one(q))
+    k = top_k or settings.top_k
+    cand_k = settings.candidate_k
+
+    sql = """
+        SELECT id, text, source, source_url, file_globs, topic,
+               1 - (embedding <=> %s::vector) AS score
+        FROM learnings
+        WHERE repo = %s AND (expires_at IS NULL OR expires_at > now())
+        ORDER BY embedding <=> %s::vector
+        LIMIT %s
+    """
+
+    with db() as conn:
+        semantic = conn.execute(sql, (vec, repo, vec, cand_k)).fetchall()
+        scoped = _fetch_scoped(conn, vec, repo, cand_k)
+
+    seen: dict[str, tuple] = {}
+    for row in (*semantic, *scoped):
+        seen[row[0]] = row
+
+    results: list[dict] = []
+    for row in seen.values():
+        globs = row[4] or []
+        if globs and not any(fnmatch.fnmatch(f, pat) for f in files for pat in globs):
+            continue
+        results.append(
+            {
+                "id": str(row[0]),
+                "text": row[1],
+                "source": row[2],
+                "source_url": row[3],
+                "file_globs": list(globs),
+                "topic": row[5],
+                "score": float(row[6]),
+            }
+        )
+    results.sort(key=lambda r: r["score"], reverse=True)
+    return results[:k]
+
+
+def _fetch_scoped(conn, vec: str, repo: str, cand_k: int) -> list[tuple]:
+    sql = """
+        SELECT id, text, source, source_url, file_globs, topic,
+               1 - (embedding <=> %s::vector) AS score
+        FROM learnings
+        WHERE repo = %s AND file_globs <> '{}'
+              AND (expires_at IS NULL OR expires_at > now())
+        ORDER BY embedding <=> %s::vector
+        LIMIT %s
+    """
+    return conn.execute(sql, (vec, repo, vec, cand_k)).fetchall()
