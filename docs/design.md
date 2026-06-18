@@ -131,6 +131,16 @@ Pipeline:
 The same binary runs from GitHub Actions, GitLab CI, or locally; the runner needs
 only Docker (for PR-Agent) — not a working PR-Agent pip environment.
 
+### Consumer interface: `fuko signals`
+
+`fuko signals --pr-url <url>` emits the canonical Review Signal v1 list for a PR as
+JSON, normalizing **every recognized reviewer** (PR-Agent, Copilot, CodeRabbit) via
+`normalizers.collect_signals`. This is the deterministic seam a downstream
+addresser consumes — one schema instead of per-vendor sniffing. Detection is per
+comment: PR-Agent by format (it posts under whatever token runs it), Copilot and
+CodeRabbit by author. PR-Agent carries declared severity/category; free-form
+reviewers get an inferred best-effort mapping (`severity_source` records which).
+
 ## Contracts
 
 ### ProviderPreset (data, not code)

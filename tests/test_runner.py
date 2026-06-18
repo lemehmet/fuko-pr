@@ -187,6 +187,46 @@ def test_cmd_review_exits_on_failure(monkeypatch):
         cli._cmd_review(argparse.Namespace(pr_url="u", config="c"))
 
 
+def test_fetch_inline_comments_paginates(monkeypatch):
+    def handler(url, params=None):
+        if params["page"] == 1:
+            return _Resp([{"id": i} for i in range(100)])
+        return _Resp([{"id": 999}])
+
+    monkeypatch.setattr(runner.httpx, "Client", lambda *a, **k: _FakeClient(handler))
+    pr = PRRef(repo="o/r", number=8, url="u")
+    out = runner.fetch_inline_comments(pr, "tok", runner._DEFAULT_API)
+    assert len(out) == 101 and out[-1]["id"] == 999
+
+
+def test_fetch_inline_comments_empty(monkeypatch):
+    monkeypatch.setattr(
+        runner.httpx, "Client", lambda *a, **k: _FakeClient(lambda u, p=None: _Resp([]))
+    )
+    out = runner.fetch_inline_comments(PRRef("o/r", 8, "u"), "", runner._DEFAULT_API)
+    assert out == []
+
+
+def test_cmd_signals_emits_json(monkeypatch, tmp_path, capsys):
+    import argparse
+    import json
+
+    from sidecar import cli
+
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text('[review.model]\nprovider = "anthropic"\nname = "claude"\n', encoding="utf-8")
+    comments = [
+        {"user": {"login": "Copilot"}, "body": "Use strict equality.", "path": "a.ts", "line": 3},
+    ]
+    monkeypatch.setattr(runner, "fetch_inline_comments", lambda pr, token, api: comments)
+    cli._cmd_signals(argparse.Namespace(pr_url="https://github.com/o/r/pull/8", config=str(cfg)))
+
+    out = json.loads(capsys.readouterr().out)
+    assert len(out) == 1
+    assert out[0]["backend"] == "copilot"
+    assert out[0]["file"] == "a.ts"
+
+
 def test_gh_headers():
     assert "Authorization" not in runner._gh_headers("")
     assert runner._gh_headers("t")["Authorization"] == "Bearer t"
@@ -228,12 +268,6 @@ def test_local_query_delegates_to_retrieve(monkeypatch):
     assert runner._local_query("o/r", [], "")[0]["text"] == "y"
 
 
-def test_pragent_normalize_output_not_implemented():
-    pr = PRRef(repo="o/r", number=1, url="u")
-    with pytest.raises(NotImplementedError):
-        pragent.PrAgentBackend().normalize_output(pr)
-
-
 def test_review_wires_config_to_backend(monkeypatch, tmp_path):
     cfg = tmp_path / ".fuko.toml"
     cfg.write_text(
@@ -256,7 +290,7 @@ def test_review_wires_config_to_backend(monkeypatch, tmp_path):
             seen.update(env=env, tools=tools)
             return InvokeResult(returncode=0)
 
-        def normalize_output(self, pr):
+        def normalize_output(self, pr, model=""):
             return []
 
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
@@ -282,7 +316,7 @@ def test_review_swallows_unimplemented_normalize(monkeypatch, tmp_path):
         def invoke(self, pr, env, tools):
             return InvokeResult(returncode=0)
 
-        def normalize_output(self, pr):
+        def normalize_output(self, pr, model=""):
             raise NotImplementedError
 
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())

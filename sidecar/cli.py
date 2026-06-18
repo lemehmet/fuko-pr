@@ -2,6 +2,7 @@
 
 import argparse
 import glob as globmod
+import os
 import re
 import sys
 from pathlib import Path
@@ -19,6 +20,12 @@ def main() -> None:
     p_review = sub.add_parser("review", help="review a PR through the configured backend")
     p_review.add_argument("--pr-url", required=True, help="full pull request URL")
     p_review.add_argument("--config", default=".fuko.toml", help="path to .fuko.toml")
+
+    p_signals = sub.add_parser(
+        "signals", help="emit canonical Review Signals (v1) for a PR as JSON"
+    )
+    p_signals.add_argument("--pr-url", required=True, help="full pull request URL")
+    p_signals.add_argument("--config", default=".fuko.toml", help="path to .fuko.toml")
 
     p_query = sub.add_parser("query", help="query learnings for a set of changed files")
     p_query.add_argument("--repo", required=True)
@@ -50,6 +57,7 @@ def main() -> None:
     {
         "serve": _cmd_serve,
         "review": _cmd_review,
+        "signals": _cmd_signals,
         "query": _cmd_query,
         "ingest-docs": _cmd_ingest_docs,
         "forget": _cmd_forget,
@@ -64,6 +72,30 @@ def _cmd_review(args) -> None:
     if result.returncode != 0:
         print(f"review backend failed: {result.detail}", file=sys.stderr)
         sys.exit(1)
+
+
+def _cmd_signals(args) -> None:
+    import json
+
+    from . import runner
+    from .fukoconfig import load_config
+    from .normalizers import collect_signals
+    from .presets import UnknownPresetError, get_preset
+
+    cfg = load_config(args.config)
+    pr = runner.parse_pr_url(args.pr_url)
+    token = os.environ.get("GITHUB_TOKEN", "")
+    api_url = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+
+    try:
+        preset = get_preset(cfg.review.model.provider)
+        model = preset.litellm_prefix + cfg.review.model.name
+    except UnknownPresetError:
+        model = ""
+
+    comments = runner.fetch_inline_comments(pr, token, api_url)
+    signals = collect_signals(comments, model)
+    print(json.dumps([s.model_dump() for s in signals], indent=2))
 
 
 def _cmd_serve(_args) -> None:
