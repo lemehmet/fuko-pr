@@ -56,7 +56,7 @@ class ReviewBackend(Protocol):
         """Run the backend's ``tools`` against ``pr`` with the translated environment."""
         ...
 
-    def normalize_output(self, pr: PRRef) -> list[ReviewSignal]:
+    def normalize_output(self, pr: PRRef, model: str = "") -> list[ReviewSignal]:
         """Read the backend's posted review and map it to Review Signals (egress)."""
         ...
 

@@ -18,11 +18,15 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
+
+import httpx
 
 from ..fukoconfig import ModelConfig, ReviewConfig
+from ..normalizers import pragent_signals
 from ..presets import ProviderPreset
 from .base import InvokeResult, PRRef
-from ..signals import ReviewSignal
+from ..signals import ReviewSignal, encode_marker, with_marker
 
 _TOOL_FLAGS = {
     "review": "github_action_config.auto_review",
@@ -118,6 +122,71 @@ class PrAgentBackend:
                 details.append(f"{tool} exited {proc.returncode}")
         return InvokeResult(returncode=rc, detail="; ".join(details))
 
-    def normalize_output(self, pr: PRRef) -> list[ReviewSignal]:
-        """Map PR-Agent's posted review to Review Signals (implemented in egress phase)."""
-        raise NotImplementedError("normalize_output lands with the egress work (task 8)")
+    def normalize_output(self, pr: PRRef, model: str = "") -> list[ReviewSignal]:
+        """Read PR-Agent's inline comments, map them to Review Signals, and mark them.
+
+        Detection is by comment *format* (PR-Agent posts under whatever token ran
+        it), so this matches its ``**Suggestion:**`` shape rather than an author.
+        Marker injection is best-effort: GitHub only allows editing comments the
+        current token authored, so foreign comments simply stay unmarked. Failure
+        to read comments degrades to an empty list -- the review itself already ran.
+        """
+        token = os.environ.get("GITHUB_TOKEN", "")
+        api = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if token:
+            headers["Authorization"] = "Bearer " + token
+
+        try:
+            comments = self._fetch_review_comments(api, pr, headers)
+        except httpx.HTTPError as e:
+            print(f"fuko: could not read comments for normalization: {e}", file=sys.stderr)
+            return []
+
+        pairs = pragent_signals(comments, model)
+        self._inject_markers(api, pr, headers, pairs)
+        return [p["signal"] for p in pairs]
+
+    def _fetch_review_comments(self, api: str, pr: PRRef, headers: dict[str, str]) -> list[dict]:
+        """Return all inline review comments on the PR (paginated)."""
+        out: list[dict] = []
+        page = 1
+        with httpx.Client(timeout=30.0, headers=headers) as client:
+            while True:
+                resp = client.get(
+                    f"{api}/repos/{pr.repo}/pulls/{pr.number}/comments",
+                    params={"page": page, "per_page": 100},
+                )
+                resp.raise_for_status()
+                batch = resp.json()
+                if not batch:
+                    break
+                out.extend(batch)
+                if len(batch) < 100:
+                    break
+                page += 1
+        return out
+
+    def _inject_markers(
+        self, api: str, pr: PRRef, headers: dict[str, str], pairs: list[dict]
+    ) -> None:
+        """Best-effort: append each signal's marker to its comment (skip on any error)."""
+        if not pairs:
+            return
+        with httpx.Client(timeout=30.0, headers=headers) as client:
+            for pair in pairs:
+                comment, signal = pair["comment"], pair["signal"]
+                body = comment.get("body") or ""
+                if encode_marker(signal) in body:
+                    continue
+                try:
+                    resp = client.patch(
+                        f"{api}/repos/{pr.repo}/pulls/comments/{comment['id']}",
+                        json={"body": with_marker(body, signal)},
+                    )
+                    resp.raise_for_status()
+                except httpx.HTTPError:
+                    continue

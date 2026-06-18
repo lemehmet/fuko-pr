@@ -73,6 +73,28 @@ def _fetch_pr_context(pr: PRRef, token: str, api_url: str) -> tuple[list[str], s
     return files, body
 
 
+def fetch_inline_comments(pr: PRRef, token: str, api_url: str) -> list[dict]:
+    """Fetch all inline review comments on a PR (paginated) via the GitHub API."""
+    base = api_url.rstrip("/")
+    out: list[dict] = []
+    page = 1
+    with httpx.Client(timeout=30.0, headers=_gh_headers(token)) as client:
+        while True:
+            resp = client.get(
+                f"{base}/repos/{pr.repo}/pulls/{pr.number}/comments",
+                params={"page": page, "per_page": 100},
+            )
+            resp.raise_for_status()
+            batch = resp.json()
+            if not batch:
+                break
+            out.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+    return out
+
+
 def _sidecar_query(url: str, token: str, repo: str, files: list[str], pr_body: str) -> list[dict]:
     headers = {"Content-Type": "application/json"}
     if token:
@@ -143,7 +165,8 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
     result = backend.invoke(pr, env, cfg.review.tools)
 
     try:
-        signals = backend.normalize_output(pr)
+        model_id = preset.litellm_prefix + cfg.review.model.name
+        signals = backend.normalize_output(pr, model=model_id)
         print(f"fuko: normalized {len(signals)} review signals", file=sys.stderr)
     except NotImplementedError:
         pass
