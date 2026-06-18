@@ -65,37 +65,79 @@ class SqliteVecStore:
             self._dim = get_embedder().probe_dim()
         return self._dim
 
-    def _open(self, path: str, dim: int) -> sqlite3.Connection:
+    def _vec_ddl(self, dim: int) -> str:
+        return (
+            "USING vec0(repo TEXT partition key, lid TEXT, "
+            f"embedding float[{dim}] distance_metric=cosine)"
+        )
+
+    def _open(self, path: str, dim: int) -> tuple[sqlite3.Connection, bool]:
+        """Open the db (loading sqlite-vec), ensure schema, and migrate on a dim change.
+
+        Returns ``(conn, migrated)``; ``migrated`` is True when the embedding model's
+        dimension changed and every learning was re-embedded + the vector table rebuilt.
+        """
         import sqlite_vec
 
         conn = sqlite3.connect(path)
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
+        conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS learnings("
             "lid TEXT PRIMARY KEY, vec_rowid INTEGER, repo TEXT, text TEXT, source TEXT, "
             "source_url TEXT, file_globs TEXT, topic TEXT, origin_user TEXT, expires_at TEXT, "
             "UNIQUE(repo, text, source))"
         )
-        conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS vec_learnings USING vec0("
-            f"repo TEXT partition key, lid TEXT, embedding float[{dim}] distance_metric=cosine)"
-        )
-        return conn
+        conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_learnings {self._vec_ddl(dim)}")
+
+        row = conn.execute("SELECT value FROM meta WHERE key = 'embed_dim'").fetchone()
+        stored = int(row[0]) if row else None
+        migrated = False
+        if stored is None:
+            conn.execute("INSERT INTO meta(key, value) VALUES ('embed_dim', ?)", (str(dim),))
+        elif stored != dim:
+            self._migrate_dim(conn, dim)
+            conn.execute("UPDATE meta SET value = ? WHERE key = 'embed_dim'", (str(dim),))
+            migrated = True
+        conn.commit()
+        return conn, migrated
+
+    def _migrate_dim(self, conn: sqlite3.Connection, dim: int) -> None:
+        """Re-embed every learning with the current model and rebuild the vector table."""
+        rows = conn.execute("SELECT lid, repo, text FROM learnings").fetchall()
+        conn.execute("DROP TABLE vec_learnings")
+        conn.execute(f"CREATE VIRTUAL TABLE vec_learnings {self._vec_ddl(dim)}")
+        if not rows:
+            return
+        embeddings = get_embedder().embed([text for _, _, text in rows])
+        for (lid, repo, _text), emb in zip(rows, embeddings):
+            cur = conn.execute(
+                "INSERT INTO vec_learnings(repo, lid, embedding) VALUES (?, ?, ?)",
+                (repo, lid, _pack(emb)),
+            )
+            conn.execute("UPDATE learnings SET vec_rowid = ? WHERE lid = ?", (cur.lastrowid, lid))
 
     def _read(self, fn):
-        data, _ = self._obj.load()
+        data, token = self._obj.load()
         dim = self._ensure_dim()
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "kb.db"
             if data is not None:
                 path.write_bytes(data)
-            conn = self._open(str(path), dim)
+            conn, migrated = self._open(str(path), dim)
             try:
-                return fn(conn)
+                result = fn(conn)
             finally:
                 conn.close()
+            if migrated:
+                # persist the one-time re-embed so later reads don't repeat it
+                try:
+                    self._obj.save(path.read_bytes(), token)
+                except PreconditionFailed:
+                    pass
+            return result
 
     def _mutate(self, fn):
         dim = self._ensure_dim()
@@ -105,7 +147,7 @@ class SqliteVecStore:
                 path = Path(d) / "kb.db"
                 if data is not None:
                     path.write_bytes(data)
-                conn = self._open(str(path), dim)
+                conn, _migrated = self._open(str(path), dim)
                 try:
                     result = fn(conn)
                     conn.commit()
