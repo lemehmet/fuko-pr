@@ -44,7 +44,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -e ".[dev]"
+      - run: pip install -e ".[dev,sqlite]"
       - name: Start Ollama
         run: |
           curl -fsSL https://ollama.com/install.sh | sh

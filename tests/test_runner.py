@@ -6,6 +6,7 @@ import pytest
 from sidecar import runner
 from sidecar.backends import pragent
 from sidecar.backends.base import InvokeResult, PRRef
+from sidecar.fukoconfig import KnowledgeConfig
 
 
 class _Resp:
@@ -120,6 +121,16 @@ def test_invoke_reports_failure(monkeypatch):
     assert "review exited 3" in result.detail
 
 
+class _FakeStore:
+    def __init__(self, results=None):
+        self.results = results or []
+        self.calls = []
+
+    def query(self, repo, files, pr_body, query_text, top_k):
+        self.calls.append((repo, files))
+        return self.results
+
+
 def test_build_knowledge_uses_sidecar_when_url_set(monkeypatch):
     monkeypatch.setenv("FUKO_URL", "http://fuko.internal:8000")
     monkeypatch.setattr(runner, "_fetch_pr_context", lambda pr, t, a: (["src/a.py"], "body"))
@@ -140,8 +151,13 @@ def test_build_knowledge_uses_sidecar_when_url_set(monkeypatch):
         ]
 
     monkeypatch.setattr(runner, "_sidecar_query", fake_sidecar)
+
+    def _no_store(knowledge):
+        raise AssertionError("the local store must not be built when a sidecar is used")
+
+    monkeypatch.setattr(runner, "get_store", _no_store)  # lazy: never consulted here
     pr = PRRef(repo="o/r", number=1, url="u")
-    md = runner.build_knowledge(pr, "tok", runner._DEFAULT_API)
+    md = runner.build_knowledge(pr, "tok", runner._DEFAULT_API, KnowledgeConfig())
 
     assert captured["url"] == "http://fuko.internal:8000"
     assert "always validate input" in md
@@ -149,10 +165,12 @@ def test_build_knowledge_uses_sidecar_when_url_set(monkeypatch):
 
 def test_build_knowledge_uses_local_store_without_url(monkeypatch):
     monkeypatch.delenv("FUKO_URL", raising=False)
-    monkeypatch.setattr(runner, "_fetch_pr_context", lambda pr, t, a: ([], ""))
-    monkeypatch.setattr(runner, "_local_query", lambda repo, files, pr_body: [])
+    monkeypatch.setattr(runner, "_fetch_pr_context", lambda pr, t, a: (["x.py"], ""))
+    store = _FakeStore(results=[])
+    monkeypatch.setattr(runner, "get_store", lambda knowledge: store)
     pr = PRRef(repo="o/r", number=1, url="u")
-    assert runner.build_knowledge(pr, "", runner._DEFAULT_API) == ""
+    assert runner.build_knowledge(pr, "", runner._DEFAULT_API, KnowledgeConfig()) == ""
+    assert store.calls == [("o/r", ["x.py"])]
 
 
 def test_build_knowledge_degrades_on_error(monkeypatch):
@@ -162,8 +180,9 @@ def test_build_knowledge_degrades_on_error(monkeypatch):
         raise RuntimeError("github down")
 
     monkeypatch.setattr(runner, "_fetch_pr_context", boom)
+    monkeypatch.setattr(runner, "get_store", lambda knowledge: _FakeStore())
     pr = PRRef(repo="o/r", number=1, url="u")
-    assert runner.build_knowledge(pr, "", runner._DEFAULT_API) == ""
+    assert runner.build_knowledge(pr, "", runner._DEFAULT_API, KnowledgeConfig()) == ""
 
 
 def test_cmd_review_success(monkeypatch):
@@ -261,13 +280,6 @@ def test_sidecar_query_handles_missing_results(monkeypatch):
     assert runner._sidecar_query("http://f", "", "o/r", [], "") == []
 
 
-def test_local_query_delegates_to_retrieve(monkeypatch):
-    import sidecar.retrieve as retrieve
-
-    monkeypatch.setattr(retrieve, "query", lambda *a: [{"text": "y"}])
-    assert runner._local_query("o/r", [], "")[0]["text"] == "y"
-
-
 def test_review_wires_config_to_backend(monkeypatch, tmp_path):
     cfg = tmp_path / ".fuko.toml"
     cfg.write_text(
@@ -277,7 +289,7 @@ def test_review_wires_config_to_backend(monkeypatch, tmp_path):
     )
     monkeypatch.setenv("GITHUB_TOKEN", "ghtok")
     monkeypatch.setenv("ANTHROPIC_KEY", "antkey")
-    monkeypatch.setattr(runner, "build_knowledge", lambda pr, token, api: "- kb item")
+    monkeypatch.setattr(runner, "build_knowledge", lambda pr, token, api, store: "- kb item")
 
     seen = {}
 
@@ -307,7 +319,7 @@ def test_review_wires_config_to_backend(monkeypatch, tmp_path):
 def test_review_swallows_unimplemented_normalize(monkeypatch, tmp_path):
     cfg = tmp_path / ".fuko.toml"
     cfg.write_text('[review.model]\nprovider = "ollama"\nname = "x"\n', encoding="utf-8")
-    monkeypatch.setattr(runner, "build_knowledge", lambda pr, token, api: "")
+    monkeypatch.setattr(runner, "build_knowledge", lambda pr, token, api, store: "")
 
     class FakeBackend:
         def build_env(self, preset, model, knowledge, tools):
