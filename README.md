@@ -1,203 +1,181 @@
 # fuko-pr
 
-![CI](https://github.com/<OWNER>/fuko-pr/actions/workflows/ci.yml/badge.svg)
-[![coverage](https://img.shields.io/badge/coverage-%E2%89%A580%25-success)](#contributing)
+![CI](https://github.com/lemehmet/fuko-pr/actions/workflows/ci.yml/badge.svg)
+[![coverage](https://img.shields.io/badge/coverage-%E2%89%A580%25-success)](./CONTRIBUTING.md)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](./LICENSE)
 
-A thin RAG **knowledge sidecar** for [PR-Agent](https://github.com/The-PR-Agent/pr-agent).
+**A vendor-neutral layer over PR review bots, with a knowledge base you own.**
 
-fuko gives PR-Agent a repo-specific memory: it ingests learnings (from `/remember`
-commands, resolved review threads, and your docs/ADRs) into a pgvector store, and
-serves the most relevant ones into PR-Agent's `extra_instructions` on each PR review.
+Closed reviewers (CodeRabbit, Copilot) give sustained quality, but their
+performance and rate limits are volatile and their closed nature makes switching
+costly. fuko-pr puts a thin, swappable layer in front of an open reviewer
+([PR-Agent](https://github.com/the-pr-agent/pr-agent) today; more later) so you
+can:
 
-PR-Agent stays the reviewer; fuko just gives it memory. PR-Agent chats with
-**GLM-5.2 via z.ai**; fuko pulls embeddings from any OpenAI-compatible source
-(default: a local [Ollama](https://ollama.com) model, since z.ai exposes no
-`/embeddings` endpoint).
+- **choose your review model/provider** (z.ai/GLM, Anthropic, Ollama, …) with one
+  config edit — no relearning each bot's settings,
+- **own your knowledge base** — repo-specific learnings live in *your* store
+  (Postgres or a sqlite-vec file in your own S3/R2 bucket) and survive switching
+  the reviewer or the model underneath,
+- **read every reviewer's output as one schema** — `fuko signals` normalizes
+  PR-Agent, Copilot, and CodeRabbit findings into a single deterministic format.
 
-## Status
-
-- [x] Sidecar: FastAPI over pgvector (`/ingest`, `/query`, `/forget`, `/healthz`)
-- [x] CLI: `serve`, `ingest-docs`, `query`, `forget`, `retrieve`
-- [x] z.ai-compatible embeddings via any OpenAI-compatible `/embeddings` (default: local Ollama `bge-m3`)
-- [x] Path A review workflow (GitHub Action pre-step → PR-Agent)
-- [x] `/remember` + `/forget` on `issue_comment`
-- [x] Resolved-thread capture (GraphQL scheduled sweep)
+It's [Terraform](https://terraform.io) for review bots: a uniform config + a
+driver per backend, plus a portable knowledge base.
 
 ## How it works
 
 ```
- INGEST                         STORE                    RETRIEVE & INJECT
- /remember cmds   ┐          ┌──────────────┐         ┌────────────────────────┐
- resolved threads │  embed → │  pgvector    │ ← query │ on PR review:          │
- docs / ADRs      ┘          │  + metadata  │         │ top-k learnings        │
-                             └──────────────┘         │ → PR-Agent extra_instr │
+ .fuko.toml ──► fuko review ──────────────────────────────────────────────┐
+ (backend +     1. retrieve repo knowledge  ── your Store (pgvector|sqlite-vec)
+  model +       2. translate config ► backend env        (Postgres | S3/R2 file)
+  keys via      3. invoke the reviewer (PR-Agent, in Docker)
+  env)          4. normalize its output ► Review Signal v1  ──► fuko signals (JSON)
+                                                                            ┘
+ KNOWLEDGE IN:  /remember comments · resolved review threads · docs/ADRs ─► Store
 ```
 
-## Quickstart (local)
+The knowledge base is the constant: steps 1–2 don't know which backend/model runs
+in 3–4, and only the driver knows how a given reviewer is configured and parsed.
 
-1. **Run pgvector**
+## Quickstart (local, fully offline)
 
-   ```bash
-   docker run -d --name fuko-pg -p 5432:5432 \
-     -e POSTGRES_USER=fuko -e POSTGRES_PASSWORD=secret -e POSTGRES_DB=fuko \
-     pgvector/pgvector:pg16
-   ```
+Reviews a PR on your machine using a local Ollama model and a local knowledge
+file — no paid APIs, no server.
 
-2. **Run an embeddings model** (default: Ollama with `bge-m3`)
+1. **Install** (with the server-free store extra):
 
    ```bash
-   ollama pull bge-m3
+   pip install -e ".[sqlite]"        # or: pip install "fuko-pr[sqlite]" once published
    ```
 
-   z.ai has no embeddings endpoint, so use a local model or point `FUKO_EMBED_BASE_URL`
-   at any OpenAI-compatible provider (see `.env.example`).
-
-3. **Configure**
+2. **Pull a local model for embeddings** (the knowledge base) and, optionally, for
+   the review itself:
 
    ```bash
-   cp .env.example .env
-   # set FUKO_DATABASE_URL (embeddings default to local Ollama)
+   ollama pull bge-m3                 # embeddings
+   ollama pull qwen2.5-coder:32b      # a local review model (optional)
    ```
 
-4. **Install**
+3. **Configure** — copy the example and pick a provider:
 
    ```bash
-   pip install -e ".[dev]"
+   cp .fuko.toml.example .fuko.toml
    ```
 
-5. **Seed knowledge from your docs**
+   ```toml
+   [review]
+   backend = "pr-agent"
+   # PR-Agent runs from its Docker image (it is not pip-installable):
+   image = "codiumai/pr-agent:latest"   # or your pinned ghcr.io/OWNER/pr-agent:0.36.1
+
+   [review.model]
+   provider = "ollama"                  # zai-coding | anthropic | openai | ollama
+   name = "qwen2.5-coder:32b"
+   base_url = "http://host.docker.internal:11434"  # reach host Ollama from the container
+
+   [knowledge]
+   store = "sqlite-vec"
+   [knowledge.object_store]
+   backend = "file"
+   key = ".fuko/kb.db"                  # a local file; use s3/r2 for CI runners
+
+   [embedding]
+   provider = "ollama"
+   model = "bge-m3"
+   base_url = "http://localhost:11434/v1"
+   ```
+
+4. **Seed knowledge** and **review a PR**:
 
    ```bash
-   fuko ingest-docs docs/architecture.md 'ADR/*.md' --repo owner/repo
+   fuko ingest-docs docs/*.md --repo owner/repo      # optional: seed from docs
+   export GITHUB_TOKEN=...                            # a token that can comment
+   fuko review --pr-url https://github.com/owner/repo/pull/123
+   fuko signals --pr-url https://github.com/owner/repo/pull/123   # findings as JSON
    ```
 
-6. **Query**
+Switching the review model later is two lines in `.fuko.toml` plus the matching
+key secret — e.g. `provider = "anthropic"`, `name = "claude-sonnet-4-6"`,
+`ANTHROPIC_KEY=…`. No other changes.
 
-   ```bash
-   fuko query --repo owner/repo --file src/auth/login.ts --file src/auth/session.ts
-   ```
+## Deploying as a GitHub Action
 
-7. **Run the sidecar**
+Copy `workflows/pr-review.yml` into your app repo as
+`.github/workflows/pr-review.yml`, commit a `.fuko.toml`, and add the secrets your
+config needs (the model provider's key, e.g. `ZAI_KEY` or `ANTHROPIC_KEY`; plus
+`FUKO_URL`/`FUKO_TOKEN` if you run a knowledge sidecar). The workflow installs
+fuko-pr and calls `fuko review`; PR-Agent runs from its Docker image, so the
+runner only needs Docker — not a working PR-Agent Python environment.
 
-   ```bash
-   fuko serve          # http://localhost:8000, docs at /docs
-   curl localhost:8000/healthz
-   ```
+Optionally post reviews as a **"Fuko PR Review" GitHub App** instead of
+`github-actions[bot]`: create the App (Pull requests RW, Issues RW, Contents R),
+install it, then set repo **variable** `FUKO_APP_ID` + secret `FUKO_APP_PRIVATE_KEY`.
 
-The schema is created automatically on first connection (see
-`migrations/001_init.sql`). The `embedding` column is sized to whatever the model
-returns (probed at startup). If you change the embedding model to one with a
-different dimension, fuko re-embeds every stored learning and rebuilds the vector
-column/index automatically on the next startup — a one-time, potentially slow
-operation, but no manual migration is needed.
+PR-Agent isn't published as a usable pip package (its pins conflict) and the public
+image lags; `.github/workflows/pr-agent-image.yml` builds a pinned, multi-arch
+`pr-agent` image and pushes it to your GHCR, which you then reference as
+`[review].image`.
 
-## API
+## Deployment modes
 
-| Method | Path       | Body                                                      |
-|--------|------------|-----------------------------------------------------------|
-| POST   | `/ingest`  | `{repo, items:[{text, source, source_url?, file_globs?, topic?}]}` |
-| POST   | `/query`   | `{repo, files:[...], pr_body?, query_text?, top_k?}`      |
-| POST   | `/forget`  | `{repo, id? \| source? \| all?}`                          |
-| GET    | `/healthz` | —                                                         |
+| Mode | Store | Server? | Embeddings | Best for |
+|------|-------|---------|------------|----------|
+| **Homelab / self-host** | Postgres + pgvector | sidecar | local Ollama | a private fleet you control |
+| **Managed DB** | Neon / Supabase pgvector | optional | remote provider | SaaS runners, fine with a DB |
+| **Server-free** | sqlite-vec file in S3/R2 | none | remote provider | SaaS runners, no infra |
 
-Set `FUKO_AUTH_TOKEN` to require `Authorization: Bearer <token>` on requests.
+See [`docs/deployment.md`](docs/deployment.md) for the server-free S3/R2 setup and
+the trade-offs.
 
-## Path A: wiring it into PR-Agent
+## The knowledge base
 
-`workflows/pr-review.yml` is a drop-in workflow that, on each PR:
+Learnings come from three sources and live in your store:
 
-1. fetches the PR's changed files + body via the GitHub API,
-2. asks the fuko sidecar `/query` for relevant learnings,
-3. feeds them into PR-Agent via `pr_reviewer.extra_instructions` /
-   `pr_code_suggestions.extra_instructions` (the no-fork seam), and
-4. runs PR-Agent with GLM-5.2 via z.ai.
+- **`/remember <text>`** on a PR comment — stores a repo learning. Add a trailing
+  `paths: src/**/*.py` line to scope it to files. (`workflows/ingest-comment.yml`)
+- **Resolved review threads** — an hourly sweep keeps the last human comment of
+  each resolved thread as a learning, scoped to its file. (`workflows/sweep-threads.yml`)
+- **Docs / ADRs** — `fuko ingest-docs <globs> --repo owner/repo`.
 
-Deploy it:
+On each review, `fuko review` retrieves the most relevant learnings (semantic
+top-N by cosine distance plus any file-scoped ones matching the changed paths) and
+feeds them to the reviewer. Changing the embedding model re-embeds everything and
+rebuilds the vector index automatically — no manual migration.
 
-1. Copy `workflows/pr-review.yml` into your app repo as
-   `.github/workflows/pr-review.yml`.
-2. Run the fuko sidecar somewhere reachable from your self-hosted runners
-   (`docker/Dockerfile.sidecar`).
-3. Add repo secrets:
-   - `FUKO_URL` — sidecar base URL (e.g. `http://fuko.internal:8000`)
-   - `FUKO_TOKEN` — optional, only if `FUKO_AUTH_TOKEN` is set on the sidecar
-   - `ZAI_KEY` — your z.ai key. The GLM **Coding-plan** subscription is served
-     from the **coding** endpoint (`OPENAI__API_BASE: https://api.z.ai/api/coding/paas/v4`,
-     already set in the workflow); the standard `/api/paas/v4` is pay-per-token.
-4. Optional — post reviews as a **"Fuko PR Review" GitHub App** instead of
-   `github-actions[bot]`: create the App (Pull requests RW, Issues RW, Contents R),
-   install it on the repo, then set repo **variable** `FUKO_APP_ID` and secret
-   `FUKO_APP_PRIVATE_KEY`. (App ID is a *variable* because the `secrets` context is
-   not allowed in step `if:`.) Without these the workflow falls back to the
-   default token.
-5. Tune `runs-on` to match your runner fleet. If the sidecar is briefly
-   unreachable, the workflow logs a warning and reviews without injected knowledge.
+## Reading reviewer output: `fuko signals`
 
-> **PR-Agent settings use dynaconf dunder keys.** Nested settings must be passed
-> as `SECTION__KEY` env vars (e.g. `CONFIG__MODEL`, `OPENAI__API_BASE`,
-> `PR_REVIEWER__EXTRA_INSTRUCTIONS`) — dotted keys like `config.model` are
-> silently ignored. GLM-5.2 also needs `CONFIG__CUSTOM_MODEL_MAX_TOKENS` (it's not
-> in PR-Agent's built-in table) and a raised `CONFIG__AI_TIMEOUT`.
+`fuko signals --pr-url <url>` emits every reviewer's findings on a PR as one
+canonical JSON schema — **fuko Review Signal v1** — so a downstream
+"address-the-reviews" tool reads one shape instead of sniffing each vendor's
+markdown. PR-Agent declares severity/category; Copilot and CodeRabbit are detected
+by author and mapped best-effort (`severity_source` records which). See
+[`docs/review-signal-v1.md`](docs/review-signal-v1.md).
 
-## Interactive commands
+## Optional: the knowledge sidecar
 
-`workflows/pr-command.yml` runs PR-Agent tools on demand from a PR comment —
-`/review`, `/improve`, `/ask <q>`, `/describe`, `/add_docs`, `/update_changelog`,
-`/generate_labels`, `/similar_issue`, `/help`, `/config`. Gated on a repo-trusted
-`author_association` and a job-level same-repo guard (a GitHub-hosted `guard` job
-the self-hosted job `needs:`), so fork PRs never schedule on the self-hosted fleet.
+`fuko serve` runs a small FastAPI service (`/ingest`, `/query`, `/forget`,
+`/healthz`, `/comment`, `/ingest-threads`) over your store — useful when you want a
+shared, always-on knowledge endpoint for a fleet. Set `FUKO_AUTH_TOKEN` to require
+`Authorization: Bearer <token>`. In server-free and managed-DB modes the sidecar is
+optional; `fuko review` talks to the store directly.
 
-## Adding knowledge from PR comments
+## Configuration
 
-`workflows/ingest-comment.yml` listens for PR comments and forwards commands to
-the sidecar's `POST /comment` endpoint:
+- **`.fuko.toml`** (committed, per-repo): backend, model provider, tools, store,
+  embedding. See `.fuko.toml.example`. Secrets are never in this file — each
+  provider preset declares the env var that holds its key.
+- **`FUKO_*` env** (runtime/server settings): `FUKO_DATABASE_URL`, `FUKO_EMBED_*`,
+  `FUKO_AUTH_TOKEN`, etc. See `.env.example`.
 
-- `/remember <text>` — stores a repo learning. Add a trailing
-  `paths: src/**/*.py, tests/*.py` line to scope it to specific files. Reacts 👍.
-- `/forget all` · `/forget source=<docs|remember|resolved_thread>` ·
-  `/forget <id>` — removes learnings. Reacts 🚀 (or 👎 if nothing matched).
-
-Bot comments are ignored (no feedback loops). Drop the file into your app repo as
-`.github/workflows/ingest-comment.yml`; it uses the same `FUKO_URL`/`FUKO_TOKEN`
-secrets as the review workflow.
-
-## Learning from resolved review threads
-
-`workflows/sweep-threads.yml` runs hourly (scheduled workflows run on the default
-branch; also triggerable manually via `workflow_dispatch`). It pulls the resolved
-review threads from the 20 most-recently-updated open PRs via GraphQL and forwards
-them to `POST /ingest-threads`. The sidecar keeps the **last human comment** of
-each resolved thread as a learning (`source=resolved_thread`), scoped to the
-thread's file and linked to the comment permalink. Bot comments (`*[bot]`) are
-excluded; set `FUKO_BOT_LOGIN` to also exclude a non-`[bot]` reviewer app.
-Re-sweeping is a no-op thanks to the `UNIQUE(repo, text, source)` dedup.
-
-## The retrieval flywheel
-
-`/query` does two passes: a **semantic** top-N by cosine distance, plus any
-explicitly **file-scoped** learnings (`file_globs != '{}'`); then filters the
-scoped ones with `fnmatch` against the PR's changed paths, and returns the
-top-k. Repo-global learnings (empty `file_globs`) always pass the filter.
+Design and contracts: [`docs/design.md`](docs/design.md).
 
 ## Contributing
 
-CI runs `ruff check`, `ruff format --check`, and `pytest` with a `--cov-fail-under=80`
-gate over the `sidecar` package (pgvector + Ollama are provisioned in the `test` job).
-
-Local dev:
-
-```bash
-make up                # pgvector + Ollama via docker compose
-make ollama-pull       # pull bge-m3 into the Ollama container
-cp .env.example .env   # set FUKO_DATABASE_URL
-make install
-make test              # pytest + coverage gate
-make lint              # ruff check
-```
-
-All code conventions (coverage ≥ 80%, mandatory docstrings, stdlib-first, etc.) are
-documented in [`AGENTS.md`](./AGENTS.md).
+See [`CONTRIBUTING.md`](CONTRIBUTING.md). In short: `ruff check`, `ruff format
+--check`, and `pytest` (≥ 80% coverage over `sidecar`) must pass; conventions are
+in [`AGENTS.md`](AGENTS.md). Security policy: [`SECURITY.md`](SECURITY.md).
 
 ## License
 
-Apache-2.0
+[Apache-2.0](LICENSE).
