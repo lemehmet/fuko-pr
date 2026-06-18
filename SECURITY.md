@@ -26,6 +26,9 @@ a few days and will coordinate a fix and disclosure timeline with you.
 
 - Fork-PR safety: the provided workflows gate self-hosted jobs behind a same-repo
   guard so fork PRs never run on your runners.
-- Knowledge is attacker-influenceable (via `/remember`), so injected text is
-  treated as untrusted: it is size-bounded and passed through a randomized heredoc
-  delimiter to prevent Actions output injection.
+- Knowledge is attacker-influenceable (via `/remember`), so it is treated as
+  untrusted input to the reviewer. `fuko review` forwards it to the reviewer
+  container through an environment variable — not via GitHub Actions output and not
+  on the command line — so it cannot inject into the Actions runner or process
+  arguments. The amount injected is bounded by the configured retrieval `top_k`.
+  (It does become part of the model's instructions, which is its intended use.)

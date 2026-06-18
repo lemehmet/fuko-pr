@@ -230,7 +230,7 @@ The canonical egress schema. The `address-pr-reviews` consumer reads only this.
   "severity_source": "declared",   // declared | inferred (mapping is lossy; flag it)
   "category": "bug",               // bug | security | perf | style | test | docs | design
   "title": "…", "body": "…",
-  "suggestion": true,              // is there an applyable code block?
+  "suggestion": true,              // is there an applicable code block?
   "thread_url": "…",
   "backend": "pr-agent", "model": "glm-5.2",
   "kb_refs": ["resolved_thread:…"] // which learnings drove this finding

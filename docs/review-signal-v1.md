@@ -20,7 +20,7 @@ A small, stable schema for one PR-review finding. Every reviewer fuko knows abou
 | `category` | enum | `bug` \| `security` \| `perf` \| `style` \| `test` \| `docs` \| `design`. |
 | `title` | string | Short headline. |
 | `body` | string | Full finding text (the human-facing comment). |
-| `suggestion` | bool | Whether the finding carries an applyable code suggestion. |
+| `suggestion` | bool | Whether the finding carries an applicable code suggestion. |
 | `thread_url` | string \| null | Where to reply / resolve. |
 | `backend` | string | `pr-agent` \| `copilot` \| `coderabbit`. |
 | `model` | string | Review model id when known (e.g. `anthropic/claude-sonnet-4-6`), else `""`. |
