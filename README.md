@@ -85,10 +85,11 @@ PR-Agent stays the reviewer; fuko just gives it memory. PR-Agent chats with
    ```
 
 The schema is created automatically on first connection (see
-`migrations/001_init.sql`). The `embedding` column is `vector(1024)` to match
-Ollama `bge-m3`; if you change the embedding model, update both `FUKO_EMBED_DIM`
-**and** the column dimension (drop & recreate the table — the migration uses
-`IF NOT EXISTS` and won't alter an existing column).
+`migrations/001_init.sql`). The `embedding` column is sized to whatever the model
+returns (probed at startup). If you change the embedding model to one with a
+different dimension, fuko re-embeds every stored learning and rebuilds the vector
+column/index automatically on the next startup — a one-time, potentially slow
+operation, but no manual migration is needed.
 
 ## API
 

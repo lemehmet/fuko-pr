@@ -18,9 +18,10 @@ endpoint (default: local Ollama `bge-m3`).
   Private helpers (leading underscore) and code under `tests/` are exempt.
 - **No inline comments** unless explicitly requested. Prefer self-documenting code.
 - **Stdlib-first.** Only add a dependency when the stdlib genuinely cannot do it.
-- **Keep model and migration in sync.** If the embedding dimension changes, update
-  both `FUKO_EMBED_DIM` and the `vector()` column in `migrations/001_init.sql`
-  (drop & recreate the table — the migration is `IF NOT EXISTS`).
+- **Embedding-dimension changes are handled automatically.** If the embedding model's
+  dimension changes, the store re-embeds every learning and rebuilds the vector
+  column/table on next startup (Postgres) or next access (sqlite-vec) — a one-time,
+  potentially slow cost. Do not reintroduce a manual drop-&-recreate step.
 - **Embeddings are provider-agnostic.** z.ai exposes no `/embeddings` endpoint, so
   embeddings always go through an OpenAI-compatible HTTP endpoint. Chat (PR-Agent)
   is configured separately.

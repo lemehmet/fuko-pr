@@ -36,7 +36,7 @@ def ingest(repo: str, items: list[IngestItem]) -> tuple[int, int]:
     inserted = 0
     skipped = 0
     with db() as conn:
-        for item, emb in zip(items, embeddings):
+        for item, emb in zip(items, embeddings, strict=True):
             cur = conn.execute(
                 _INSERT_SQL,
                 (

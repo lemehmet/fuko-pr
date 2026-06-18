@@ -34,13 +34,8 @@ def _migration_sql(dim: int) -> list[str]:
     return [s.strip() for s in sql.split(";") if s.strip()]
 
 
-def _verify_embed_dim(conn, dim: int) -> None:
-    """Raise if the existing ``embedding`` column dimension differs from ``dim``.
-
-    pgvector encodes the dimension in ``atttypmod``; a mismatch means the table
-    predates the current model and inserts would fail at runtime, so we fail
-    loudly at startup instead with a clear remediation.
-    """
+def _existing_embed_dim(conn) -> int | None:
+    """Return the current ``embedding`` column dimension (pgvector ``atttypmod``)."""
     row = conn.execute(
         """
         SELECT a.atttypmod
@@ -49,12 +44,44 @@ def _verify_embed_dim(conn, dim: int) -> None:
         WHERE c.relname = 'learnings' AND a.attname = 'embedding'
         """
     ).fetchone()
-    if row and row[0] not in (None, -1) and row[0] != dim:
-        raise RuntimeError(
-            f"learnings.embedding is vector({row[0]}) but the model returns {dim}-dim "
-            "vectors. The embedding model changed; drop & recreate the learnings table "
-            "(the migration is IF NOT EXISTS and won't alter an existing column)."
+    if not row or row[0] in (None, -1):
+        return None
+    return row[0]
+
+
+def _ensure_embed_dim(conn, dim: int) -> None:
+    """Migrate the ``embedding`` column to ``dim`` if the model's dimension changed.
+
+    pgvector encodes the dimension in ``atttypmod``. When it differs, the stored
+    vectors were produced by a different model and cannot be reused, so every
+    learning is re-embedded with the current model and the column + HNSW index are
+    rebuilt at the new dimension (a one-time, potentially slow startup cost).
+    """
+    existing = _existing_embed_dim(conn)
+    if existing is None or existing == dim:
+        return
+    _migrate_embed_dim(conn, dim)
+
+
+def _migrate_embed_dim(conn, dim: int) -> None:
+    """Re-embed every learning and rebuild the ``embedding`` column + index at ``dim``."""
+    from .embed import get_embedder
+
+    rows = conn.execute("SELECT id, text FROM learnings").fetchall()
+    embeddings = get_embedder().embed([text for _, text in rows]) if rows else []
+
+    conn.execute("DROP INDEX IF EXISTS learnings_embedding_idx")
+    conn.execute("ALTER TABLE learnings DROP COLUMN embedding")
+    conn.execute(f"ALTER TABLE learnings ADD COLUMN embedding vector({dim})")
+    for (row_id, _text), emb in zip(rows, embeddings, strict=True):
+        conn.execute(
+            "UPDATE learnings SET embedding = %s::vector WHERE id = %s",
+            (vector_literal(emb), row_id),
         )
+    conn.execute("ALTER TABLE learnings ALTER COLUMN embedding SET NOT NULL")
+    conn.execute(
+        "CREATE INDEX learnings_embedding_idx ON learnings USING hnsw (embedding vector_cosine_ops)"
+    )
 
 
 def _close_pool() -> None:
@@ -86,7 +113,7 @@ def get_pool() -> ConnectionPool:
         with _pool.connection() as conn:
             for stmt in _migration_sql(dim):
                 conn.execute(stmt)
-            _verify_embed_dim(conn, dim)
+            _ensure_embed_dim(conn, dim)
             register_vector(conn)
         atexit.register(_close_pool)
     return _pool

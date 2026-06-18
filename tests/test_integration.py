@@ -130,6 +130,26 @@ def test_comment_remember_and_forget():
     assert ignored.json() == {"action": "ignored"}
 
 
+def test_pg_migrate_embed_dim_rebuilds_column():
+    from sidecar import ingest as I
+    from sidecar import retrieve
+    from sidecar.db import _existing_embed_dim, _migrate_embed_dim, db
+    from sidecar.embed import get_embedder
+    from sidecar.models import IngestItem
+
+    dim = get_embedder().probe_dim()
+    I.ingest(TEST_REPO, [IngestItem(text="a rule that must survive re-embedding", source="docs")])
+
+    # exercise the full migration SQL (drop/add column, re-embed every row, rebuild
+    # the HNSW index); migrating to the same dim keeps the test self-contained.
+    with db() as conn:
+        _migrate_embed_dim(conn, dim)
+        assert _existing_embed_dim(conn) == dim
+
+    results = retrieve.query(TEST_REPO, ["x.py"], query_text="rule survive re-embedding")
+    assert any("survive re-embedding" in r["text"] for r in results)
+
+
 def test_cli_query_runs(capsys, monkeypatch):
     from sidecar.cli import main
 

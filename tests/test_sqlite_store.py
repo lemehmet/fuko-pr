@@ -111,6 +111,74 @@ def test_query_on_empty_store(store):
     assert store.query("o/r", [], query_text="auth") == []
 
 
+class _Embedder4:
+    """A different embedding model: dimension 4 (adds a constant 4th component)."""
+
+    def embed(self, texts):
+        return [[*_vec(t), 0.5] for t in texts]
+
+    def embed_one(self, text):
+        return self.embed([text])[0]
+
+    def probe_dim(self):
+        return 4
+
+
+def _file_cfg(tmp_path):
+    return KnowledgeConfig(
+        store="sqlite-vec",
+        object_store=ObjectStoreConfig(backend="file", key=str(tmp_path / "kb.db")),
+    )
+
+
+def test_dim_migration_reembeds_and_persists(tmp_path, monkeypatch):
+    cfg = _file_cfg(tmp_path)
+    monkeypatch.setattr(ss, "get_embedder", lambda: _FakeEmbedder())  # dim 3
+    ss.SqliteVecStore(cfg).ingest("o/r", [IngestItem(text="auth flow", source="docs")])
+
+    # the embedding model changes (dim 3 -> 4): a query must auto re-embed + rebuild
+    monkeypatch.setattr(ss, "get_embedder", lambda: _Embedder4())
+    res = ss.SqliteVecStore(cfg).query("o/r", [], query_text="auth")
+    assert [r["text"] for r in res] == ["auth flow"]
+
+    # the re-embed was persisted: a fresh store at dim 4 works without re-migrating,
+    # and writes still succeed afterward
+    s3 = ss.SqliteVecStore(cfg)
+    assert s3.ingest("o/r", [IngestItem(text="db notes", source="docs")]) == (1, 0)
+    assert {r["text"] for r in s3.query("o/r", [], query_text="auth db")} >= {
+        "auth flow",
+        "db notes",
+    }
+
+
+def test_dim_migration_on_empty_store(tmp_path, monkeypatch):
+    cfg = _file_cfg(tmp_path)
+    monkeypatch.setattr(ss, "get_embedder", lambda: _FakeEmbedder())  # dim 3
+    s = ss.SqliteVecStore(cfg)
+    s.ingest("o/r", [IngestItem(text="auth", source="docs")])  # persist a dim-3 file
+    s.forget("o/r", all=True)  # 0 rows remain, but the file + meta(dim=3) persist
+    monkeypatch.setattr(ss, "get_embedder", lambda: _Embedder4())  # dim 4, nothing to re-embed
+    assert ss.SqliteVecStore(cfg).query("o/r", [], query_text="auth") == []
+
+
+def test_read_migration_persist_tolerates_race(tmp_path, monkeypatch):
+    mem = _MemObj()
+    cfg = _file_cfg(tmp_path)
+    monkeypatch.setattr(ss, "get_embedder", lambda: _FakeEmbedder())  # dim 3
+    s1 = ss.SqliteVecStore(cfg)
+    s1._obj = mem
+    s1.ingest("o/r", [IngestItem(text="auth", source="docs")])
+
+    # a later process sees the new model (dim 4); its read migrates, and the
+    # migration-persist loses a race -> swallowed, results still correct
+    monkeypatch.setattr(ss, "get_embedder", lambda: _Embedder4())
+    s2 = ss.SqliteVecStore(cfg)  # fresh instance -> re-probes dim 4
+    s2._obj = mem
+    mem.fail_next_saves = 1
+    res = s2.query("o/r", [], query_text="auth")
+    assert [r["text"] for r in res] == ["auth"]
+
+
 def test_expires_at_normalization_and_filtering(store):
     from datetime import datetime, timedelta, timezone
 
