@@ -41,6 +41,15 @@ def test_file_store_stale_token_conflict(tmp_path):
         store.save(b"v2", "999")
 
 
+def test_file_store_delete_is_conflict(tmp_path):
+    path = tmp_path / "kb.db"
+    store = FileObjectStore(str(path))
+    token = store.save(b"v1", None)
+    path.unlink()  # an intervening delete is a change
+    with pytest.raises(PreconditionFailed):
+        store.save(b"v2", token)
+
+
 class _FakeClientError(Exception):
     def __init__(self, code, status):
         self.response = {"Error": {"Code": code}, "ResponseMetadata": {"HTTPStatusCode": status}}
@@ -112,6 +121,29 @@ def test_s3_store_save_reraises_unexpected_error():
 
     with pytest.raises(_FakeClientError):
         S3ObjectStore(_C(), "b", "k").save(b"x", None)
+
+
+def test_s3_store_load_closes_body():
+    class _Body:
+        def __init__(self, data):
+            self._b = io.BytesIO(data)
+            self.closed = False
+
+        def read(self):
+            return self._b.read()
+
+        def close(self):
+            self.closed = True
+
+    body = _Body(b"data")
+
+    class _C:
+        def get_object(self, **k):
+            return {"Body": body, "ETag": '"e"'}
+
+    data, etag = S3ObjectStore(_C(), "b", "k").load()
+    assert (data, etag) == (b"data", '"e"')
+    assert body.closed  # StreamingBody must be closed to avoid connection leaks
 
 
 def test_make_object_store_file(tmp_path):

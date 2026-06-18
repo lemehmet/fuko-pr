@@ -111,6 +111,25 @@ def test_query_on_empty_store(store):
     assert store.query("o/r", [], query_text="auth") == []
 
 
+def test_expires_at_normalization_and_filtering(store):
+    from datetime import datetime, timedelta, timezone
+
+    past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    store.ingest(
+        "o/r",
+        [
+            IngestItem(text="auth expired", source="docs", expires_at=past),
+            IngestItem(text="auth fresh", source="docs", expires_at=future),
+            IngestItem(text="auth garbage", source="docs", expires_at="not-a-date"),
+        ],
+    )
+    texts = {r["text"] for r in store.query("o/r", [], query_text="auth")}
+    assert "auth expired" not in texts  # past expiry filtered out
+    assert "auth fresh" in texts  # future expiry kept
+    assert "auth garbage" in texts  # unparseable -> stored NULL -> never expires
+
+
 def test_forget_by_source_id_all(store):
     store.ingest(
         "o/r",

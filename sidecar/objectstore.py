@@ -38,7 +38,9 @@ class FileObjectStore:
         exists = self._path.exists()
         if token is None and exists:
             raise PreconditionFailed("object already exists")
-        if token is not None and exists and str(self._path.stat().st_mtime_ns) != token:
+        if token is not None and not exists:
+            raise PreconditionFailed("object deleted since load")
+        if token is not None and str(self._path.stat().st_mtime_ns) != token:
             raise PreconditionFailed("object changed since load")
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_bytes(data)
@@ -73,7 +75,12 @@ class S3ObjectStore:
             if "NoSuchKey" in code or "404" in code:
                 return None, None
             raise
-        return resp["Body"].read(), resp["ETag"]
+        body = resp["Body"]
+        try:
+            data = body.read()
+        finally:
+            body.close()
+        return data, resp["ETag"]
 
     def save(self, data: bytes, token: str | None) -> str:
         """Conditionally put the object: create-only when new, If-Match otherwise."""

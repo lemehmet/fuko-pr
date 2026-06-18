@@ -26,6 +26,7 @@ from pathlib import Path
 from .config import settings
 from .embed import get_embedder
 from .fukoconfig import KnowledgeConfig
+from .ingest import _parse_dt
 from .models import IngestItem
 from .objectstore import PreconditionFailed, make_object_store
 from .retrieve import _build_query
@@ -34,7 +35,19 @@ _MAX_RETRIES = 5
 
 
 def _pack(vec: list[float]) -> bytes:
-    return struct.pack(f"{len(vec)}f", *vec)
+    # Little-endian float32 (sqlite-vec's format), explicit so a db synced across
+    # architectures via object storage is read back consistently.
+    return struct.pack(f"<{len(vec)}f", *vec)
+
+
+def _norm_expires(value: str | None) -> str | None:
+    """Normalize ``expires_at`` to a UTC ISO-8601 string (NULL on parse failure).
+
+    Matches the Postgres store, so the lexicographic ``expires_at > now`` filter
+    is correct regardless of what a client supplied.
+    """
+    dt = _parse_dt(value)
+    return dt.isoformat() if dt else None
 
 
 class SqliteVecStore:
@@ -130,7 +143,7 @@ class SqliteVecStore:
                         json.dumps(item.file_globs),
                         item.topic,
                         item.origin_user,
-                        item.expires_at,
+                        _norm_expires(item.expires_at),
                     ),
                 )
                 if cur.rowcount != 1:

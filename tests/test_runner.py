@@ -6,6 +6,7 @@ import pytest
 from sidecar import runner
 from sidecar.backends import pragent
 from sidecar.backends.base import InvokeResult, PRRef
+from sidecar.fukoconfig import KnowledgeConfig
 
 
 class _Resp:
@@ -150,21 +151,25 @@ def test_build_knowledge_uses_sidecar_when_url_set(monkeypatch):
         ]
 
     monkeypatch.setattr(runner, "_sidecar_query", fake_sidecar)
-    store = _FakeStore()  # must NOT be consulted when a sidecar URL is set
+
+    def _no_store(knowledge):
+        raise AssertionError("the local store must not be built when a sidecar is used")
+
+    monkeypatch.setattr(runner, "get_store", _no_store)  # lazy: never consulted here
     pr = PRRef(repo="o/r", number=1, url="u")
-    md = runner.build_knowledge(pr, "tok", runner._DEFAULT_API, store)
+    md = runner.build_knowledge(pr, "tok", runner._DEFAULT_API, KnowledgeConfig())
 
     assert captured["url"] == "http://fuko.internal:8000"
     assert "always validate input" in md
-    assert store.calls == []
 
 
 def test_build_knowledge_uses_local_store_without_url(monkeypatch):
     monkeypatch.delenv("FUKO_URL", raising=False)
     monkeypatch.setattr(runner, "_fetch_pr_context", lambda pr, t, a: (["x.py"], ""))
     store = _FakeStore(results=[])
+    monkeypatch.setattr(runner, "get_store", lambda knowledge: store)
     pr = PRRef(repo="o/r", number=1, url="u")
-    assert runner.build_knowledge(pr, "", runner._DEFAULT_API, store) == ""
+    assert runner.build_knowledge(pr, "", runner._DEFAULT_API, KnowledgeConfig()) == ""
     assert store.calls == [("o/r", ["x.py"])]
 
 
@@ -175,8 +180,9 @@ def test_build_knowledge_degrades_on_error(monkeypatch):
         raise RuntimeError("github down")
 
     monkeypatch.setattr(runner, "_fetch_pr_context", boom)
+    monkeypatch.setattr(runner, "get_store", lambda knowledge: _FakeStore())
     pr = PRRef(repo="o/r", number=1, url="u")
-    assert runner.build_knowledge(pr, "", runner._DEFAULT_API, _FakeStore()) == ""
+    assert runner.build_knowledge(pr, "", runner._DEFAULT_API, KnowledgeConfig()) == ""
 
 
 def test_cmd_review_success(monkeypatch):

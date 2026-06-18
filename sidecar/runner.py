@@ -21,8 +21,8 @@ import sys
 import httpx
 
 from .backends import get_backend
-from .backends.base import InvokeResult, PRRef, Store
-from .fukoconfig import DEFAULT_CONFIG_PATH, FukoConfig, load_config
+from .backends.base import InvokeResult, PRRef
+from .fukoconfig import DEFAULT_CONFIG_PATH, FukoConfig, KnowledgeConfig, load_config
 from .presets import get_preset
 from .stores import get_store
 
@@ -112,11 +112,12 @@ def _sidecar_query(url: str, token: str, repo: str, files: list[str], pr_body: s
     return results if isinstance(results, list) else []
 
 
-def build_knowledge(pr: PRRef, token: str, api_url: str, store: Store) -> str:
+def build_knowledge(pr: PRRef, token: str, api_url: str, knowledge: KnowledgeConfig) -> str:
     """Return the formatted knowledge block for ``pr``, or ``""`` on any failure.
 
     Uses a running sidecar when ``FUKO_URL`` is set (the homelab deployment),
-    otherwise queries the configured local store directly.
+    otherwise queries the configured local store. The local store is constructed
+    lazily, so a ``sqlite-vec`` config never has to resolve when the sidecar is used.
     """
     fuko_url = os.environ.get("FUKO_URL", "").strip()
     fuko_token = os.environ.get("FUKO_TOKEN", "")
@@ -125,7 +126,7 @@ def build_knowledge(pr: PRRef, token: str, api_url: str, store: Store) -> str:
         if fuko_url:
             results = _sidecar_query(fuko_url, fuko_token, pr.repo, files, pr_body)
         else:
-            results = store.query(pr.repo, files, pr_body, None, None)
+            results = get_store(knowledge).query(pr.repo, files, pr_body, None, None)
     except Exception as e:
         print(f"fuko: knowledge build failed, proceeding without it: {e}", file=sys.stderr)
         return ""
@@ -152,8 +153,7 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
 
     backend = get_backend(cfg.review.backend, cfg.review)
     preset = get_preset(cfg.review.model.provider)
-    store = get_store(cfg.knowledge)
-    knowledge = build_knowledge(pr, token, api_url, store)
+    knowledge = build_knowledge(pr, token, api_url, cfg.knowledge)
 
     env = backend.build_env(preset, cfg.review.model, knowledge, cfg.review.tools)
     env.update(_github_env(token))
