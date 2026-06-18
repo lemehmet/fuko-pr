@@ -32,18 +32,21 @@ def main() -> None:
     p_query.add_argument("--file", action="append", default=[], help="changed file path")
     p_query.add_argument("--text", help="explicit query text")
     p_query.add_argument("--top-k", type=int, default=None)
+    p_query.add_argument("--config", default=".fuko.toml", help="path to .fuko.toml")
 
     p_docs = sub.add_parser("ingest-docs", help="ingest markdown/text docs as learnings")
     p_docs.add_argument("paths", nargs="+", help="files or globs to ingest")
     p_docs.add_argument("--repo", required=True)
     p_docs.add_argument("--glob", action="append", default=[], help="file_globs to attach")
     p_docs.add_argument("--source-url", default=None)
+    p_docs.add_argument("--config", default=".fuko.toml", help="path to .fuko.toml")
 
     p_forget = sub.add_parser("forget", help="remove learnings")
     p_forget.add_argument("--repo", required=True)
     p_forget.add_argument("--id", default=None)
     p_forget.add_argument("--source", default=None)
     p_forget.add_argument("--all", action="store_true")
+    p_forget.add_argument("--config", default=".fuko.toml", help="path to .fuko.toml")
 
     p_retrieve = sub.add_parser("retrieve", help="build extra_instructions markdown for PR-Agent")
     p_retrieve.add_argument("--repo", required=True)
@@ -52,6 +55,7 @@ def main() -> None:
         "--files-file", default=None, help="newline-separated paths file (default: stdin)"
     )
     p_retrieve.add_argument("--pr-body", default=None)
+    p_retrieve.add_argument("--config", default=".fuko.toml", help="path to .fuko.toml")
 
     args = parser.parse_args()
     {
@@ -98,6 +102,14 @@ def _cmd_signals(args) -> None:
     print(json.dumps([s.model_dump() for s in signals], indent=2))
 
 
+def _store(config_path: str):
+    """Return the knowledge store selected by the config at ``config_path``."""
+    from .fukoconfig import load_config
+    from .stores import get_store
+
+    return get_store(load_config(config_path).knowledge)
+
+
 def _cmd_serve(_args) -> None:
     import uvicorn
 
@@ -107,9 +119,7 @@ def _cmd_serve(_args) -> None:
 
 
 def _cmd_query(args) -> None:
-    from . import retrieve as R
-
-    results = R.query(args.repo, args.file, None, args.text, args.top_k)
+    results = _store(args.config).query(args.repo, args.file, None, args.text, args.top_k)
     if not results:
         print("(no learnings matched)")
         return
@@ -150,7 +160,6 @@ def _collect_files(patterns: list[str]) -> list[str]:
 
 
 def _cmd_ingest_docs(args) -> None:
-    from . import ingest as I
     from . import models as M
 
     files = _collect_files(args.paths)
@@ -183,44 +192,26 @@ def _cmd_ingest_docs(args) -> None:
         print("no chunks produced", file=sys.stderr)
         return
 
-    inserted, skipped = I.ingest(args.repo, items)
+    inserted, skipped = _store(args.config).ingest(args.repo, items)
     print(f"ingested {inserted} chunks (skipped {skipped}) from {len(files)} file(s)")
 
 
 def _cmd_forget(args) -> None:
-    from .db import db
-
-    if args.id:
-        stmt, params = (
-            "DELETE FROM learnings WHERE repo = %s AND id = %s",
-            (args.repo, args.id),
-        )
-    elif args.source:
-        stmt, params = (
-            "DELETE FROM learnings WHERE repo = %s AND source = %s",
-            (args.repo, args.source),
-        )
-    elif args.all:
-        stmt, params = "DELETE FROM learnings WHERE repo = %s", (args.repo,)
-    else:
+    if not (args.id or args.source or args.all):
         print("provide --id, --source, or --all", file=sys.stderr)
         sys.exit(2)
-
-    with db() as conn:
-        cur = conn.execute(stmt, params)
-    print(f"deleted {cur.rowcount}")
+    deleted = _store(args.config).forget(args.repo, id=args.id, source=args.source, all=args.all)
+    print(f"deleted {deleted}")
 
 
 def _cmd_retrieve(args) -> None:
-    from . import retrieve as R
-
     if args.files_file:
         raw = Path(args.files_file).read_text().splitlines()
     else:
         raw = sys.stdin.read().splitlines()
     files = [line.strip() for line in raw if line.strip()]
 
-    results = R.query(args.repo, files, args.pr_body, None, None)
+    results = _store(args.config).query(args.repo, files, args.pr_body, None, None)
     md = format_extra_instructions(results)
     Path(args.out).write_text(md, encoding="utf-8")
     print(md)

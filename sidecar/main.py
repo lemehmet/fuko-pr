@@ -2,13 +2,16 @@
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 
-from . import ingest as ingest_mod
 from . import models
-from . import retrieve
 from . import threads as threads_mod
 from .config import settings
+from .fukoconfig import load_config
+from .stores import get_store
 
 app = FastAPI(title="fuko-pr sidecar", version="0.1.0")
+
+# The sidecar serves one store, selected by .fuko.toml (defaults to Postgres).
+_store = get_store(load_config().knowledge)
 
 
 def _auth(authorization: str | None = Header(default=None)) -> None:
@@ -26,14 +29,14 @@ def healthz() -> dict:
 @app.post("/ingest", response_model=models.IngestResponse, dependencies=[Depends(_auth)])
 def ingest_endpoint(req: models.IngestRequest) -> dict:
     """Store learnings for a repository."""
-    inserted, skipped = ingest_mod.ingest(req.repo, req.items)
+    inserted, skipped = _store.ingest(req.repo, req.items)
     return {"inserted": inserted, "skipped": skipped}
 
 
 @app.post("/query", response_model=models.QueryResponse, dependencies=[Depends(_auth)])
 def query_endpoint(req: models.QueryRequest) -> dict:
     """Retrieve the most relevant learnings for a pull request."""
-    results = retrieve.query(req.repo, req.files, req.pr_body, req.query_text, req.top_k)
+    results = _store.query(req.repo, req.files, req.pr_body, req.query_text, req.top_k)
     return {"results": results}
 
 
@@ -42,7 +45,7 @@ def forget_endpoint(req: models.ForgetRequest) -> dict:
     """Delete learnings by id, source, or wholesale for a repository."""
     if not (req.id or req.source or req.all):
         raise HTTPException(400, "provide id, source, or all=true")
-    deleted = ingest_mod.forget(req.repo, id=req.id, source=req.source, all_=req.all)
+    deleted = _store.forget(req.repo, id=req.id, source=req.source, all=req.all)
     return {"deleted": deleted}
 
 
@@ -54,7 +57,7 @@ def comment_endpoint(req: models.CommentRequest) -> dict:
     remembered = parse_remember(req.body)
     if remembered is not None:
         text, globs = remembered
-        inserted, skipped = ingest_mod.ingest(
+        inserted, skipped = _store.ingest(
             req.repo,
             [
                 models.IngestItem(
@@ -70,11 +73,11 @@ def comment_endpoint(req: models.CommentRequest) -> dict:
 
     forgotten = parse_forget(req.body)
     if forgotten is not None:
-        deleted = ingest_mod.forget(
+        deleted = _store.forget(
             req.repo,
             id=forgotten.get("id"),
             source=forgotten.get("source"),
-            all_=bool(forgotten.get("all")),
+            all=bool(forgotten.get("all")),
         )
         return {"action": "forget", "deleted": deleted}
 
@@ -89,5 +92,5 @@ def ingest_threads_endpoint(req: models.IngestThreadsRequest) -> dict:
         for it in (threads_mod.select_learning(t, req.bot_login) for t in req.threads)
         if it is not None
     ]
-    inserted, skipped = ingest_mod.ingest(req.repo, items)
+    inserted, skipped = _store.ingest(req.repo, items)
     return {"considered": len(req.threads), "inserted": inserted, "skipped": skipped}
