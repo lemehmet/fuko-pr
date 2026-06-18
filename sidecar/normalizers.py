@@ -136,17 +136,101 @@ def copilot_signal(comment: dict) -> ReviewSignal:
     )
 
 
+_CODERABBIT_LOGIN = "coderabbitai[bot]"
+# A finding's first classification line, e.g. "_⚠️ Potential issue_ | _🔴 Critical_"
+# (an optional effort token may follow). Author alone is not enough -- CodeRabbit
+# also posts chat replies and rate-limit notices, which carry no classification.
+_CR_CLASS_RE = re.compile(r"^_[^_]+_\s*\|\s*_[^_]+_.*$", re.M)
+_CR_TOKEN_RE = re.compile(r"_([^_]+)_")
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.S)
+_CR_SEVERITY = (
+    ("critical", "critical"),
+    ("major", "high"),
+    ("minor", "medium"),
+    ("trivial", "low"),
+)
+
+
+def is_coderabbit_comment(comment: dict) -> bool:
+    """Return whether ``comment`` was authored by CodeRabbit."""
+    return (comment.get("user") or {}).get("login", "").lower() == _CODERABBIT_LOGIN
+
+
+def _cr_classification(body: str) -> list[str] | None:
+    """Return the ``[category, severity, ...]`` tokens of a CodeRabbit finding, if any."""
+    m = _CR_CLASS_RE.search(body or "")
+    return _CR_TOKEN_RE.findall(m.group(0)) if m else None
+
+
+def is_coderabbit_finding(body: str) -> bool:
+    """Return whether a CodeRabbit comment body is an actual finding (vs chat/notice)."""
+    return _cr_classification(body) is not None
+
+
+def _cr_category(token: str) -> Category:
+    t = token.lower()
+    if "security" in t:
+        return "security"
+    if "perf" in t:
+        return "perf"
+    if "nitpick" in t:
+        return "style"
+    if "refactor" in t:
+        return "design"
+    if "typo" in t:
+        return "docs"
+    return "bug"
+
+
+def coderabbit_signal(comment: dict) -> ReviewSignal:
+    """Map one CodeRabbit inline finding to a Review Signal (severity/category declared)."""
+    body = comment.get("body", "") or ""
+    path = comment.get("path")
+    line = comment.get("start_line") or comment.get("line")
+    end_line = comment.get("line") if comment.get("start_line") else None
+
+    tokens = _cr_classification(body) or []
+    category = _cr_category(tokens[0]) if tokens else "bug"
+    severity = next(
+        (s for kw, s in _CR_SEVERITY if len(tokens) > 1 and kw in tokens[1].lower()), None
+    )
+    severity_source = "declared" if severity else "inferred"
+    severity = severity or "medium"
+
+    bold = _BOLD_RE.search(body)
+    title = (bold.group(1).strip() if bold else body.strip().split("\n", 1)[0])[:200]
+
+    return ReviewSignal(
+        id=make_id(path or "", str(line or ""), title),
+        file=path,
+        line=line,
+        end_line=end_line,
+        severity=severity,
+        severity_source=severity_source,
+        category=category,
+        title=title,
+        body=body,
+        suggestion="```suggestion" in body or "Suggested fix" in body,
+        thread_url=comment.get("html_url"),
+        backend="coderabbit",
+        model="",
+    )
+
+
 def collect_signals(comments: list[dict], model: str = "") -> list[ReviewSignal]:
     """Normalize a PR's comments across every recognized reviewer into one list.
 
-    Dispatch is per comment: PR-Agent by format, Copilot by author. Comments from
-    no recognized reviewer are skipped. (CodeRabbit support lands once real samples
-    are available.)
+    Dispatch is per comment: PR-Agent by format, Copilot by author, CodeRabbit by
+    author *and* the presence of a finding classification (its chat replies and
+    rate-limit notices are skipped). Unrecognized comments are skipped.
     """
     out: list[ReviewSignal] = []
     for c in comments:
-        if is_pragent_comment(c.get("body", "")):
+        body = c.get("body", "") or ""
+        if is_pragent_comment(body):
             out.append(pragent_signal(c, model))
         elif is_copilot_comment(c):
             out.append(copilot_signal(c))
+        elif is_coderabbit_comment(c) and is_coderabbit_finding(body):
+            out.append(coderabbit_signal(c))
     return out

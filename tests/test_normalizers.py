@@ -10,8 +10,11 @@ from sidecar.backends import pragent
 from sidecar.backends.base import PRRef
 from sidecar.backends.pragent import PrAgentBackend
 from sidecar.normalizers import (
+    coderabbit_signal,
     collect_signals,
     copilot_signal,
+    is_coderabbit_comment,
+    is_coderabbit_finding,
     is_copilot_comment,
     is_pragent_comment,
     pragent_signal,
@@ -140,6 +143,75 @@ def test_collect_signals_dispatches_per_vendor():
     assert [s.backend for s in signals] == ["pr-agent", "copilot"]
     assert signals[0].severity_source == "declared"
     assert signals[1].severity_source == "inferred"
+
+
+CODERABBIT = {
+    "id": 333,
+    "path": "apps/web/src/hooks/use-webrtc.ts",
+    "line": 87,
+    "start_line": None,
+    "html_url": "https://github.com/o/r/pull/9#discussion_r333",
+    "user": {"login": "coderabbitai[bot]"},
+    "body": (
+        "_⚠️ Potential issue_ | _🔴 Critical_\n\n"
+        "**Make media-resolution gating reactive, or calls can still stall.**\n\n"
+        "`localMediaResolvedRef` updates won't re-run Effect 3.\n\n"
+        "<details>\n<summary>Suggested fix</summary>\n\n```diff\n- a\n+ b\n```\n</details>\n\n"
+        "<!-- This is an auto-generated comment by CodeRabbit -->"
+    ),
+}
+
+CODERABBIT_CHAT = {
+    "id": 334,
+    "user": {"login": "coderabbitai[bot]"},
+    "body": "`@lemehmet`, you're right — my concern was incorrect. Thanks for the clarification.",
+}
+
+
+def test_is_coderabbit_comment_and_finding():
+    assert is_coderabbit_comment(CODERABBIT)
+    assert is_coderabbit_finding(CODERABBIT["body"])
+    # author matches but it's a chat reply, not a finding
+    assert is_coderabbit_comment(CODERABBIT_CHAT)
+    assert not is_coderabbit_finding(CODERABBIT_CHAT["body"])
+    assert not is_coderabbit_comment(COPILOT)
+
+
+def test_coderabbit_signal_declared_fields():
+    sig = coderabbit_signal(CODERABBIT)
+    assert sig.backend == "coderabbit"
+    assert sig.severity == "critical"
+    assert sig.severity_source == "declared"
+    assert sig.category == "bug"  # "Potential issue"
+    assert sig.suggestion is True  # "Suggested fix"
+    assert sig.file == "apps/web/src/hooks/use-webrtc.ts"
+    assert sig.line == 87
+    assert sig.title == "Make media-resolution gating reactive, or calls can still stall."
+
+
+@pytest.mark.parametrize(
+    "cls,severity,category",
+    [
+        ("_⚠️ Potential issue_ | _🟠 Major_ | _⚡ Quick win_", "high", "bug"),
+        ("_⚠️ Potential issue_ | _🟡 Minor_", "medium", "bug"),
+        ("_🧹 Nitpick_ | _🔵 Trivial_", "low", "style"),
+        ("_🛠️ Refactor suggestion_ | _🟠 Major_", "high", "design"),
+        ("_🔒 Security_ | _🔴 Critical_", "critical", "security"),
+        ("_🐢 Performance issue_ | _🟡 Minor_", "medium", "perf"),
+        ("_✏️ Typo_ | _🔵 Trivial_", "low", "docs"),
+    ],
+)
+def test_coderabbit_severity_and_category_mapping(cls, severity, category):
+    c = dict(CODERABBIT, body=f"{cls}\n\n**t**\n\nbody")
+    sig = coderabbit_signal(c)
+    assert sig.severity == severity
+    assert sig.category == category
+    assert sig.severity_source == "declared"
+
+
+def test_collect_signals_includes_coderabbit_findings_only():
+    signals = collect_signals([PRAGENT, COPILOT, CODERABBIT, CODERABBIT_CHAT], model="m")
+    assert [s.backend for s in signals] == ["pr-agent", "copilot", "coderabbit"]
 
 
 def test_normalize_output_returns_only_pragent_signals(monkeypatch):
