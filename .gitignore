@@ -5,6 +5,7 @@ __pycache__/
 !.env.example
 .fuko.toml
 !.fuko.toml.example
+.fuko/
 .venv/
 venv/
 *.egg-info/
