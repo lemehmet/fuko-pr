@@ -1,7 +1,12 @@
-# fuko-pr /remember + /forget workflow.
+# fuko-pr knowledge commands — /remember and /forget from a PR comment.
 #
-# Copy into your app repo as `.github/workflows/ingest-comment.yml`.
-# Listens for PR comments and forwards commands to the fuko sidecar.
+# /remember <text>   store a repo learning (optional trailing `paths: a/**, b.py`)
+# /forget all | /forget source=<docs|remember|resolved_thread> | /forget <id>
+#
+# Forwards the comment to the fuko sidecar's /comment endpoint and reacts on the
+# comment. Reacts as the "Fuko PR Review" GitHub App. PR-Agent slash commands
+# (/review, /improve, ...) are handled separately by pr-command.yml. Copy this
+# file into your app repo as `.github/workflows/ingest-comment.yml`; adjust runs-on.
 
 name: fuko-pr ingest
 
@@ -9,25 +14,75 @@ on:
   issue_comment:
     types: [created]
 
+concurrency:
+  group: fuko-ingest-${{ github.event.comment.id }}
+  cancel-in-progress: false
+
 jobs:
-  handle:
-    # Only repo-trusted authors may mutate the knowledge base: learnings are
-    # injected verbatim into the reviewer LLM, so an untrusted /remember is a
-    # prompt-injection vector and /forget all could wipe the store.
+  # Gate on a GitHub-hosted runner so the self-hosted job below NEVER schedules
+  # for a fork PR (issue_comment fires in the base repo even for forks). Only PR
+  # comments from a repo-trusted author carrying /remember or /forget get past
+  # the `if:`. The author_association gate matters: learnings are injected
+  # verbatim into the reviewer LLM, so an untrusted /remember is a prompt-injection
+  # vector and /forget all could wipe the store.
+  guard:
     if: >
       github.event.issue.pull_request
       && github.event.sender.type != 'Bot'
       && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
-      && (contains(github.event.comment.body, '/remember')
-          || contains(github.event.comment.body, '/forget'))
-    runs-on: self-hosted
+      && (startsWith(github.event.comment.body, '/remember')
+          || startsWith(github.event.comment.body, '/forget'))
+    runs-on: ubuntu-latest
     permissions:
-      issues: write
       pull-requests: read
+    outputs:
+      same_repo: ${{ steps.check.outputs.same_repo }}
     steps:
+      - name: Resolve PR head repo (same-repo only)
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          API: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          api = os.environ["API"]; repo = os.environ["REPO"]; n = os.environ["PR_NUMBER"]
+          req = urllib.request.Request(
+              f"{api}/repos/{repo}/pulls/{n}",
+              headers={"Authorization": "Bearer " + os.environ["GITHUB_TOKEN"],
+                       "Accept": "application/vnd.github+json"},
+          )
+          with urllib.request.urlopen(req, timeout=30) as r:
+              head = (json.load(r).get("head") or {}).get("repo", {}).get("full_name")
+          same = "true" if head == repo else "false"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"same_repo={same}\n")
+          print(f"same-repo PR: {same} (head={head})")
+          PY
+
+  handle:
+    needs: guard
+    if: ${{ needs.guard.outputs.same_repo == 'true' }}
+    runs-on: self-hosted # adjust to a label on your self-hosted runner fleet
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Mint Fuko PR Review app token
+        id: app-token
+        if: ${{ vars.FUKO_APP_ID != '' }}
+        continue-on-error: true # degrade to github-actions[bot] rather than failing the run
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ vars.FUKO_APP_ID }}
+          private-key: ${{ secrets.FUKO_APP_PRIVATE_KEY }}
+
       - name: Handle /remember and /forget
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           FUKO_URL: ${{ secrets.FUKO_URL }}
           FUKO_TOKEN: ${{ secrets.FUKO_TOKEN }}
           COMMENT_BODY: ${{ github.event.comment.body }}
@@ -51,9 +106,15 @@ jobs:
           repo = os.environ["REPO"]
           api = os.environ["API"]
           token = os.environ["GITHUB_TOKEN"]
-          fuko_url = os.environ["FUKO_URL"].rstrip("/")
+          fuko_url = os.environ.get("FUKO_URL", "").rstrip("/")
           fuko_token = os.environ.get("FUKO_TOKEN", "")
           comment_id = os.environ["COMMENT_ID"]
+
+          if not fuko_url:
+              # Degrade gracefully (don't red-X the run) when the sidecar isn't
+              # configured yet — matches the rest of the pilot's posture.
+              print("fuko: FUKO_URL not configured; skipping command", file=sys.stderr)
+              sys.exit(0)
 
           payload = json.dumps({
               "repo": repo,
@@ -67,9 +128,7 @@ jobs:
 
           reaction = "confused"
           try:
-              req = urllib.request.Request(
-                  fuko_url + "/comment", data=payload, headers=headers
-              )
+              req = urllib.request.Request(fuko_url + "/comment", data=payload, headers=headers)
               with urllib.request.urlopen(req, timeout=30) as r:
                   resp = json.load(r)
               action = resp.get("action")
@@ -77,8 +136,6 @@ jobs:
                   reaction = "+1"
               elif action == "forget":
                   reaction = "rocket" if resp.get("deleted", 0) else "-1"
-              else:
-                  reaction = "confused"
           except Exception as e:
               print("fuko /comment failed: " + str(e), file=sys.stderr)
               reaction = "-1"
