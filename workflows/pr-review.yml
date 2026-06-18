@@ -1,7 +1,9 @@
-# fuko-pr review workflow (Path A: no-fork PR-Agent integration).
+# fuko-pr review workflow — PR-Agent + RAG sidecar reviewer (GLM-5.2 via z.ai).
 #
-# Copy this file into your application repo as `.github/workflows/pr-review.yml`.
-# Adjust `runs-on` to match a label on your self-hosted runner fleet.
+# Copy this file into your app repo as `.github/workflows/pr-review.yml` and
+# adjust runs-on. Posts as the "Fuko PR Review" GitHub App when configured (repo
+# VARIABLE FUKO_APP_ID + secret FUKO_APP_PRIVATE_KEY, App installed on the repo);
+# otherwise github-actions[bot]. Secrets: FUKO_URL, FUKO_TOKEN (optional), ZAI_KEY.
 
 name: fuko-pr review
 
@@ -15,10 +17,16 @@ concurrency:
 
 jobs:
   review:
-    if: github.event.pull_request.draft == false
-    runs-on: self-hosted
+    # Skip drafts, and gate on the same-repo fork guard the other self-hosted
+    # workflows use — never run fork-PR code on the self-hosted fleet.
+    if: ${{ github.event.pull_request.draft == false && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: self-hosted # adjust to a label on your self-hosted runner fleet
+    # Hard cap: GLM-5.2 is a slow reasoning model and litellm's request timeout
+    # doesn't always abort a stalled z.ai call (observed a 361s hang under a 120s
+    # setting). Bound the job so a stuck review can't hold a runner slot.
+    timeout-minutes: 25
     permissions:
-      contents: write
+      contents: read # reads PR data + posts comments only; no commits/pushes
       pull-requests: write
       issues: write
     steps:
@@ -31,7 +39,7 @@ jobs:
         id: app-token
         if: ${{ vars.FUKO_APP_ID != '' }}
         continue-on-error: true # if minting fails (App uninstalled, etc.), fall back to github-actions[bot] rather than failing the PR check
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         with:
           app-id: ${{ vars.FUKO_APP_ID }}
           private-key: ${{ secrets.FUKO_APP_PRIVATE_KEY }}
@@ -39,7 +47,7 @@ jobs:
       - name: Build repo knowledge (fuko)
         id: fuko
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           FUKO_URL: ${{ secrets.FUKO_URL }}
           FUKO_TOKEN: ${{ secrets.FUKO_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -56,7 +64,7 @@ jobs:
           api = os.environ.get("GITHUB_API_URL", "https://api.github.com")
           token = os.environ["GITHUB_TOKEN"]
           pr = os.environ["PR_NUMBER"]
-          fuko_url = os.environ["FUKO_URL"].rstrip("/")
+          fuko_url = os.environ.get("FUKO_URL", "").rstrip("/")
           fuko_token = os.environ.get("FUKO_TOKEN", "")
 
 
@@ -73,40 +81,48 @@ jobs:
                   return json.load(r)
 
 
-          try:
-              body = gh(f"/repos/{repo}/pulls/{pr}").get("body") or ""
-              files = []
-              page = 1
-              while True:
-                  batch = gh(
-                      f"/repos/{repo}/pulls/{pr}/files?page={page}&per_page=100"
-                  )
-                  if not batch:
-                      break
-                  files.extend(f["filename"] for f in batch)
-                  if len(batch) < 100:
-                      break
-                  page += 1
-
-              payload = json.dumps(
-                  {"repo": repo, "files": files, "pr_body": body}
-              ).encode()
-              headers = {"Content-Type": "application/json"}
-              if fuko_token:
-                  headers["Authorization"] = "Bearer " + fuko_token
-              req = urllib.request.Request(
-                  fuko_url + "/query", data=payload, headers=headers
-              )
-              with urllib.request.urlopen(req, timeout=30) as r:
-                  results = json.load(r).get("results", [])
-          except Exception as e:
-              print(
-                  "fuko: context build failed, proceeding without knowledge: "
-                  + str(e),
-                  file=sys.stderr,
-              )
+          if not fuko_url:
+              print("fuko: FUKO_URL not configured; skipping knowledge build", file=sys.stderr)
               results = []
+          else:
+              try:
+                  body = gh(f"/repos/{repo}/pulls/{pr}").get("body") or ""
+                  files = []
+                  page = 1
+                  while True:
+                      batch = gh(
+                          f"/repos/{repo}/pulls/{pr}/files?page={page}&per_page=100"
+                      )
+                      if not batch:
+                          break
+                      files.extend(f["filename"] for f in batch)
+                      if len(batch) < 100:
+                          break
+                      page += 1
 
+                  payload = json.dumps(
+                      {"repo": repo, "files": files, "pr_body": body}
+                  ).encode()
+                  headers = {"Content-Type": "application/json"}
+                  if fuko_token:
+                      headers["Authorization"] = "Bearer " + fuko_token
+                  req = urllib.request.Request(
+                      fuko_url + "/query", data=payload, headers=headers
+                  )
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      data = json.load(r)
+                  results = data.get("results") if isinstance(data, dict) else None
+                  if not isinstance(results, list):
+                      results = []
+              except Exception as e:
+                  print(
+                      "fuko: context build failed, proceeding without knowledge: "
+                      + str(e),
+                      file=sys.stderr,
+                  )
+                  results = []
+
+          max_extra = 60000  # bound the GITHUB_OUTPUT payload size
           if results:
               lines = [
                   "Apply these repo-specific learnings where relevant to this PR. "
@@ -114,13 +130,15 @@ jobs:
                   "",
               ]
               for r in results:
+                  if not isinstance(r, dict) or not r.get("text"):
+                      continue
                   cite = (
                       " (source: " + r["source_url"] + ")"
                       if r.get("source_url")
                       else ""
                   )
                   lines.append("- " + r["text"] + cite)
-              extra = "\n".join(lines)
+              extra = "\n".join(lines)[:max_extra]
           else:
               extra = ""
 
@@ -133,15 +151,15 @@ jobs:
                   f.write(f"extra_instructions<<{delim}\n")
                   f.write(extra + "\n")
                   f.write(f"{delim}\n")
+          # Log only the count — never the injected learnings themselves, which
+          # can carry internal links/content from the RAG sidecar into CI logs.
           print(f"fuko: injected {len(results)} learnings")
-          if extra:
-              print(extra)
           PY
 
       - name: PR-Agent
-        uses: the-pr-agent/pr-agent@v0.36.1
+        uses: the-pr-agent/pr-agent@e639d10a4df023b90668ec35796c2457c5f5db8d # v0.36.1
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           # IMPORTANT: PR-Agent loads settings via dynaconf with envvar_prefix=False,
           # so nested settings MUST use the DUNDER form (SECTION__KEY). Dotted keys
           # (config.model, pr_reviewer.extra_instructions, ...) are SILENTLY IGNORED
@@ -154,14 +172,23 @@ jobs:
           # glm-5.2 isn't in PR-Agent's built-in MAX_TOKENS table; a custom model
           # needs its context window declared explicitly or every call errors.
           CONFIG__CUSTOM_MODEL_MAX_TOKENS: "128000"
+          # GLM-5.2 reasoning is slow; raise the per-call LLM timeout from the
+          # 120s default so legitimate long reviews don't abort mid-flight.
+          CONFIG__AI_TIMEOUT: "300"
           OPENAI__KEY: ${{ secrets.ZAI_KEY }}
           # GLM Coding-plan subscription is served from the coding endpoint; the
           # standard /api/paas/v4 is pay-per-token and 429s without a balance.
           OPENAI__API_BASE: "https://api.z.ai/api/coding/paas/v4"
+          # Post code suggestions as inline committable "apply suggestion" blocks
+          # on the relevant lines, rather than one summary comment.
+          PR_CODE_SUGGESTIONS__COMMITABLE_CODE_SUGGESTIONS: "true"
           # fuko knowledge injection (no-fork seam):
           PR_REVIEWER__EXTRA_INSTRUCTIONS: ${{ steps.fuko.outputs.extra_instructions }}
           PR_CODE_SUGGESTIONS__EXTRA_INSTRUCTIONS: ${{ steps.fuko.outputs.extra_instructions }}
-          # Tools (read via get_setting_or_env — dotted lowercase is honored here):
+          # Tools (read via get_setting_or_env — dotted lowercase is honored here).
+          # auto_describe is OFF for the observe-only pilot: it rewrites the PR
+          # description in place, which would clobber the author's text and the
+          # other bots' context. review + improve are comment-only (non-intrusive).
           github_action_config.auto_review: "true"
-          github_action_config.auto_describe: "true"
+          github_action_config.auto_describe: "false"
           github_action_config.auto_improve: "true"

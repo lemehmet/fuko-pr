@@ -1,0 +1,109 @@
+# fuko-pr interactive commands — run PR-Agent tools on demand from a PR comment.
+#
+# Post a slash command on any PR and fuko runs it: /review, /improve, /ask <q>,
+# /describe, /add_docs, /update_changelog, /generate_labels, /similar_issue,
+# /help, /config. Reviewer model: GLM-5.2 via z.ai's coding endpoint. Posts as
+# the "Fuko PR Review" GitHub App. /remember and /forget are handled separately
+# by ingest-comment.yml. Copy this file into your app repo as
+# `.github/workflows/pr-command.yml` and adjust runs-on.
+
+name: fuko-pr command
+
+on:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  # Serialize commands per PR (queue, don't cancel) so two quick commands —
+  # e.g. /review then /improve — don't run GLM-5.2 in parallel and trip z.ai
+  # throttling. A run_id in the key would make every run unique and defeat this.
+  group: fuko-cmd-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  # Gate on a GitHub-hosted runner so the self-hosted job below NEVER schedules
+  # for a fork PR (issue_comment fires in the base repo even for forks). Only
+  # PR comments from a repo-trusted author that look like a PR-Agent command get
+  # past the `if:`; the step then resolves the PR head repo. /remember & /forget
+  # are routed to fuko-pr-ingest.yml.
+  guard:
+    if: >
+      github.event.issue.pull_request
+      && github.event.sender.type != 'Bot'
+      && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+      && startsWith(github.event.comment.body, '/')
+      && !startsWith(github.event.comment.body, '/remember')
+      && !startsWith(github.event.comment.body, '/forget')
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      same_repo: ${{ steps.check.outputs.same_repo }}
+    steps:
+      - name: Resolve PR head repo (same-repo only)
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          API: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          api = os.environ["API"]; repo = os.environ["REPO"]; n = os.environ["PR_NUMBER"]
+          req = urllib.request.Request(
+              f"{api}/repos/{repo}/pulls/{n}",
+              headers={"Authorization": "Bearer " + os.environ["GITHUB_TOKEN"],
+                       "Accept": "application/vnd.github+json"},
+          )
+          with urllib.request.urlopen(req, timeout=30) as r:
+              head = (json.load(r).get("head") or {}).get("repo", {}).get("full_name")
+          same = "true" if head == repo else "false"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"same_repo={same}\n")
+          print(f"same-repo PR: {same} (head={head})")
+          PY
+
+  command:
+    needs: guard
+    if: ${{ needs.guard.outputs.same_repo == 'true' }}
+    runs-on: self-hosted # adjust to a label on your self-hosted runner fleet
+    # GLM-5.2 is slow; bound the job so a stalled command can't hold a runner slot.
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      # Post as the "Fuko PR Review" App when configured (repo VARIABLE
+      # FUKO_APP_ID + secret FUKO_APP_PRIVATE_KEY); falls back to
+      # github-actions[bot]. App ID is a variable because the `secrets` context
+      # is not allowed in step `if:` conditions, but `vars` is.
+      - name: Mint Fuko PR Review app token
+        id: app-token
+        if: ${{ vars.FUKO_APP_ID != '' }}
+        continue-on-error: true # degrade to github-actions[bot] rather than failing the run
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ vars.FUKO_APP_ID }}
+          private-key: ${{ secrets.FUKO_APP_PRIVATE_KEY }}
+
+      - name: PR-Agent (run the comment command)
+        uses: the-pr-agent/pr-agent@e639d10a4df023b90668ec35796c2457c5f5db8d # v0.36.1
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          # PR-Agent loads settings via dynaconf (envvar_prefix=False), so nested
+          # settings MUST use the DUNDER form (SECTION__KEY); dotted keys are
+          # silently ignored.
+          CONFIG__MODEL: "openai/glm-5.2"
+          CONFIG__FALLBACK_MODELS: '["openai/glm-5.2"]'
+          # glm-5.2 isn't in PR-Agent's MAX_TOKENS table — declare its window.
+          CONFIG__CUSTOM_MODEL_MAX_TOKENS: "128000"
+          # GLM-5.2 reasoning is slow; raise the per-call LLM timeout from 120s.
+          CONFIG__AI_TIMEOUT: "300"
+          OPENAI__KEY: ${{ secrets.ZAI_KEY }}
+          # GLM Coding-plan subscription lives on the coding endpoint; the
+          # standard /api/paas/v4 is pay-per-token and 429s without a balance.
+          OPENAI__API_BASE: "https://api.z.ai/api/coding/paas/v4"
+          # Post code suggestions as inline committable blocks.
+          PR_CODE_SUGGESTIONS__COMMITABLE_CODE_SUGGESTIONS: "true"

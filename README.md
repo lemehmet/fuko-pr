@@ -120,10 +120,31 @@ Deploy it:
 3. Add repo secrets:
    - `FUKO_URL` — sidecar base URL (e.g. `http://fuko.internal:8000`)
    - `FUKO_TOKEN` — optional, only if `FUKO_AUTH_TOKEN` is set on the sidecar
-   - `ZAI_KEY` — your z.ai API key (for GLM-5.2 chat)
-4. Tune `runs-on` and `config.model` to match your runner fleet and reviewer
-   model. If the sidecar is briefly unreachable, the workflow logs a warning and
-   the review proceeds without injected knowledge.
+   - `ZAI_KEY` — your z.ai key. The GLM **Coding-plan** subscription is served
+     from the **coding** endpoint (`OPENAI__API_BASE: https://api.z.ai/api/coding/paas/v4`,
+     already set in the workflow); the standard `/api/paas/v4` is pay-per-token.
+4. Optional — post reviews as a **"Fuko PR Review" GitHub App** instead of
+   `github-actions[bot]`: create the App (Pull requests RW, Issues RW, Contents R),
+   install it on the repo, then set repo **variable** `FUKO_APP_ID` and secret
+   `FUKO_APP_PRIVATE_KEY`. (App ID is a *variable* because the `secrets` context is
+   not allowed in step `if:`.) Without these the workflow falls back to the
+   default token.
+5. Tune `runs-on` to match your runner fleet. If the sidecar is briefly
+   unreachable, the workflow logs a warning and reviews without injected knowledge.
+
+> **PR-Agent settings use dynaconf dunder keys.** Nested settings must be passed
+> as `SECTION__KEY` env vars (e.g. `CONFIG__MODEL`, `OPENAI__API_BASE`,
+> `PR_REVIEWER__EXTRA_INSTRUCTIONS`) — dotted keys like `config.model` are
+> silently ignored. GLM-5.2 also needs `CONFIG__CUSTOM_MODEL_MAX_TOKENS` (it's not
+> in PR-Agent's built-in table) and a raised `CONFIG__AI_TIMEOUT`.
+
+## Interactive commands
+
+`workflows/pr-command.yml` runs PR-Agent tools on demand from a PR comment —
+`/review`, `/improve`, `/ask <q>`, `/describe`, `/add_docs`, `/update_changelog`,
+`/generate_labels`, `/similar_issue`, `/help`, `/config`. Gated on a repo-trusted
+`author_association` and a job-level same-repo guard (a GitHub-hosted `guard` job
+the self-hosted job `needs:`), so fork PRs never schedule on the self-hosted fleet.
 
 ## Adding knowledge from PR comments
 
