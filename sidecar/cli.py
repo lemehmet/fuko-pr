@@ -16,6 +16,10 @@ def main() -> None:
 
     sub.add_parser("serve", help="run the HTTP sidecar")
 
+    p_review = sub.add_parser("review", help="review a PR through the configured backend")
+    p_review.add_argument("--pr-url", required=True, help="full pull request URL")
+    p_review.add_argument("--config", default=".fuko.toml", help="path to .fuko.toml")
+
     p_query = sub.add_parser("query", help="query learnings for a set of changed files")
     p_query.add_argument("--repo", required=True)
     p_query.add_argument("--file", action="append", default=[], help="changed file path")
@@ -45,11 +49,21 @@ def main() -> None:
     args = parser.parse_args()
     {
         "serve": _cmd_serve,
+        "review": _cmd_review,
         "query": _cmd_query,
         "ingest-docs": _cmd_ingest_docs,
         "forget": _cmd_forget,
         "retrieve": _cmd_retrieve,
     }[args.cmd](args)
+
+
+def _cmd_review(args) -> None:
+    from . import runner
+
+    result = runner.review(args.pr_url, args.config)
+    if result.returncode != 0:
+        print(f"review backend failed: {result.detail}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _cmd_serve(_args) -> None:

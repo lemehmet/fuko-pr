@@ -1,0 +1,42 @@
+# fuko-pr per-repo config. Copy to `.fuko.toml` in your app repo and commit it.
+# Secrets never live here — each provider preset declares the env var for its key
+# (supplied as a CI secret). See docs/design.md for the full schema.
+
+[review]
+backend = "pr-agent"            # review engine (driver)
+tools = ["review", "improve"]   # PR-Agent tools to run
+# PR-Agent runs from its Docker image (it is not pip-installable). Defaults to
+# codiumai/pr-agent:latest; point at a pinned tag in your own registry once you
+# publish one (e.g. ghcr.io/OWNER/pr-agent:0.36.1).
+# image = "ghcr.io/OWNER/pr-agent:0.36.1"
+# Extra `docker run` args, e.g. host networking so the container can reach a
+# host Ollama on Linux: docker_extra_args = ["--add-host", "host.docker.internal:host-gateway"]
+# docker_extra_args = []
+
+[review.model]
+# Pick a provider preset + model. Switching providers is just these two lines
+# plus the matching key secret. Known presets: zai-coding, ollama, anthropic, openai.
+provider = "zai-coding"         # key from env ZAI_KEY
+name = "glm-5.2"
+# provider = "anthropic"        # key from env ANTHROPIC_KEY
+# name = "claude-sonnet-4-6"
+# provider = "ollama"           # local, no key. PR-Agent runs in a container, so
+# name = "qwen2.5-coder:32b"    # point base_url at the host, not localhost:
+# base_url = "http://host.docker.internal:11434"
+
+[knowledge]
+store = "postgres"              # postgres | sqlite-vec
+
+# When store = "sqlite-vec", the knowledge file lives in object storage:
+# [knowledge.object_store]
+# backend = "s3"                # s3 | r2 | file
+# bucket = "my-fuko-kb"
+# key = "owner/repo.db"
+# creds_env_prefix = "FUKO_S3"  # reads FUKO_S3_ACCESS_KEY_ID, FUKO_S3_SECRET_ACCESS_KEY
+
+[embedding]
+# Self-hosted runners: local Ollama (offline default). SaaS runners: prefer a
+# remote, non-OpenAI provider (e.g. Voyage, Jina, bigmodel) — see docs.
+provider = "ollama"
+model = "bge-m3"
+base_url = "http://localhost:11434/v1"
