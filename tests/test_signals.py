@@ -65,6 +65,19 @@ def test_marker_excludes_human_text():
     assert got.body == ""
 
 
+def test_marker_escapes_arrow_in_field_values():
+    # a field value containing '-->' must not terminate the HTML comment early
+    sig = _signal(id="fk_z", thread_url="https://x/y?q=a-->b", file="weird-->name.py")
+    marker = encode_marker(sig)
+    # only the trailing comment terminator is a literal '-->'
+    assert marker.count("-->") == 1
+    assert marker.endswith("-->")
+    body = with_marker("text", sig)
+    [got] = extract_markers(body)
+    assert got.thread_url == "https://x/y?q=a-->b"
+    assert got.file == "weird-->name.py"
+
+
 def test_extract_multiple_and_ignores_foreign_comments():
     text = "\n".join(
         [

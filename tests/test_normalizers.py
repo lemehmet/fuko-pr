@@ -260,11 +260,14 @@ class _PatchClient:
         return _R()
 
 
+_AUTH = {"Authorization": "Bearer t"}
+
+
 def test_inject_markers_patches_unmarked(monkeypatch):
     _PatchClient.calls = []
     monkeypatch.setattr(pragent.httpx, "Client", _PatchClient)
     pairs = pragent_signals([PRAGENT], model="m")
-    PrAgentBackend()._inject_markers("https://api", PRRef("o/r", 8, "u"), {}, pairs)
+    PrAgentBackend()._inject_markers("https://api", PRRef("o/r", 8, "u"), _AUTH, pairs)
     assert len(_PatchClient.calls) == 1
     url, payload = _PatchClient.calls[0]
     assert url.endswith("/pulls/comments/111")
@@ -277,7 +280,7 @@ def test_inject_markers_skips_already_marked(monkeypatch):
     sig = pragent_signal(PRAGENT, model="m")
     marked = dict(PRAGENT, body=PRAGENT["body"] + "\n\n" + encode_marker(sig))
     PrAgentBackend()._inject_markers(
-        "https://api", PRRef("o/r", 8, "u"), {}, [{"comment": marked, "signal": sig}]
+        "https://api", PRRef("o/r", 8, "u"), _AUTH, [{"comment": marked, "signal": sig}]
     )
     assert _PatchClient.calls == []
 
@@ -285,7 +288,15 @@ def test_inject_markers_skips_already_marked(monkeypatch):
 def test_inject_markers_empty_is_noop(monkeypatch):
     _PatchClient.calls = []
     monkeypatch.setattr(pragent.httpx, "Client", _PatchClient)
-    PrAgentBackend()._inject_markers("https://api", PRRef("o/r", 8, "u"), {}, [])
+    PrAgentBackend()._inject_markers("https://api", PRRef("o/r", 8, "u"), _AUTH, [])
+    assert _PatchClient.calls == []
+
+
+def test_inject_markers_skips_when_unauthenticated(monkeypatch):
+    _PatchClient.calls = []
+    monkeypatch.setattr(pragent.httpx, "Client", _PatchClient)
+    pairs = pragent_signals([PRAGENT], model="m")
+    PrAgentBackend()._inject_markers("https://api", PRRef("o/r", 8, "u"), {}, pairs)
     assert _PatchClient.calls == []
 
 
@@ -305,7 +316,7 @@ def test_inject_markers_skips_on_patch_error(monkeypatch):
 
     monkeypatch.setattr(pragent.httpx, "Client", _ErrClient)
     pairs = pragent_signals([PRAGENT], model="m")
-    PrAgentBackend()._inject_markers("https://api", PRRef("o/r", 8, "u"), {}, pairs)
+    PrAgentBackend()._inject_markers("https://api", PRRef("o/r", 8, "u"), _AUTH, pairs)
 
 
 class _GetClient:

@@ -173,8 +173,12 @@ class PrAgentBackend:
     def _inject_markers(
         self, api: str, pr: PRRef, headers: dict[str, str], pairs: list[dict]
     ) -> None:
-        """Best-effort: append each signal's marker to its comment (skip on any error)."""
-        if not pairs:
+        """Best-effort: append each signal's marker to its comment (skip on any error).
+
+        Skips entirely when unauthenticated -- every PATCH would 401, so there is no
+        point generating the API traffic.
+        """
+        if not pairs or "Authorization" not in headers:
             return
         with httpx.Client(timeout=30.0, headers=headers) as client:
             for pair in pairs:

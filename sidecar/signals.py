@@ -8,8 +8,9 @@ describes: it renders as nothing on GitHub/GitLab and survives round-trips, so t
 consumer can ``grep`` the marker and parse the JSON deterministically.
 
 The marker carries only machine fields -- the human-facing ``title``/``body`` stay
-in the visible comment and are excluded, which also guarantees the JSON can never
-contain ``-->`` and break the comment.
+in the visible comment and are excluded -- and any ``>`` in a field value is
+JSON-escaped, so the serialized payload can never contain ``-->`` and prematurely
+terminate the HTML comment, whatever the field values.
 """
 
 import hashlib
@@ -53,8 +54,12 @@ def make_id(*parts: str) -> str:
 
 
 def encode_marker(signal: ReviewSignal) -> str:
-    """Render ``signal`` as an invisible HTML-comment marker (machine fields only)."""
-    payload = signal.model_dump_json(exclude={"title", "body"})
+    """Render ``signal`` as an invisible HTML-comment marker (machine fields only).
+
+    Any ``>`` in a field value is JSON-escaped so the payload can never contain
+    ``-->``; ``model_validate_json`` decodes the escape on the way back.
+    """
+    payload = signal.model_dump_json(exclude={"title", "body"}).replace(">", "\\u003e")
     return f"<!-- {_MARKER_TAG} {payload} -->"
 
 
