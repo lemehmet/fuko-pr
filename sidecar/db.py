@@ -73,7 +73,7 @@ def _migrate_embed_dim(conn, dim: int) -> None:
     conn.execute("DROP INDEX IF EXISTS learnings_embedding_idx")
     conn.execute("ALTER TABLE learnings DROP COLUMN embedding")
     conn.execute(f"ALTER TABLE learnings ADD COLUMN embedding vector({dim})")
-    for (row_id, _text), emb in zip(rows, embeddings):
+    for (row_id, _text), emb in zip(rows, embeddings, strict=True):
         conn.execute(
             "UPDATE learnings SET embedding = %s::vector WHERE id = %s",
             (vector_literal(emb), row_id),

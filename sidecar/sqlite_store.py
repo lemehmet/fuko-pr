@@ -35,8 +35,7 @@ _MAX_RETRIES = 5
 
 
 def _pack(vec: list[float]) -> bytes:
-    # Little-endian float32 (sqlite-vec's format), explicit so a db synced across
-    # architectures via object storage is read back consistently.
+    """Pack a vector as little-endian float32 (sqlite-vec's portable wire format)."""
     return struct.pack(f"<{len(vec)}f", *vec)
 
 
@@ -112,7 +111,7 @@ class SqliteVecStore:
         if not rows:
             return
         embeddings = get_embedder().embed([text for _, _, text in rows])
-        for (lid, repo, _text), emb in zip(rows, embeddings):
+        for (lid, repo, _text), emb in zip(rows, embeddings, strict=True):
             cur = conn.execute(
                 "INSERT INTO vec_learnings(repo, lid, embedding) VALUES (?, ?, ?)",
                 (repo, lid, _pack(emb)),
@@ -132,7 +131,6 @@ class SqliteVecStore:
             finally:
                 conn.close()
             if migrated:
-                # persist the one-time re-embed so later reads don't repeat it
                 try:
                     self._obj.save(path.read_bytes(), token)
                 except PreconditionFailed:
@@ -169,7 +167,7 @@ class SqliteVecStore:
 
         def fn(conn: sqlite3.Connection) -> tuple[int, int]:
             inserted = skipped = 0
-            for item, emb in zip(items, embeddings):
+            for item, emb in zip(items, embeddings, strict=True):
                 lid = uuid.uuid4().hex
                 cur = conn.execute(
                     "INSERT OR IGNORE INTO learnings"
