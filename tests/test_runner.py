@@ -269,7 +269,7 @@ def test_cmd_signals_friendly_auth_error(monkeypatch, tmp_path, capsys):
         )
     assert e.value.code == 1
     err = capsys.readouterr().err
-    assert "cannot read comments for o/r#8" in err
+    assert "cannot read o/r#8" in err
     assert "Pull requests: Read" in err
     assert "GITHUB_TOKEN is not set" in err
 
@@ -288,6 +288,63 @@ def test_cmd_signals_reraises_non_auth_error(monkeypatch, tmp_path):
         cli._cmd_signals(
             argparse.Namespace(pr_url="https://github.com/o/r/pull/8", config=str(cfg))
         )
+
+
+def test_fetch_issue_comments_and_reviews_and_head(monkeypatch):
+    def handler(url, params=None):
+        if url.endswith("/issues/8/comments"):
+            return _Resp([{"id": 1, "body": "walkthrough"}])
+        if url.endswith("/pulls/8/reviews"):
+            return _Resp([{"id": 2, "state": "COMMENTED"}])
+        if url.endswith("/pulls/8"):
+            return _Resp({"head": {"sha": "deadbeef"}})
+        raise AssertionError(url)
+
+    monkeypatch.setattr(runner.httpx, "Client", lambda *a, **k: _FakeClient(handler))
+    pr = PRRef(repo="o/r", number=8, url="u")
+    assert runner.fetch_issue_comments(pr, "t", runner._DEFAULT_API)[0]["body"] == "walkthrough"
+    assert runner.fetch_reviews(pr, "t", runner._DEFAULT_API)[0]["state"] == "COMMENTED"
+    assert runner.fetch_pr_head(pr, "t", runner._DEFAULT_API) == "deadbeef"
+
+
+def test_cmd_status_emits_json(monkeypatch, capsys):
+    import argparse
+    import json
+
+    from sidecar import cli
+
+    head = "abcdef1234567890"
+    walk = (
+        "📝 Walkthrough\n\nReviewing files ... between `1111111` and "
+        "`abcdef1`.\nNo actionable comments were generated."
+    )
+    monkeypatch.setattr(runner, "fetch_pr_head", lambda pr, t, a: head)
+    monkeypatch.setattr(
+        runner,
+        "fetch_issue_comments",
+        lambda pr, t, a: [{"user": {"login": "coderabbitai[bot]"}, "body": walk}],
+    )
+    monkeypatch.setattr(
+        runner,
+        "fetch_reviews",
+        lambda pr, t, a: [{"user": {"login": "Copilot"}, "commit_id": head, "state": "APPROVED"}],
+    )
+    cli._cmd_status(argparse.Namespace(pr_url="https://github.com/o/r/pull/8"))
+    out = {r["backend"]: r["state"] for r in json.loads(capsys.readouterr().out)}
+    assert out == {"coderabbit": "done", "copilot": "done"}
+
+
+def test_cmd_status_friendly_auth_error(monkeypatch, capsys):
+    import argparse
+
+    from sidecar import cli
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(runner, "fetch_pr_head", lambda *a: (_ for _ in ()).throw(_http_error(404)))
+    with pytest.raises(SystemExit) as e:
+        cli._cmd_status(argparse.Namespace(pr_url="https://github.com/o/r/pull/8"))
+    assert e.value.code == 1
+    assert "cannot read o/r#8" in capsys.readouterr().err
 
 
 def test_gh_headers():

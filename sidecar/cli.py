@@ -27,6 +27,11 @@ def main() -> None:
     p_signals.add_argument("--pr-url", required=True, help="full pull request URL")
     p_signals.add_argument("--config", default=".fuko.toml", help="path to .fuko.toml")
 
+    p_status = sub.add_parser(
+        "status", help="emit per-reviewer review state on a PR's HEAD as JSON"
+    )
+    p_status.add_argument("--pr-url", required=True, help="full pull request URL")
+
     p_query = sub.add_parser("query", help="query learnings for a set of changed files")
     p_query.add_argument("--repo", required=True)
     p_query.add_argument("--file", action="append", default=[], help="changed file path")
@@ -62,6 +67,7 @@ def main() -> None:
         "serve": _cmd_serve,
         "review": _cmd_review,
         "signals": _cmd_signals,
+        "status": _cmd_status,
         "query": _cmd_query,
         "ingest-docs": _cmd_ingest_docs,
         "forget": _cmd_forget,
@@ -102,20 +108,46 @@ def _cmd_signals(args) -> None:
     try:
         comments = runner.fetch_inline_comments(pr, token, api_url)
     except httpx.HTTPStatusError as e:
-        status = e.response.status_code
-        if status in (401, 403, 404):
-            hint = "GITHUB_TOKEN is not set" if not token else "the token lacks access"
-            print(
-                f"fuko: cannot read comments for {pr.repo}#{pr.number} (HTTP {status}; {hint}). "
-                "Set GITHUB_TOKEN to a token with 'Pull requests: Read' on this repository "
-                "(a private repo returns 404 when the request is unauthorized).",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        raise
+        _exit_on_auth_error(e, pr, token)
 
     signals = collect_signals(comments, model)
     print(json.dumps([s.model_dump() for s in signals], indent=2))
+
+
+def _exit_on_auth_error(exc, pr, token: str) -> None:
+    """On a 401/403/404 from a GitHub fetch, print a clear message and exit; else re-raise."""
+    status = exc.response.status_code
+    if status in (401, 403, 404):
+        hint = "GITHUB_TOKEN is not set" if not token else "the token lacks access"
+        print(
+            f"fuko: cannot read {pr.repo}#{pr.number} (HTTP {status}; {hint}). "
+            "Set GITHUB_TOKEN to a token with 'Pull requests: Read' on this repository "
+            "(a private repo returns 404 when the request is unauthorized).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    raise exc
+
+
+def _cmd_status(args) -> None:
+    import json
+
+    import httpx
+
+    from . import runner
+    from .status import reviewer_states
+
+    pr = runner.parse_pr_url(args.pr_url)
+    token = os.environ.get("GITHUB_TOKEN", "")
+    api_url = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+    try:
+        head = runner.fetch_pr_head(pr, token, api_url)
+        issue_comments = runner.fetch_issue_comments(pr, token, api_url)
+        reviews = runner.fetch_reviews(pr, token, api_url)
+    except httpx.HTTPStatusError as e:
+        _exit_on_auth_error(e, pr, token)
+
+    print(json.dumps(reviewer_states(head, issue_comments, reviews), indent=2))
 
 
 def _store(config_path: str):

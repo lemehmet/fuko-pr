@@ -74,17 +74,14 @@ def _fetch_pr_context(pr: PRRef, token: str, api_url: str) -> tuple[list[str], s
     return files, body
 
 
-def fetch_inline_comments(pr: PRRef, token: str, api_url: str) -> list[dict]:
-    """Fetch all inline review comments on a PR (paginated) via the GitHub API."""
+def _paginated_get(token: str, api_url: str, path: str) -> list[dict]:
+    """Fetch all pages of a paginated GitHub list endpoint at ``path``."""
     base = api_url.rstrip("/")
     out: list[dict] = []
     page = 1
     with httpx.Client(timeout=30.0, headers=_gh_headers(token)) as client:
         while True:
-            resp = client.get(
-                f"{base}/repos/{pr.repo}/pulls/{pr.number}/comments",
-                params={"page": page, "per_page": 100},
-            )
+            resp = client.get(f"{base}{path}", params={"page": page, "per_page": 100})
             resp.raise_for_status()
             batch = resp.json()
             if not batch:
@@ -94,6 +91,30 @@ def fetch_inline_comments(pr: PRRef, token: str, api_url: str) -> list[dict]:
                 break
             page += 1
     return out
+
+
+def fetch_inline_comments(pr: PRRef, token: str, api_url: str) -> list[dict]:
+    """Fetch all inline review comments on a PR (paginated)."""
+    return _paginated_get(token, api_url, f"/repos/{pr.repo}/pulls/{pr.number}/comments")
+
+
+def fetch_issue_comments(pr: PRRef, token: str, api_url: str) -> list[dict]:
+    """Fetch all issue-level comments on a PR (paginated) — e.g. CodeRabbit's walkthrough."""
+    return _paginated_get(token, api_url, f"/repos/{pr.repo}/issues/{pr.number}/comments")
+
+
+def fetch_reviews(pr: PRRef, token: str, api_url: str) -> list[dict]:
+    """Fetch all submitted reviews on a PR (paginated)."""
+    return _paginated_get(token, api_url, f"/repos/{pr.repo}/pulls/{pr.number}/reviews")
+
+
+def fetch_pr_head(pr: PRRef, token: str, api_url: str) -> str:
+    """Return the PR's current head commit sha."""
+    base = api_url.rstrip("/")
+    with httpx.Client(timeout=30.0, headers=_gh_headers(token)) as client:
+        resp = client.get(f"{base}/repos/{pr.repo}/pulls/{pr.number}")
+        resp.raise_for_status()
+        return resp.json()["head"]["sha"]
 
 
 def _sidecar_query(url: str, token: str, repo: str, files: list[str], pr_body: str) -> list[dict]:
