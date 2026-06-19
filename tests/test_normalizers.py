@@ -20,7 +20,7 @@ from sidecar.normalizers import (
     pragent_signal,
     pragent_signals,
 )
-from sidecar.signals import encode_marker
+from sidecar.signals import ReviewSignal, encode_marker
 
 PRAGENT = {
     "id": 111,
@@ -212,6 +212,49 @@ def test_coderabbit_severity_and_category_mapping(cls, severity, category):
 def test_collect_signals_includes_coderabbit_findings_only():
     signals = collect_signals([PRAGENT, COPILOT, CODERABBIT, CODERABBIT_CHAT], model="m")
     assert [s.backend for s in signals] == ["pr-agent", "copilot", "coderabbit"]
+
+
+def test_collect_signals_prefers_embedded_marker():
+    # A fuko-pr comment carrying a review-time marker (model glm-5.2, severity high)
+    marker = encode_marker(
+        ReviewSignal(
+            id="fk_reviewtime",
+            file="x.py",
+            line=10,
+            severity="high",
+            severity_source="declared",
+            category="security",
+            backend="pr-agent",
+            model="openai/glm-5.2",
+        )
+    )
+    body = (
+        "**Suggestion:** tighten this input handling [possible issue, importance: 4]\n"
+        "```suggestion\nfix\n```\n\n" + marker
+    )
+    c = {
+        "path": "x.py",
+        "line": 10,
+        "html_url": "u",
+        "user": {"login": "fuko-pr-review[bot]"},
+        "body": body,
+    }
+
+    # run with the WRONG local default model — the marker must win
+    [sig] = collect_signals([c], model="ollama/qwen2.5-coder")
+    assert sig.model == "openai/glm-5.2"  # from the marker, not the local config
+    assert sig.id == "fk_reviewtime"
+    assert sig.severity == "high"  # marker, not importance-4-derived "medium"
+    assert sig.category == "security"
+    # human fields are kept from the live parse (the marker excludes them)
+    assert sig.title.startswith("tighten this input handling")
+    assert "**Suggestion:**" in sig.body
+
+
+def test_collect_signals_without_marker_uses_local_model():
+    # no marker -> model comes from the passed config (unchanged behavior)
+    [sig] = collect_signals([PRAGENT], model="anthropic/claude")
+    assert sig.model == "anthropic/claude"
 
 
 def test_normalize_output_returns_only_pragent_signals(monkeypatch):
