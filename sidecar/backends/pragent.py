@@ -48,6 +48,7 @@ class PrAgentBackend:
         """Configure the runtime image and extra ``docker run`` args from config."""
         self.image = config.image if config and config.image else self.DEFAULT_IMAGE
         self.docker_extra_args = list(config.docker_extra_args) if config else []
+        self.tool_timeout = config.tool_timeout if config else 900
 
     def build_env(
         self,
@@ -111,12 +112,27 @@ class PrAgentBackend:
 
         rc = 0
         details: list[str] = []
-        for tool in tools:
-            proc = subprocess.run(
-                [*docker_base, self.image, "--pr_url", pr.url, tool],
-                env=full_env,
-                check=False,
-            )
+        for index, tool in enumerate(tools):
+            name = f"fuko-pragent-{os.getpid()}-{index}"
+            try:
+                proc = subprocess.run(
+                    [*docker_base, "--name", name, self.image, "--pr_url", pr.url, tool],
+                    env=full_env,
+                    check=False,
+                    timeout=self.tool_timeout,
+                )
+            except subprocess.TimeoutExpired:
+                # Reap the container so a hung tool can't outlive the killed
+                # subprocess on a persistent self-hosted runner.
+                subprocess.run(
+                    ["docker", "kill", name],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                rc = rc or 124
+                details.append(f"{tool} timed out after {self.tool_timeout}s (container killed)")
+                continue
             if proc.returncode != 0:
                 rc = proc.returncode
                 details.append(f"{tool} exited {proc.returncode}")

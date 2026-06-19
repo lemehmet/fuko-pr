@@ -63,7 +63,7 @@ def test_invoke_runs_docker_per_tool(monkeypatch):
     class _Proc:
         returncode = 0
 
-    def fake_run(cmd, env, check):
+    def fake_run(cmd, env=None, check=False, timeout=None, **kw):
         calls.append((cmd, env))
         return _Proc()
 
@@ -93,7 +93,7 @@ def test_invoke_uses_configured_image_and_extra_args(monkeypatch):
     class _Proc:
         returncode = 0
 
-    def fake_run(cmd, env, check):
+    def fake_run(cmd, env=None, check=False, timeout=None, **kw):
         captured["cmd"] = cmd
         return _Proc()
 
@@ -113,12 +113,35 @@ def test_invoke_reports_failure(monkeypatch):
     class _Proc:
         returncode = 3
 
-    monkeypatch.setattr(pragent.subprocess, "run", lambda cmd, env, check: _Proc())
+    monkeypatch.setattr(pragent.subprocess, "run", lambda cmd, **kw: _Proc())
     pr = PRRef(repo="o/r", number=1, url="https://github.com/o/r/pull/1")
     result = pragent.PrAgentBackend().invoke(pr, {}, ["review"])
 
     assert result.returncode == 3
     assert "review exited 3" in result.detail
+
+
+def test_invoke_times_out_and_kills_container(monkeypatch):
+    from sidecar.fukoconfig import ReviewConfig
+
+    killed = []
+
+    class _Killed:
+        returncode = 0
+
+    def fake_run(cmd, env=None, check=False, timeout=None, **kw):
+        if cmd[:2] == ["docker", "kill"]:
+            killed.append(cmd[2])
+            return _Killed()
+        raise pragent.subprocess.TimeoutExpired(cmd, timeout)
+
+    monkeypatch.setattr(pragent.subprocess, "run", fake_run)
+    pr = PRRef(repo="o/r", number=1, url="https://github.com/o/r/pull/1")
+    result = pragent.PrAgentBackend(ReviewConfig(tool_timeout=5)).invoke(pr, {}, ["review"])
+
+    assert result.returncode == 124
+    assert "timed out after 5s" in result.detail
+    assert killed and killed[0].startswith("fuko-pragent-")  # the container was reaped
 
 
 class _FakeStore:
