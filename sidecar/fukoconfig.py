@@ -31,6 +31,7 @@ class ReviewConfig(BaseModel):
     tools: list[str] = Field(default_factory=lambda: ["review", "improve"])
     image: str | None = None
     docker_extra_args: list[str] = Field(default_factory=list)
+    tool_timeout: int = 900
 
 
 class PostgresStoreConfig(BaseModel):
