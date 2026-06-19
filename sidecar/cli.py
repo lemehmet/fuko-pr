@@ -81,6 +81,8 @@ def _cmd_review(args) -> None:
 def _cmd_signals(args) -> None:
     import json
 
+    import httpx
+
     from . import runner
     from .fukoconfig import load_config
     from .normalizers import collect_signals
@@ -97,7 +99,21 @@ def _cmd_signals(args) -> None:
     except UnknownPresetError:
         model = ""
 
-    comments = runner.fetch_inline_comments(pr, token, api_url)
+    try:
+        comments = runner.fetch_inline_comments(pr, token, api_url)
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code
+        if status in (401, 403, 404):
+            hint = "GITHUB_TOKEN is not set" if not token else "the token lacks access"
+            print(
+                f"fuko: cannot read comments for {pr.repo}#{pr.number} (HTTP {status}; {hint}). "
+                "Set GITHUB_TOKEN to a token with 'Pull requests: Read' on this repository "
+                "(a private repo returns 404 when the request is unauthorized).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        raise
+
     signals = collect_signals(comments, model)
     print(json.dumps([s.model_dump() for s in signals], indent=2))
 

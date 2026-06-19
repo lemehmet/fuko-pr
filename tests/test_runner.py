@@ -246,6 +246,50 @@ def test_cmd_signals_emits_json(monkeypatch, tmp_path, capsys):
     assert out[0]["file"] == "a.ts"
 
 
+def _http_error(status):
+    req = httpx.Request("GET", "https://api.github.com/x")
+    return httpx.HTTPStatusError("e", request=req, response=httpx.Response(status, request=req))
+
+
+def test_cmd_signals_friendly_auth_error(monkeypatch, tmp_path, capsys):
+    import argparse
+
+    from sidecar import cli
+
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text('[review.model]\nprovider = "ollama"\nname = "x"\n', encoding="utf-8")
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(
+        runner, "fetch_inline_comments", lambda *a: (_ for _ in ()).throw(_http_error(404))
+    )
+
+    with pytest.raises(SystemExit) as e:
+        cli._cmd_signals(
+            argparse.Namespace(pr_url="https://github.com/o/r/pull/8", config=str(cfg))
+        )
+    assert e.value.code == 1
+    err = capsys.readouterr().err
+    assert "cannot read comments for o/r#8" in err
+    assert "Pull requests: Read" in err
+    assert "GITHUB_TOKEN is not set" in err
+
+
+def test_cmd_signals_reraises_non_auth_error(monkeypatch, tmp_path):
+    import argparse
+
+    from sidecar import cli
+
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text('[review.model]\nprovider = "ollama"\nname = "x"\n', encoding="utf-8")
+    monkeypatch.setattr(
+        runner, "fetch_inline_comments", lambda *a: (_ for _ in ()).throw(_http_error(500))
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        cli._cmd_signals(
+            argparse.Namespace(pr_url="https://github.com/o/r/pull/8", config=str(cfg))
+        )
+
+
 def test_gh_headers():
     assert "Authorization" not in runner._gh_headers("")
     assert runner._gh_headers("t")["Authorization"] == "Bearer t"

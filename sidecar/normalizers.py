@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 
-from .signals import Category, ReviewSignal, make_id
+from .signals import Category, ReviewSignal, extract_markers, make_id
 
 _PRAGENT_PREFIX = "**Suggestion:**"
 _LABEL_RE = re.compile(r"\[([^,\]]+),\s*importance:\s*(\d+)\]")
@@ -217,20 +217,39 @@ def coderabbit_signal(comment: dict) -> ReviewSignal:
     )
 
 
+def _prefer_marker(base: ReviewSignal, body: str) -> ReviewSignal:
+    """If ``body`` carries a fuko-signal marker, trust it over the fresh parse.
+
+    The marker was written at review time and is authoritative for the machine
+    fields (notably ``model``, ``id``, ``severity``) — re-deriving them here would
+    instead reflect whoever runs ``fuko signals`` and with which config. The marker
+    excludes the human-facing ``title``/``body``, so those are kept from ``base``.
+    """
+    markers = extract_markers(body)
+    if not markers:
+        return base
+    marked = markers[0]
+    marked.title = base.title
+    marked.body = base.body
+    return marked
+
+
 def collect_signals(comments: list[dict], model: str = "") -> list[ReviewSignal]:
     """Normalize a PR's comments across every recognized reviewer into one list.
 
     Dispatch is per comment: PR-Agent by format, Copilot by author, CodeRabbit by
     author *and* the presence of a finding classification (its chat replies and
-    rate-limit notices are skipped). Unrecognized comments are skipped.
+    rate-limit notices are skipped). Unrecognized comments are skipped. When a
+    comment carries a fuko-signal marker, its review-time fields take precedence
+    (see :func:`_prefer_marker`).
     """
     out: list[ReviewSignal] = []
     for c in comments:
         body = c.get("body", "") or ""
         if is_pragent_comment(body):
-            out.append(pragent_signal(c, model))
+            out.append(_prefer_marker(pragent_signal(c, model), body))
         elif is_copilot_comment(c):
-            out.append(copilot_signal(c))
+            out.append(_prefer_marker(copilot_signal(c), body))
         elif is_coderabbit_comment(c) and is_coderabbit_finding(body):
-            out.append(coderabbit_signal(c))
+            out.append(_prefer_marker(coderabbit_signal(c), body))
     return out
