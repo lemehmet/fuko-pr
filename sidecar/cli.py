@@ -79,8 +79,10 @@ def _cmd_review(args) -> None:
     from . import runner
 
     result = runner.review(args.pr_url, args.config)
+    if result.detail:
+        label = "review backend failed" if result.returncode != 0 else "review backend warning"
+        print(f"{label}: {result.detail}", file=sys.stderr)
     if result.returncode != 0:
-        print(f"review backend failed: {result.detail}", file=sys.stderr)
         sys.exit(1)
 
 
