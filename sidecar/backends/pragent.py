@@ -64,6 +64,11 @@ class PrAgentBackend:
         PR-Agent's dynaconf has a section per provider family, so the API base
         and key route to ``<FAMILY>__API_BASE`` / ``<FAMILY>__KEY`` derived from
         the preset's prefix (``OPENAI``, ``OLLAMA``, ``ANTHROPIC``, ...).
+
+        Ticket-compliance analysis is disabled
+        (``PR_REVIEWER__REQUIRE_TICKET_ANALYSIS_REVIEW=false``): it fetches the
+        sub-issues of ``#<n>`` refs in the PR body and throws on a ref that
+        resolves to a PR rather than an issue, and it is irrelevant to a review.
         """
         model_id = preset.litellm_prefix + model.name
         family = preset.litellm_prefix.rstrip("/").upper()
@@ -71,11 +76,6 @@ class PrAgentBackend:
             "CONFIG__MODEL": model_id,
             "CONFIG__FALLBACK_MODELS": f'["{model_id}"]',
             "PR_CODE_SUGGESTIONS__COMMITABLE_CODE_SUGGESTIONS": "true",
-            # PR-Agent's ticket-compliance analysis parses `#<n>` references in
-            # the PR body and fetches their sub-issues; on a reference that
-            # resolves to a PR (not an issue) its GraphQL null-handling throws
-            # (`fetch_sub_issues` AttributeError). It is irrelevant to a code
-            # review, so disable it (the review still runs; the traceback goes).
             "PR_REVIEWER__REQUIRE_TICKET_ANALYSIS_REVIEW": "false",
         }
 
