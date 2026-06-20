@@ -144,6 +144,37 @@ def test_invoke_times_out_and_kills_container(monkeypatch):
     assert killed and killed[0].startswith("fuko-pragent-")  # the container was reaped
 
 
+def test_invoke_optional_tool_timeout_is_nonfatal(monkeypatch):
+    from sidecar.fukoconfig import ReviewConfig
+
+    class _Ok:
+        returncode = 0
+
+    def fake_run(cmd, env=None, check=False, timeout=None, **kw):
+        if cmd[:2] == ["docker", "kill"]:
+            return _Ok()
+        if cmd[-1] == "review":  # the primary tool succeeds
+            return _Ok()
+        raise pragent.subprocess.TimeoutExpired(cmd, timeout)  # `improve` hangs
+
+    monkeypatch.setattr(pragent.subprocess, "run", fake_run)
+    pr = PRRef(repo="o/r", number=1, url="https://github.com/o/r/pull/1")
+    cfg = ReviewConfig(tool_timeout=5, optional_tools=["improve"])
+    result = pragent.PrAgentBackend(cfg).invoke(pr, {}, ["review", "improve"])
+
+    # review ok + improve timed out, but improve is optional -> overall success
+    assert result.returncode == 0
+    assert "improve timed out after 5s" in result.detail and "[optional]" in result.detail
+
+
+def test_build_env_disables_ticket_analysis():
+    from sidecar.fukoconfig import ModelConfig
+    from sidecar.presets import get_preset
+
+    env = pragent.PrAgentBackend().build_env(get_preset("ollama"), ModelConfig(), "", ["review"])
+    assert env["PR_REVIEWER__REQUIRE_TICKET_ANALYSIS_REVIEW"] == "false"
+
+
 class _FakeStore:
     def __init__(self, results=None):
         self.results = results or []

@@ -32,6 +32,14 @@ class ReviewConfig(BaseModel):
     image: str | None = None
     docker_extra_args: list[str] = Field(default_factory=list)
     tool_timeout: int = 900
+    optional_tools: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Tools whose failure (incl. timeout) is a warning, not a fuko-review "
+            "failure -- e.g. ['improve'] so a stalled code-suggestions pass doesn't "
+            "red an observe-only review check once 'review' has posted."
+        ),
+    )
 
 
 class PostgresStoreConfig(BaseModel):

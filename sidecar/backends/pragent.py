@@ -49,6 +49,7 @@ class PrAgentBackend:
         self.image = config.image if config and config.image else self.DEFAULT_IMAGE
         self.docker_extra_args = list(config.docker_extra_args) if config else []
         self.tool_timeout = config.tool_timeout if config else 900
+        self.optional_tools = set(config.optional_tools) if config else set()
 
     def build_env(
         self,
@@ -63,6 +64,11 @@ class PrAgentBackend:
         PR-Agent's dynaconf has a section per provider family, so the API base
         and key route to ``<FAMILY>__API_BASE`` / ``<FAMILY>__KEY`` derived from
         the preset's prefix (``OPENAI``, ``OLLAMA``, ``ANTHROPIC``, ...).
+
+        Ticket-compliance analysis is disabled
+        (``PR_REVIEWER__REQUIRE_TICKET_ANALYSIS_REVIEW=false``): it fetches the
+        sub-issues of ``#<n>`` refs in the PR body and throws on a ref that
+        resolves to a PR rather than an issue, and it is irrelevant to a review.
         """
         model_id = preset.litellm_prefix + model.name
         family = preset.litellm_prefix.rstrip("/").upper()
@@ -70,6 +76,7 @@ class PrAgentBackend:
             "CONFIG__MODEL": model_id,
             "CONFIG__FALLBACK_MODELS": f'["{model_id}"]',
             "PR_CODE_SUGGESTIONS__COMMITABLE_CODE_SUGGESTIONS": "true",
+            "PR_REVIEWER__REQUIRE_TICKET_ANALYSIS_REVIEW": "false",
         }
 
         base_url = model.base_url or preset.base_url
@@ -112,6 +119,16 @@ class PrAgentBackend:
 
         rc = 0
         details: list[str] = []
+
+        def _record(tool: str, code: int, what: str) -> None:
+            """Record a tool failure — fatal unless the tool is marked optional."""
+            nonlocal rc
+            if tool in self.optional_tools:
+                details.append(f"{what} [optional]")
+            else:
+                rc = rc or code
+                details.append(what)
+
         for index, tool in enumerate(tools):
             name = f"fuko-pragent-{os.getpid()}-{index}"
             try:
@@ -130,12 +147,12 @@ class PrAgentBackend:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-                rc = rc or 124
-                details.append(f"{tool} timed out after {self.tool_timeout}s (container killed)")
+                _record(
+                    tool, 124, f"{tool} timed out after {self.tool_timeout}s (container killed)"
+                )
                 continue
             if proc.returncode != 0:
-                rc = proc.returncode
-                details.append(f"{tool} exited {proc.returncode}")
+                _record(tool, proc.returncode, f"{tool} exited {proc.returncode}")
         return InvokeResult(returncode=rc, detail="; ".join(details))
 
     def normalize_output(self, pr: PRRef, model: str = "") -> list[ReviewSignal]:
