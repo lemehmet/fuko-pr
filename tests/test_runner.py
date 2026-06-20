@@ -167,6 +167,25 @@ def test_invoke_optional_tool_timeout_is_nonfatal(monkeypatch):
     assert "improve timed out after 5s" in result.detail and "[optional]" in result.detail
 
 
+def test_invoke_optional_tool_nonzero_exit_is_nonfatal(monkeypatch):
+    from sidecar.fukoconfig import ReviewConfig
+
+    class _Proc:
+        def __init__(self, rc):
+            self.returncode = rc
+
+    def fake_run(cmd, env=None, check=False, timeout=None, **kw):
+        return _Proc(0) if cmd[-1] == "review" else _Proc(5)  # improve exits non-zero
+
+    monkeypatch.setattr(pragent.subprocess, "run", fake_run)
+    pr = PRRef(repo="o/r", number=1, url="https://github.com/o/r/pull/1")
+    cfg = ReviewConfig(optional_tools=["improve"])
+    result = pragent.PrAgentBackend(cfg).invoke(pr, {}, ["review", "improve"])
+
+    assert result.returncode == 0  # optional non-zero exit is a warning, not a failure
+    assert "improve exited 5 [optional]" in result.detail
+
+
 def test_build_env_disables_ticket_analysis():
     from sidecar.fukoconfig import ModelConfig
     from sidecar.presets import get_preset
