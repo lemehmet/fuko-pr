@@ -2,17 +2,18 @@
 
 The pool fails over (and trips the breaker) only on a throttle or timeout; a
 genuine error (PR-Agent bug, bad config, auth) should fail fast rather than burn
-through every provider and trip every breaker on each run.
+through every provider and trip every breaker on each run. A container timeout
+(returncode 124) is throttle-class; otherwise the captured output is matched
+against rate-limit signatures, with ``429`` bounded so it cannot hit unrelated
+digits.
 """
 
 import re
 
-# Substrings LiteLLM / the providers emit on 429-class conditions. Matched
-# case-insensitively against the captured backend output.
 _THROTTLE_RE = re.compile(
     r"rate.?limit"
     r"|too.?many.?requests"
-    r"|429"
+    r"|\b429\b"
     r"|quota"
     r"|overloaded"
     r"|over_?capacity"
@@ -22,7 +23,6 @@ _THROTTLE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# fuko's sentinel exit code for a container it killed after ``tool_timeout``.
 TIMEOUT_RETURNCODE = 124
 
 

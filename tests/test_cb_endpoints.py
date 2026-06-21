@@ -6,7 +6,7 @@ from sidecar import circuit_breaker, main
 
 
 def _client(monkeypatch):
-    monkeypatch.setattr(main.settings, "auth_token", None)  # disable bearer auth
+    monkeypatch.setattr(main.settings, "auth_token", None)
     return TestClient(main.app)
 
 

@@ -10,7 +10,7 @@ that holds its key. Distinct from :mod:`sidecar.config`, which holds runtime
 import tomllib
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 DEFAULT_CONFIG_PATH = ".fuko.toml"
 
@@ -50,6 +50,25 @@ class ReviewConfig(BaseModel):
     strategy: str = "failover"
     cooldown_seconds: int = 300
     tools: list[str] = Field(default_factory=lambda: ["review", "improve"])
+
+    @field_validator("strategy")
+    @classmethod
+    def _known_strategy(cls, value: str) -> str:
+        """Reject an unimplemented pool strategy at config-parse time."""
+        allowed = {"failover"}
+        if value not in allowed:
+            raise ValueError(
+                f"unknown review strategy {value!r}; supported: {', '.join(sorted(allowed))}"
+            )
+        return value
+
+    @field_validator("cooldown_seconds")
+    @classmethod
+    def _positive_cooldown(cls, value: int) -> int:
+        """Require a positive circuit-breaker cooldown window."""
+        if value <= 0:
+            raise ValueError("cooldown_seconds must be > 0")
+        return value
     image: str | None = None
     docker_extra_args: list[str] = Field(default_factory=list)
     tool_timeout: int = 900

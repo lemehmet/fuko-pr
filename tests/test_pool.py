@@ -15,7 +15,6 @@ def test_resolve_pool_uses_providers_when_present():
 
 
 def test_resolve_pool_falls_back_to_single_model():
-    # Legacy config: only [review.model], no providers -> a one-entry pool.
     review = ReviewConfig(model=_m("ollama", "kimi"))
     pool = resolve_pool(review)
     assert len(pool) == 1
@@ -34,7 +33,6 @@ def test_order_pool_priority_when_nothing_cooled():
 def test_order_pool_puts_cooled_last():
     pool = [_m("zai-coding"), _m("anthropic"), _m("ollama")]
     ordered = order_pool(pool, {"zai-coding"})
-    # eligible first in priority order, the cooled provider appended last
     assert [m.provider for m in ordered] == ["anthropic", "ollama", "zai-coding"]
 
 

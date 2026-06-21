@@ -63,11 +63,8 @@ def test_review_fails_over_on_throttle(monkeypatch):
     result = runner.review("https://github.com/o/r/pull/1")
 
     assert result.returncode == 0
-    # tried the priority provider, then failed over to the next
     assert [m.provider for m in backend.models] == ["zai-coding", "anthropic"]
-    # the throttled provider's breaker was tripped with the configured window
     assert trips == [("zai-coding", 120)]
-    # normalized against the WINNING provider's model id
     assert backend.normalized == "anthropic/claude-sonnet-4-6"
 
 
@@ -80,8 +77,8 @@ def test_review_non_throttle_error_does_not_fail_over(monkeypatch):
     result = runner.review("https://github.com/o/r/pull/1")
 
     assert result.returncode == 2
-    assert [m.provider for m in backend.models] == ["zai-coding"]  # only the first tried
-    assert trips == []  # a real error must not trip the breaker
+    assert [m.provider for m in backend.models] == ["zai-coding"]
+    assert trips == []
 
 
 def test_review_skips_cooled_provider(monkeypatch):
@@ -91,7 +88,6 @@ def test_review_skips_cooled_provider(monkeypatch):
     result = runner.review("https://github.com/o/r/pull/1")
 
     assert result.returncode == 0
-    # the cooled provider is skipped; the eligible one is tried first and wins
     assert [m.provider for m in backend.models] == ["anthropic"]
 
 
@@ -108,7 +104,7 @@ def test_review_exhausts_pool_when_all_throttle(monkeypatch):
 
     assert result.throttled is True
     assert {p for p, _ in trips} == {"zai-coding", "anthropic"}
-    assert backend.normalized is None  # never succeeded, so never normalized
+    assert backend.normalized is None
 
 
 def test_legacy_single_model_still_runs(monkeypatch):
@@ -141,11 +137,10 @@ def test_invoke_detects_throttle_and_stops_early(monkeypatch):
 
     assert result.throttled is True
     assert result.returncode == 1
-    assert ran == ["review"]  # stopped early; did not run `improve` on a throttled provider
+    assert ran == ["review"]
 
 
 def test_circuit_breaker_no_ops_without_database(monkeypatch):
-    # With no FUKO_DATABASE_URL the breaker degrades to a no-op rather than erroring.
     monkeypatch.setattr(circuit_breaker.settings, "database_url", "")
     assert circuit_breaker.get_cooldowns() == {}
     assert circuit_breaker.trip("zai-coding", 300, "429") is None
@@ -180,7 +175,7 @@ def test_cb_cooldowns_empty_on_http_error(monkeypatch):
         raise RuntimeError("sidecar down")
 
     monkeypatch.setattr(runner.httpx, "get", boom)
-    assert runner._cb_cooldowns() == set()  # read failure must not block the review
+    assert runner._cb_cooldowns() == set()
 
 
 def test_cb_trip_uses_local_breaker_without_url(monkeypatch):

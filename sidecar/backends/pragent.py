@@ -124,6 +124,12 @@ class PrAgentBackend:
         ``extra_instructions`` out of the command line. The image runs exactly the
         named tool (``review``, ``improve``, ...); no GitHub event payload is
         required, so the runner works from any CI or a laptop.
+
+        Output is captured and re-echoed so it can be scanned for a throttle
+        signature. A throttle (or timeout) on a required tool returns early with
+        ``throttled=True`` so the runner fails over to the next provider without
+        running the remaining tools; the same on an optional tool is a non-fatal
+        skip.
         """
         full_env = {**os.environ, **env}
         forward: list[str] = []
@@ -166,9 +172,6 @@ class PrAgentBackend:
                     stderr=subprocess.DEVNULL,
                 )
                 what = f"{tool} timed out after {self.tool_timeout}s (container killed)"
-                # A timeout on a REQUIRED tool is throttle-class: stop and let the
-                # runner fail over to another provider. On an optional tool it's
-                # just a skipped pass (don't re-run the whole job elsewhere).
                 if not optional:
                     return InvokeResult(
                         returncode=124, detail="; ".join([*details, what]), throttled=True
@@ -181,8 +184,6 @@ class PrAgentBackend:
                 blob = (proc.stdout or "") + "\n" + (proc.stderr or "")
                 throttled = is_throttle(proc.returncode, blob)
                 if throttled and not optional:
-                    # Provider is throttled: stop early (don't run remaining tools
-                    # on it) so the runner can fail over to the next provider.
                     return InvokeResult(
                         returncode=proc.returncode,
                         detail="; ".join([*details, f"{tool} throttled (exit {proc.returncode})"]),

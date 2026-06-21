@@ -32,14 +32,16 @@ def _migration_sql(dim: int) -> list[str]:
     """All ``migrations/*.sql`` statements in filename order.
 
     The ``vector(N)`` substitution sets the embedding column to the live model's
-    dimension; it is a no-op on migrations without a vector column. Every
-    migration is idempotent (``IF NOT EXISTS``), so applying them on each pool
-    creation is safe.
+    dimension; it is a no-op on migrations without a vector column. ``--`` line
+    comments are stripped before splitting on ``;`` so a semicolon inside a
+    comment cannot truncate a statement. Every migration is idempotent
+    (``IF NOT EXISTS``), so applying them on each pool creation is safe.
     """
     mig_dir = Path(__file__).resolve().parent.parent / "migrations"
     stmts: list[str] = []
     for path in sorted(mig_dir.glob("*.sql")):
         sql = re.sub(r"vector\(\d+\)", f"vector({dim})", path.read_text())
+        sql = re.sub(r"--[^\n]*", "", sql)
         stmts.extend(s.strip() for s in sql.split(";") if s.strip())
     return stmts
 

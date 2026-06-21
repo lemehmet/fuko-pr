@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from dataclasses import replace
 
 import httpx
 
@@ -297,9 +298,8 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
             file=sys.stderr,
         )
 
-        result = backend.invoke(pr, env, cfg.review.tools)
+        result = replace(backend.invoke(pr, env, cfg.review.tools), provider=model.provider)
         if not result.throttled:
-            # Success or a non-throttle failure: do not fail over.
             if result.returncode == 0:
                 _normalize(backend, pr, model)
             return result
