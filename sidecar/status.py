@@ -27,22 +27,15 @@ _COPILOT_LOGINS = {"copilot", "copilot-pull-request-reviewer[bot]"}
 _CR_IN_PROGRESS = re.compile(r"review in progress|Currently processing new changes", re.I)
 _CR_RATE_LIMIT = re.compile(r"Rate limit exceeded", re.I)
 _CR_PAUSED = re.compile(r"Reviews paused|review paused by coderabbit\.ai", re.I)
-_CR_DONE_ZERO = re.compile(r"No actionable comments were generated", re.I)
-# A *terminal* walkthrough marker — CR writes one of these only once it has finished
-# posting its review for the current pass. "Actionable comments posted: N" appears on
-# runs with findings; the zero-finding line covers clean runs. The mere presence of the
-# "Reviewing files … between …" range line (below) is NOT terminal: CR posts it up front,
-# then streams inline comments for 1–2 min afterwards (issue #17), so keying done on it
-# alone reports done prematurely.
+_CR_DONE_ZERO = re.compile(r"(?im)^[>\s*_]*No actionable comments(?: were generated)?\b")
 _CR_DONE_MARKER = re.compile(
-    r"Actionable comments posted:\s*\d+|No actionable comments were generated", re.I
+    r"(?im)^[>\s*_]*(?:Actionable comments posted:\s*\d+"
+    r"|No actionable comments(?: were generated)?)\b"
 )
 # The walkthrough's "Reviewing files … between <base> and <HEAD>" line; group 2 is
 # the commit CodeRabbit actually scanned.
 _CR_REVIEWING = re.compile(r"between\s+`?([0-9a-f]{7,40})`?\s+and\s+`?([0-9a-f]{7,40})`?", re.I)
 
-# CodeRabbit's GitHub check-run name(s) — its presence on the HEAD commit and whether
-# its ``status`` is ``completed`` is the authoritative done signal (issue #17, opt 1).
 _CR_CHECK_NAMES = re.compile(r"coderabbit", re.I)
 
 
@@ -89,25 +82,29 @@ def coderabbit_state(
     walkthrough range line up front and then streams inline comments 1–2 min later.
 
     When no check-run is observable (older PRs, or a token without checks access),
-    fall back to the comment/review heuristic — but require a *terminal* walkthrough
-    marker ("Actionable comments posted: N" / "No actionable comments") rather than the
-    mere "Reviewing files … between … and <HEAD>" range line, which CR posts before it
-    has finished. Two independent "scanned HEAD" signals are combined for the SHA match:
-    the walkthrough range line (absent on some runs) OR a submitted CR review whose
-    ``commit_id`` is HEAD (stale or absent on zero-finding runs).
+    fall back to the comment/review heuristic — but require a *terminal* marker
+    ("Actionable comments posted: N" / "No actionable comments") rather than the mere
+    "Reviewing files … between … and <HEAD>" range line, which CR posts before it has
+    finished. The range line and the terminal marker live in CR's walkthrough issue
+    comment *or* its review body depending on CR's mode, so both are searched. Two
+    independent "scanned HEAD" signals satisfy the SHA match: a range line whose end is
+    HEAD (absent on some runs) OR a submitted CR review whose ``commit_id`` is HEAD
+    (stale or absent on zero-finding runs). The marker is required on text tied to the
+    *current* HEAD — a range line ending at HEAD, an on-HEAD review body, or (once CR
+    has reviewed HEAD) its in-place-edited summary — so a prior HEAD's stale marker can
+    no longer report done early.
     """
-    bodies = [
+    cr_issue_bodies = [
         c.get("body", "") or ""
         for c in issue_comments
         if (c.get("user") or {}).get("login", "").lower() == _CR_LOGIN
     ]
     cr_reviews = [r for r in reviews if (r.get("user") or {}).get("login", "").lower() == _CR_LOGIN]
+    bodies = cr_issue_bodies + [r.get("body", "") or "" for r in cr_reviews]
     check = _coderabbit_check(check_runs)
     if not bodies and not cr_reviews and check is None:
         return _row("coderabbit", "none", None, "no CodeRabbit activity")
 
-    # Authoritative: CodeRabbit's own check-run on the HEAD commit. The caller fetched
-    # check-runs for this exact SHA, so the check is on-HEAD by construction.
     if check is not None:
         status = (check.get("status") or "").lower()
         if status != "completed":
@@ -131,7 +128,9 @@ def coderabbit_state(
     walkthrough = next((b for b in bodies if _CR_REVIEWING.search(b)), "")
     m = _CR_REVIEWING.search(walkthrough)
     walk_head = m.group(2) if m else None
-    walk_on_head = _sha_match(walk_head, head_sha)
+    walk_on_head = any(
+        (mm := _CR_REVIEWING.search(b)) and _sha_match(mm.group(2), head_sha) for b in bodies
+    )
     review_on_head = any(r.get("commit_id") == head_sha for r in cr_reviews)
 
     # Transient states only matter while the current HEAD hasn't been scanned —
@@ -150,10 +149,12 @@ def coderabbit_state(
             "coderabbit", "pending", walk_head, "neither walkthrough nor review covers the HEAD"
         )
 
-    # HEAD is scanned, but without a check-run we can't see the "still streaming inline
-    # comments" window directly — require a terminal walkthrough marker before calling
-    # it done, otherwise treat it as in_progress so a consumer keeps polling (issue #17).
-    if not _CR_DONE_MARKER.search(blob):
+    head_blob = "\n".join(
+        [b for b in bodies if (mm := _CR_REVIEWING.search(b)) and _sha_match(mm.group(2), head_sha)]
+        + [r.get("body", "") or "" for r in cr_reviews if r.get("commit_id") == head_sha]
+        + (cr_issue_bodies if review_on_head else [])
+    )
+    if not _CR_DONE_MARKER.search(head_blob):
         return _row(
             "coderabbit",
             "in_progress",
@@ -161,7 +162,7 @@ def coderabbit_state(
             "HEAD scanned but no completion marker yet (inline comments may still be posting)",
         )
 
-    zero = bool(_CR_DONE_ZERO.search(blob))
+    zero = bool(_CR_DONE_ZERO.search(head_blob))
     return _row(
         "coderabbit",
         "done",

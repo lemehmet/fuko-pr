@@ -149,9 +149,6 @@ def _cmd_status(args) -> None:
     except httpx.HTTPStatusError as e:
         _exit_on_auth_error(e, pr, token)
 
-    # Check-runs on HEAD are the authoritative CodeRabbit-completion signal (issue #17),
-    # but degrade gracefully: a token without checks access (or an API that omits the
-    # endpoint) falls back to the comment/review heuristic rather than failing `status`.
     try:
         check_runs = runner.fetch_check_runs(pr, head, token, api_url)
     except httpx.HTTPStatusError:
