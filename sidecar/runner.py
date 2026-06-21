@@ -26,6 +26,7 @@ from .backends.base import InvokeResult, PRRef
 from .fukoconfig import DEFAULT_CONFIG_PATH, FukoConfig, KnowledgeConfig, ModelConfig, load_config
 from .pool import order_pool, resolve_pool
 from .presets import get_preset
+from .sizing import required_context
 from .stores import get_store
 
 _PR_URL = re.compile(r"https?://[^/]+/([^/]+/[^/]+)/pull/(\d+)")
@@ -262,13 +263,34 @@ def _normalize(backend, pr: PRRef, model: ModelConfig) -> None:
         pass
 
 
+def _estimate_required_context(pr: PRRef, token: str, api_url: str, knowledge: str) -> int | None:
+    """Estimate the context window this review needs, or ``None`` if unsizable.
+
+    Fetches the PR diff to size the job; any failure returns ``None`` so
+    context-fit ordering is skipped rather than ever blocking a review.
+    """
+    try:
+        base = api_url.rstrip("/")
+        headers = _gh_headers(token)
+        headers["Accept"] = "application/vnd.github.diff"
+        with httpx.Client(timeout=30.0, headers=headers) as client:
+            resp = client.get(f"{base}/repos/{pr.repo}/pulls/{pr.number}")
+            resp.raise_for_status()
+            diff = resp.text
+        return required_context(len(diff), len(knowledge))
+    except Exception as e:
+        print(f"fuko: could not size PR for context-fit, not gating: {e}", file=sys.stderr)
+        return None
+
+
 def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
     """Run a full review for ``pr_url``, failing over across the provider pool.
 
-    Providers are tried in priority order, skipping any that are in
-    circuit-breaker cooldown. The first provider is pinned for the whole job; a
-    throttle (429/quota/overload/timeout) trips its breaker and fails the job
-    over to the next provider, while any other error fails fast (no failover).
+    Providers are tried in priority order, with those whose context window can't
+    hold the job and those in circuit-breaker cooldown demoted to last resort.
+    The first provider is pinned for the whole job; a throttle (429/quota/
+    overload/timeout) trips its breaker and fails the job over to the next
+    provider, while any other error fails fast (no failover).
     """
     cfg: FukoConfig = load_config(config_path)
     pr = parse_pr_url(pr_url)
@@ -281,7 +303,8 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
 
     pool = resolve_pool(cfg.review)
     cooled = _cb_cooldowns()
-    ordered = order_pool(pool, cooled)
+    required = _estimate_required_context(pr, token, api_url, knowledge)
+    ordered = order_pool(pool, cooled, required)
 
     result = InvokeResult(returncode=1, detail="no providers configured")
     for index, model in enumerate(ordered):
