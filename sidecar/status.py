@@ -32,8 +32,6 @@ _CR_DONE_MARKER = re.compile(
     r"(?im)^[>\s*_]*(?:Actionable comments posted:\s*\d+"
     r"|No actionable comments(?: were generated)?)\b"
 )
-# The walkthrough's "Reviewing files … between <base> and <HEAD>" line; group 2 is
-# the commit CodeRabbit actually scanned.
 _CR_REVIEWING = re.compile(r"between\s+`?([0-9a-f]{7,40})`?\s+and\s+`?([0-9a-f]{7,40})`?", re.I)
 
 _CR_CHECK_NAMES = re.compile(r"coderabbit", re.I)
@@ -136,9 +134,6 @@ def coderabbit_state(
     )
     review_on_head = any(r.get("commit_id") == head_sha for r in cr_reviews)
 
-    # Transient states only matter while the current HEAD hasn't been scanned —
-    # the markers are sticky, so an earlier rate-limit/pause must not mask a later
-    # completed scan.
     if not (walk_on_head or review_on_head):
         if _CR_RATE_LIMIT.search(blob):
             return _row(
