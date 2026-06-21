@@ -43,9 +43,7 @@ class ReviewConfig(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     providers: list[ModelConfig] = Field(
         default_factory=list,
-        description=(
-            "Ordered provider pool (priority = order). Empty means use `model`."
-        ),
+        description=("Ordered provider pool (priority = order). Empty means use `model`."),
     )
     strategy: str = "failover"
     cooldown_seconds: int = 300
@@ -69,6 +67,7 @@ class ReviewConfig(BaseModel):
         if value <= 0:
             raise ValueError("cooldown_seconds must be > 0")
         return value
+
     image: str | None = None
     docker_extra_args: list[str] = Field(default_factory=list)
     tool_timeout: int = 900

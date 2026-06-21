@@ -42,6 +42,7 @@ def _echo(stdout: str | None, stderr: str | None) -> None:
     if stderr:
         print(stderr, end="", file=sys.stderr)
 
+
 _TOOL_FLAGS = {
     "review": "github_action_config.auto_review",
     "improve": "github_action_config.auto_improve",

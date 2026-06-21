@@ -31,8 +31,7 @@ def get_cooldowns() -> dict[str, str]:
 
     with db() as conn:
         rows = conn.execute(
-            "SELECT provider, cooldown_until FROM provider_cooldown "
-            "WHERE cooldown_until > now()"
+            "SELECT provider, cooldown_until FROM provider_cooldown WHERE cooldown_until > now()"
         ).fetchall()
     return {provider: until.isoformat() for provider, until in rows}
 

@@ -45,9 +45,7 @@ def _wire(monkeypatch, cfg, backend, cooled=frozenset()):
     monkeypatch.setattr(runner, "get_backend", lambda name, c: backend)
     monkeypatch.setattr(runner, "_cb_cooldowns", lambda: set(cooled))
     trips = []
-    monkeypatch.setattr(
-        runner, "_cb_trip", lambda prov, secs, reason: trips.append((prov, secs))
-    )
+    monkeypatch.setattr(runner, "_cb_trip", lambda prov, secs, reason: trips.append((prov, secs)))
     return trips
 
 
@@ -69,9 +67,7 @@ def test_review_fails_over_on_throttle(monkeypatch):
 
 
 def test_review_non_throttle_error_does_not_fail_over(monkeypatch):
-    backend = _FakeBackend(
-        [InvokeResult(returncode=2, detail="pr-agent bug", throttled=False)]
-    )
+    backend = _FakeBackend([InvokeResult(returncode=2, detail="pr-agent bug", throttled=False)])
     trips = _wire(monkeypatch, _two_provider_cfg(), backend)
 
     result = runner.review("https://github.com/o/r/pull/1")

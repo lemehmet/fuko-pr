@@ -212,9 +212,7 @@ def _cb_cooldowns() -> set[str]:
     try:
         if fuko_url:
             headers = {"Authorization": "Bearer " + fuko_token} if fuko_token else {}
-            resp = httpx.get(
-                fuko_url.rstrip("/") + "/cb/cooldowns", headers=headers, timeout=10.0
-            )
+            resp = httpx.get(fuko_url.rstrip("/") + "/cb/cooldowns", headers=headers, timeout=10.0)
             resp.raise_for_status()
             data = resp.json().get("cooldowns") if isinstance(resp.json(), dict) else None
             return set(data.keys()) if isinstance(data, dict) else set()
