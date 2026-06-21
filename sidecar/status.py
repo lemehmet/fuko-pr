@@ -158,7 +158,7 @@ def coderabbit_state(
         return _row(
             "coderabbit",
             "in_progress",
-            walk_head if walk_on_head else head_sha,
+            head_sha,
             "HEAD scanned but no completion marker yet (inline comments may still be posting)",
         )
 

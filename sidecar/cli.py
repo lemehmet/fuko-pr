@@ -151,7 +151,7 @@ def _cmd_status(args) -> None:
 
     try:
         check_runs = runner.fetch_check_runs(pr, head, token, api_url)
-    except httpx.HTTPStatusError:
+    except httpx.HTTPError:
         check_runs = None
 
     print(json.dumps(reviewer_states(head, issue_comments, reviews, check_runs), indent=2))

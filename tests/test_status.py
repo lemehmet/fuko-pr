@@ -147,6 +147,7 @@ def test_coderabbit_done_when_marker_in_review_body():
     s = coderabbit_state(HEAD, [summary], [review])
     assert s["state"] == "done"
     assert "inline" in s["detail"]
+    assert s["head_reviewed"] == HEAD
 
 
 def test_coderabbit_stale_marker_in_old_review_does_not_satisfy_head():
@@ -157,6 +158,8 @@ def test_coderabbit_stale_marker_in_old_review_does_not_satisfy_head():
     cur = _cr_review(HEAD, body=_review_body(HEAD))
     s = coderabbit_state(HEAD, [], [old, cur])
     assert s["state"] == "in_progress"
+    # head_reviewed must be the current HEAD, not the older scan's sha matched first.
+    assert s["head_reviewed"] == HEAD
 
 
 def test_coderabbit_done_short_no_actionable_marker():
