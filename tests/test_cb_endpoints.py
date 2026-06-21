@@ -4,10 +4,12 @@ from fastapi.testclient import TestClient
 
 from sidecar import circuit_breaker, main
 
+_TOKEN = "test-token"
+
 
 def _client(monkeypatch):
-    monkeypatch.setattr(main.settings, "auth_token", None)
-    return TestClient(main.app)
+    monkeypatch.setattr(main.settings, "auth_token", _TOKEN)
+    return TestClient(main.app, headers={"Authorization": f"Bearer {_TOKEN}"})
 
 
 def test_cb_cooldowns_endpoint(monkeypatch):
@@ -34,3 +36,22 @@ def test_cb_trip_endpoint(monkeypatch):
     assert resp.status_code == 200
     assert resp.json() == {"provider": "zai-coding", "cooldown_until": "2026-06-21T20:05:00+00:00"}
     assert seen == {"provider": "zai-coding", "cooldown_seconds": 300, "reason": "429"}
+
+
+def test_missing_bearer_is_rejected_when_token_configured(monkeypatch):
+    monkeypatch.setattr(main.settings, "auth_token", _TOKEN)
+    resp = TestClient(main.app).get("/cb/cooldowns")
+    assert resp.status_code == 401
+
+
+def test_endpoint_denied_when_auth_unconfigured(monkeypatch):
+    monkeypatch.setattr(main.settings, "auth_token", None)
+    resp = TestClient(main.app).get("/cb/cooldowns")
+    assert resp.status_code == 503
+
+
+def test_healthz_is_open_without_auth(monkeypatch):
+    monkeypatch.setattr(main.settings, "auth_token", None)
+    resp = TestClient(main.app).get("/healthz")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}

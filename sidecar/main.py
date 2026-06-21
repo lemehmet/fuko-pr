@@ -16,8 +16,19 @@ _store = get_store(load_config().knowledge)
 
 
 def _auth(authorization: str | None = Header(default=None)) -> None:
-    """Bearer-token dependency; a no-op when ``FUKO_AUTH_TOKEN`` is unset."""
-    if settings.auth_token and authorization != f"Bearer {settings.auth_token}":
+    """Bearer-token dependency, fail-closed.
+
+    Every protected endpoint requires a matching ``Bearer <FUKO_AUTH_TOKEN>``.
+    When no token is configured the endpoint is refused (503) rather than served
+    unauthenticated, so a misconfigured deployment cannot expose the mutating
+    endpoints. ``/healthz`` is the only unauthenticated route.
+    """
+    if not settings.auth_token:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "server auth not configured (set FUKO_AUTH_TOKEN)",
+        )
+    if authorization != f"Bearer {settings.auth_token}":
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid token")
 
 

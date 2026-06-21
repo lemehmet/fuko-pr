@@ -18,6 +18,15 @@ pytestmark = pytest.mark.skipif(
 )
 
 TEST_REPO = "fuko-ci/test"
+_TOKEN = "ci-test-token"
+_AUTH = {"Authorization": f"Bearer {_TOKEN}"}
+
+
+@pytest.fixture(autouse=True)
+def _auth_token(monkeypatch):
+    from sidecar.config import settings
+
+    monkeypatch.setattr(settings, "auth_token", _TOKEN)
 
 
 @pytest.fixture(autouse=True)
@@ -56,7 +65,7 @@ def test_api_endpoints():
 
     from sidecar.main import app
 
-    client = TestClient(app)
+    client = TestClient(app, headers=_AUTH)
     assert client.get("/healthz").json() == {"ok": True}
 
     r = client.post("/query", json={"repo": TEST_REPO, "files": ["src/x.py"]})
@@ -95,7 +104,7 @@ def test_ingest_threads_mines_resolved():
             },
         },
     ]
-    client = TestClient(app)
+    client = TestClient(app, headers=_AUTH)
     r = client.post("/ingest-threads", json={"repo": TEST_REPO, "threads": threads})
     assert r.status_code == 200
     assert r.json()["considered"] == 2
@@ -109,7 +118,7 @@ def test_comment_remember_and_forget():
     from sidecar import retrieve
     from sidecar.main import app
 
-    client = TestClient(app)
+    client = TestClient(app, headers=_AUTH)
     r = client.post(
         "/comment",
         json={
