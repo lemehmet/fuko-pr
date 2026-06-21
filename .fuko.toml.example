@@ -42,7 +42,7 @@ name = "glm-5.2"
 # [[review.providers]]
 # provider = "zai-coding"        # GLM-5.2 via z.ai, key from env ZAI_KEY (priority)
 # name = "glm-5.2"
-# max_context = 128000
+# max_context = 1000000
 #
 # [[review.providers]]
 # provider = "ollama-cloud"      # same model via Ollama Cloud, key from OLLAMA_API_KEY
