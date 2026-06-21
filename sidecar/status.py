@@ -86,13 +86,16 @@ def coderabbit_state(
     ("Actionable comments posted: N" / "No actionable comments") rather than the mere
     "Reviewing files … between … and <HEAD>" range line, which CR posts before it has
     finished. The range line and the terminal marker live in CR's walkthrough issue
-    comment *or* its review body depending on CR's mode, so both are searched. Two
-    independent "scanned HEAD" signals satisfy the SHA match: a range line whose end is
-    HEAD (absent on some runs) OR a submitted CR review whose ``commit_id`` is HEAD
-    (stale or absent on zero-finding runs). The marker is required on text tied to the
-    *current* HEAD — a range line ending at HEAD, an on-HEAD review body, or (once CR
-    has reviewed HEAD) its in-place-edited summary — so a prior HEAD's stale marker can
-    no longer report done early.
+    comment *or* its review body depending on CR's mode, so both are searched. A
+    submitted CR review whose ``commit_id`` is HEAD is itself terminal — its inline
+    comments are posted atomically with the review — so it reports ``done`` directly,
+    even with an empty body (an APPROVED review often carries no marker). The issue #17
+    race is the *up-front walkthrough* issue comment, which CR posts before it has
+    finished; so when only that range line covers HEAD and CR has not yet submitted a
+    review, a terminal marker is still required, else ``in_progress``. Marker text is
+    scoped to the current HEAD (a range line ending at HEAD, an on-HEAD review body, or
+    — once CR has reviewed HEAD — its in-place summary) so a prior HEAD's stale marker
+    can no longer report done early.
     """
     cr_issue_bodies = [
         c.get("body", "") or ""
@@ -154,7 +157,7 @@ def coderabbit_state(
         + [r.get("body", "") or "" for r in cr_reviews if r.get("commit_id") == head_sha]
         + (cr_issue_bodies if review_on_head else [])
     )
-    if not _CR_DONE_MARKER.search(head_blob):
+    if not review_on_head and not _CR_DONE_MARKER.search(head_blob):
         return _row(
             "coderabbit",
             "in_progress",

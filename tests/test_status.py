@@ -132,10 +132,19 @@ def test_coderabbit_done_via_review_commit_id_with_marker():
     assert s["head_reviewed"] == HEAD
 
 
-def test_coderabbit_in_progress_via_review_commit_id_without_marker():
+def test_coderabbit_done_via_review_on_head_without_marker():
+    # A submitted CR review on HEAD is terminal even with no marker — its inline comments
+    # post atomically with it. (issue #18 round 2: CR APPROVED with an empty review body
+    # and fuko was wrongly stuck in_progress for the full timeout.)
     plain = _cr("📝 Walkthrough\n\nIntroduces a new file. No range line here.")
     s = coderabbit_state(HEAD, [plain], [_cr_review(HEAD)])
-    assert s["state"] == "in_progress"
+    assert s["state"] == "done"
+
+
+def test_coderabbit_done_on_approved_review_with_empty_body():
+    s = coderabbit_state(HEAD, [], [_cr_review(HEAD, state="APPROVED", body="")])
+    assert s["state"] == "done"
+    assert s["head_reviewed"] == HEAD
 
 
 def test_coderabbit_done_when_marker_in_review_body():
@@ -151,12 +160,12 @@ def test_coderabbit_done_when_marker_in_review_body():
 
 
 def test_coderabbit_stale_marker_in_old_review_does_not_satisfy_head():
-    # An older review for a previous HEAD carries the terminal marker; the current
-    # HEAD's review has only the range line (marker not posted yet). The stale marker
-    # must NOT satisfy done for the new HEAD (CodeRabbit finding on this PR).
+    # Current HEAD is covered only by the up-front walkthrough (range line, no submitted
+    # review yet). An older review for a previous HEAD carries the terminal marker; that
+    # stale marker must NOT satisfy done for the new HEAD (CodeRabbit finding, round 1).
     old = _cr_review("0000aaa", body=_review_body("0000aaa", posted=3))
-    cur = _cr_review(HEAD, body=_review_body(HEAD))
-    s = coderabbit_state(HEAD, [], [old, cur])
+    walk = _walk(HEAD)
+    s = coderabbit_state(HEAD, [walk], [old])
     assert s["state"] == "in_progress"
     # head_reviewed must be the current HEAD, not the older scan's sha matched first.
     assert s["head_reviewed"] == HEAD
