@@ -21,7 +21,21 @@ def test_get_preset_ollama_cloud():
     assert p.litellm_prefix == "openai/"
     assert p.base_url == "https://ollama.com/v1"
     assert p.key_env == "OLLAMA_API_KEY"
-    assert p.quirks["custom_model_max_tokens"] == 128000
+    assert p.quirks["custom_model_max_tokens"] == 976000
+
+
+def test_build_env_ollama_cloud(monkeypatch):
+    monkeypatch.setenv("OLLAMA_API_KEY", "ol-secret")
+    env = PrAgentBackend().build_env(
+        get_preset("ollama-cloud"),
+        ModelConfig(provider="ollama-cloud", name="glm-5.2:cloud"),
+        knowledge="",
+        tools=["review"],
+    )
+    assert env["CONFIG__MODEL"] == "openai/glm-5.2:cloud"
+    assert env["OPENAI__API_BASE"] == "https://ollama.com/v1"
+    assert env["OPENAI__KEY"] == "ol-secret"
+    assert env["CONFIG__CUSTOM_MODEL_MAX_TOKENS"] == "976000"
 
 
 def test_get_preset_unknown():

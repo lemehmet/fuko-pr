@@ -33,7 +33,7 @@ PRESETS: dict[str, ProviderPreset] = {
         litellm_prefix="openai/",
         base_url="https://ollama.com/v1",
         key_env="OLLAMA_API_KEY",
-        quirks={"custom_model_max_tokens": 128000, "ai_timeout": 300},
+        quirks={"custom_model_max_tokens": 976000, "ai_timeout": 300},
     ),
     "openai": ProviderPreset(
         litellm_prefix="openai/",

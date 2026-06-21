@@ -45,9 +45,9 @@ name = "glm-5.2"
 # max_context = 128000
 #
 # [[review.providers]]
-# provider = "ollama-cloud"      # same GLM-5.2 via Ollama Cloud, key from OLLAMA_API_KEY
-# name = "glm-5.2"
-# max_context = 128000
+# provider = "ollama-cloud"      # same model via Ollama Cloud, key from OLLAMA_API_KEY
+# name = "glm-5.2:cloud"
+# max_context = 976000           # bigger window than z.ai, so it also wins huge PRs
 
 [knowledge]
 store = "postgres"              # postgres | sqlite-vec
