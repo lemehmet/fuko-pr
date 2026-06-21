@@ -1,0 +1,86 @@
+# Per-project config for the portable fuko skills (/fuko:issue,
+# /fuko:address-pr-reviews, /fuko:overnight-issue-list, /fuko:draft-issue). The
+# skill bodies read THIS file at runtime, so the same skills work in any repo —
+# a new project just drops in its own .claude/project.toml. Values below are
+# fuko-pr's (the tool's own repo, dogfooding the skills).
+#
+# Keep in sync with .github/workflows/ci.yml (the toolchain commands) and
+# .fuko.toml (the review backend) where noted.
+
+[repo]
+owner = "lemehmet"
+name = "fuko-pr"
+url = "https://github.com/lemehmet/fuko-pr"
+
+# Reviewer bots the address-pr-reviews loop waits on / triages.
+#
+# NOTE: fuko-pr's own PRs are reviewed by Copilot ONLY. CodeRabbit is not
+# installed on this repo and the fuko-pr-review bot does not review its own
+# source, so neither is gated/triaged here (adding an absent reviewer to
+# gate_reviewers would hang the round gate forever). If you install CodeRabbit
+# later, add "coderabbit" to gate_reviewers, "coderabbitai" to triage_logins,
+# and uncomment the [bots.coderabbit] block below.
+[bots]
+gate_reviewers = ["copilot"]
+triage_logins = ["copilot"]
+
+[bots.copilot]
+login = "copilot-pull-request-reviewer[bot]"
+unresponsive_timeout_ms = 600000   # 10 min (Copilot doesn't self-recover)
+
+# Not installed on this repo — kept commented for an easy future enable.
+# [bots.coderabbit]
+# login = "coderabbitai[bot]"
+# unresponsive_timeout_ms = 1500000  # 25 min (longer: CR can recover via resume)
+# resume_command = "@coderabbitai resume"
+
+[ci]
+# Workflow names to ignore in BUILD_STATE (GitHub's mirror of a bot review, etc.)
+excluded_workflow_names = ["Copilot code review"]
+
+# Local pre-push verification gates + web smoke build. Mirrors .github/workflows/ci.yml.
+[toolchain]
+# CI runs both `ruff check .` and `ruff format --check .`; gate on both.
+lint_command = "ruff check . && ruff format --check ."
+# The full suite needs Postgres (pgvector) + Ollama (bge-m3). `make up` starts
+# them via docker-compose; CI provisions the same services. Tune if you run a
+# narrower local subset.
+test_command = "pytest -q"
+# No web frontend — empty means the skill's UI-build step is skipped.
+web_build_command = ""
+
+# [fuko] intentionally omitted: this IS fuko-pr, and it does not run a fuko-pr
+# reviewer on its own PRs. The `fuko` CLI, when needed, comes from the local
+# editable install (`pip install -e ".[dev]"`), not a pinned git ref.
+
+[commit]
+# {round} and {pr} are substituted by the skill.
+round_message_template = "Address round {round} review on PR #{pr}"
+
+[issue]
+# Follow-up back-link prefixes (the deferred-finding audit greps for these).
+followup_prefix_with_originating = "Follow-up from #{issue}"
+followup_prefix_without_originating = "Follow-up from PR #{pr}"
+
+[paths]
+scratch_dir = ".agent-scratch"
+
+[merge]
+method = "squash"               # matches how #13–#16 were merged
+flags = ["admin", "delete-branch"]
+
+# The 'draft / not-ready' label /fuko:draft-issue manages. Does not exist on the
+# repo yet; /fuko:draft-issue creates it on first use from this definition.
+[labels.proto]
+name = "proto"
+color = "D4C5F9"
+description = "Stub or in-progress draft. Autonomous pipeline must not pick this up."
+
+# Timing knobs. *_ms values are milliseconds.
+[timing]
+ci_grace_window_ms = 90000              # workflow runs may lag a push ~90s
+review_poll_interval_ms = 270000        # 270s: inside the prompt-cache window
+rate_limit_wait_ms = 600000             # single longer jump while a reviewer is rate_limited
+self_wake_delay_ms = 1200000            # overnight-issue-list self-wake (20 min)
+stale_lock_threshold_ms = 1800000       # > self_wake_delay + buffer (30 min)
+stall_alarm_threshold_ms = 900000       # PR stuck in ready_for_review (15 min)
