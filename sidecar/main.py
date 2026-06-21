@@ -21,7 +21,9 @@ def _auth(authorization: str | None = Header(default=None)) -> None:
     Every protected endpoint requires a matching ``Bearer <FUKO_AUTH_TOKEN>``.
     When no token is configured the endpoint is refused (503) rather than served
     unauthenticated, so a misconfigured deployment cannot expose the mutating
-    endpoints. ``/healthz`` is the only unauthenticated route.
+    endpoints. The unauthenticated routes are ``/healthz`` and FastAPI's
+    auto-generated ``/docs``, ``/redoc``, and ``/openapi.json``, which expose
+    only the API schema -- no stored data and no mutation.
     """
     if not settings.auth_token:
         raise HTTPException(
