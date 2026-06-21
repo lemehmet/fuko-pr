@@ -149,7 +149,12 @@ def _cmd_status(args) -> None:
     except httpx.HTTPStatusError as e:
         _exit_on_auth_error(e, pr, token)
 
-    print(json.dumps(reviewer_states(head, issue_comments, reviews), indent=2))
+    try:
+        check_runs = runner.fetch_check_runs(pr, head, token, api_url)
+    except httpx.HTTPError:
+        check_runs = None
+
+    print(json.dumps(reviewer_states(head, issue_comments, reviews, check_runs), indent=2))
 
 
 def _store(config_path: str):

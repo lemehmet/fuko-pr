@@ -402,9 +402,88 @@ def test_cmd_status_emits_json(monkeypatch, capsys):
         "fetch_reviews",
         lambda pr, t, a: [{"user": {"login": "Copilot"}, "commit_id": head, "state": "APPROVED"}],
     )
+    # No CodeRabbit check-run present -> falls back to the zero-finding walkthrough marker.
+    monkeypatch.setattr(runner, "fetch_check_runs", lambda pr, ref, t, a: [])
     cli._cmd_status(argparse.Namespace(pr_url="https://github.com/o/r/pull/8"))
     out = {r["backend"]: r["state"] for r in json.loads(capsys.readouterr().out)}
     assert out == {"coderabbit": "done", "copilot": "done"}
+
+
+def test_cmd_status_uses_check_run_to_gate_coderabbit(monkeypatch, capsys):
+    import argparse
+    import json
+
+    from sidecar import cli
+
+    head = "abcdef1234567890"
+    # Walkthrough already covers HEAD, but CR's check-run is still in progress: the
+    # premature-done bug (#17). The check-run must win -> coderabbit "in_progress".
+    walk = "📝 Walkthrough\n\nReviewing files ... between `1111111` and `abcdef1`."
+    monkeypatch.setattr(runner, "fetch_pr_head", lambda pr, t, a: head)
+    monkeypatch.setattr(
+        runner,
+        "fetch_issue_comments",
+        lambda pr, t, a: [{"user": {"login": "coderabbitai[bot]"}, "body": walk}],
+    )
+    monkeypatch.setattr(runner, "fetch_reviews", lambda pr, t, a: [])
+    monkeypatch.setattr(
+        runner,
+        "fetch_check_runs",
+        lambda pr, ref, t, a: [{"name": "CodeRabbit", "status": "in_progress", "conclusion": None}],
+    )
+    cli._cmd_status(argparse.Namespace(pr_url="https://github.com/o/r/pull/8"))
+    out = {r["backend"]: r["state"] for r in json.loads(capsys.readouterr().out)}
+    assert out["coderabbit"] == "in_progress"
+
+
+def test_cmd_status_degrades_when_check_runs_forbidden(monkeypatch, capsys):
+    import argparse
+    import json
+
+    from sidecar import cli
+
+    head = "abcdef1234567890"
+    walk = (
+        "📝 Walkthrough\n\nReviewing files ... between `1111111` and "
+        "`abcdef1`.\nNo actionable comments were generated."
+    )
+    monkeypatch.setattr(runner, "fetch_pr_head", lambda pr, t, a: head)
+    monkeypatch.setattr(
+        runner,
+        "fetch_issue_comments",
+        lambda pr, t, a: [{"user": {"login": "coderabbitai[bot]"}, "body": walk}],
+    )
+    monkeypatch.setattr(runner, "fetch_reviews", lambda pr, t, a: [])
+    # A token without checks access -> fetch raises; status must still resolve via fallback.
+    monkeypatch.setattr(
+        runner, "fetch_check_runs", lambda *a: (_ for _ in ()).throw(_http_error(403))
+    )
+    cli._cmd_status(argparse.Namespace(pr_url="https://github.com/o/r/pull/8"))
+    out = {r["backend"]: r["state"] for r in json.loads(capsys.readouterr().out)}
+    assert out["coderabbit"] == "done"
+
+
+def test_fetch_check_runs_paginates(monkeypatch):
+    def handler(url, params=None):
+        assert url.endswith("/commits/deadbeef/check-runs")
+        if params["page"] == 1:
+            return _Resp({"total_count": 101, "check_runs": [{"id": i} for i in range(100)]})
+        return _Resp({"total_count": 101, "check_runs": [{"id": 999}]})
+
+    monkeypatch.setattr(runner.httpx, "Client", lambda *a, **k: _FakeClient(handler))
+    pr = PRRef(repo="o/r", number=8, url="u")
+    out = runner.fetch_check_runs(pr, "deadbeef", "t", runner._DEFAULT_API)
+    assert len(out) == 101 and out[-1]["id"] == 999
+
+
+def test_fetch_check_runs_empty(monkeypatch):
+    monkeypatch.setattr(
+        runner.httpx,
+        "Client",
+        lambda *a, **k: _FakeClient(lambda u, p=None: _Resp({"total_count": 0, "check_runs": []})),
+    )
+    out = runner.fetch_check_runs(PRRef("o/r", 8, "u"), "ref", "", runner._DEFAULT_API)
+    assert out == []
 
 
 def test_cmd_status_friendly_auth_error(monkeypatch, capsys):

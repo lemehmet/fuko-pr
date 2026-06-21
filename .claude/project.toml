@@ -12,31 +12,37 @@ owner = "lemehmet"
 name = "fuko-pr"
 url = "https://github.com/lemehmet/fuko-pr"
 
-# Reviewer bots the address-pr-reviews loop waits on / triages.
+# Reviewer bots the address-pr-reviews loop waits on / triages. fuko-pr now runs
+# the full set on its own PRs: CodeRabbit + Copilot review, and fuko-pr-review
+# observes (recursive dogfooding — the tool reviews itself).
 #
-# NOTE: fuko-pr's own PRs are reviewed by Copilot ONLY. CodeRabbit is not
-# installed on this repo and the fuko-pr-review bot does not review its own
-# source, so neither is gated/triaged here (adding an absent reviewer to
-# gate_reviewers would hang the round gate forever). If you install CodeRabbit
-# later, add "coderabbit" to gate_reviewers, "coderabbitai" to triage_logins,
-# and uncomment the [bots.coderabbit] block below.
+# The address-pr-reviews loader does hard lookups on [bots.coderabbit].login,
+# [bots.fuko_pr].login, [bots.coderabbit].resume_command and [fuko].github_ref,
+# so all of those sections must be present even if a reviewer is observe-only.
 [bots]
-gate_reviewers = ["copilot"]
-triage_logins = ["copilot"]
+gate_reviewers = ["coderabbit", "copilot"]
+triage_logins = ["coderabbitai", "copilot", "fuko-pr-review"]
 
 [bots.copilot]
 login = "copilot-pull-request-reviewer[bot]"
 unresponsive_timeout_ms = 600000   # 10 min (Copilot doesn't self-recover)
 
-# Not installed on this repo — kept commented for an easy future enable.
-# [bots.coderabbit]
-# login = "coderabbitai[bot]"
-# unresponsive_timeout_ms = 1500000  # 25 min (longer: CR can recover via resume)
-# resume_command = "@coderabbitai resume"
+[bots.coderabbit]
+login = "coderabbitai[bot]"
+unresponsive_timeout_ms = 1500000  # 25 min (longer: CR can recover via resume)
+resume_command = "@coderabbitai resume"
+
+[bots.fuko_pr]
+login = "fuko-pr-review[bot]"
+gated = false   # observe-only: triaged + replied, but not a round-gate participant
 
 [ci]
-# Workflow names to ignore in BUILD_STATE (GitHub's mirror of a bot review, etc.)
-excluded_workflow_names = ["Copilot code review"]
+# Workflow names to ignore in BUILD_STATE (GitHub's mirror of a bot review).
+# On this repo the Copilot review surfaces in actions/runs as "Running Copilot
+# Code Review" (verified) — NOT the template's "Copilot code review" — so match
+# that exact name. CodeRabbit posts check-runs, not Actions runs, so it never
+# enters BUILD_STATE and needs no exclusion here.
+excluded_workflow_names = ["Running Copilot Code Review"]
 
 # Local pre-push verification gates + web smoke build. Mirrors .github/workflows/ci.yml.
 [toolchain]
@@ -49,9 +55,17 @@ test_command = "pytest -q"
 # No web frontend — empty means the skill's UI-build step is skipped.
 web_build_command = ""
 
-# [fuko] intentionally omitted: this IS fuko-pr, and it does not run a fuko-pr
-# reviewer on its own PRs. The `fuko` CLI, when needed, comes from the local
-# editable install (`pip install -e ".[dev]"`), not a pinned git ref.
+# The `fuko` CLI used for review signals: `uvx --from "$FUKO_REF" fuko status`.
+# RECURSIVE CASE — this repo IS fuko-pr. A pinned commit (main or a release)
+# would run an OLDER fuko while reviewing the very branch that changes fuko's
+# review logic; e.g. a fix to `fuko status` couldn't gate its own PR. So we
+# point at the local checkout: uvx builds the working tree / PR branch, and the
+# code under review is the code doing the reviewing. The trade-off: a branch
+# that breaks the `fuko` CLI breaks its own review loop (acceptable — and a
+# signal you'd want). For any OTHER repo this would instead be a pinned
+# immutable commit, e.g. "git+https://github.com/lemehmet/fuko-pr@<sha>".
+[fuko]
+github_ref = "."
 
 [commit]
 # {round} and {pr} are substituted by the skill.
