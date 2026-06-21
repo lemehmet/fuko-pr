@@ -62,6 +62,8 @@ def test_invoke_runs_docker_per_tool(monkeypatch):
 
     class _Proc:
         returncode = 0
+        stdout = ""
+        stderr = ""
 
     def fake_run(cmd, env=None, check=False, timeout=None, **kw):
         calls.append((cmd, env))
@@ -92,6 +94,8 @@ def test_invoke_uses_configured_image_and_extra_args(monkeypatch):
 
     class _Proc:
         returncode = 0
+        stdout = ""
+        stderr = ""
 
     def fake_run(cmd, env=None, check=False, timeout=None, **kw):
         captured["cmd"] = cmd
@@ -112,6 +116,8 @@ def test_invoke_uses_configured_image_and_extra_args(monkeypatch):
 def test_invoke_reports_failure(monkeypatch):
     class _Proc:
         returncode = 3
+        stdout = ""
+        stderr = "review failed: boom"
 
     monkeypatch.setattr(pragent.subprocess, "run", lambda cmd, **kw: _Proc())
     pr = PRRef(repo="o/r", number=1, url="https://github.com/o/r/pull/1")
@@ -149,6 +155,8 @@ def test_invoke_optional_tool_timeout_is_nonfatal(monkeypatch):
 
     class _Ok:
         returncode = 0
+        stdout = ""
+        stderr = ""
 
     def fake_run(cmd, env=None, check=False, timeout=None, **kw):
         if cmd[:2] == ["docker", "kill"]:
@@ -173,6 +181,8 @@ def test_invoke_optional_tool_nonzero_exit_is_nonfatal(monkeypatch):
     class _Proc:
         def __init__(self, rc):
             self.returncode = rc
+            self.stdout = ""
+            self.stderr = ""
 
     def fake_run(cmd, env=None, check=False, timeout=None, **kw):
         return _Proc(0) if cmd[-1] == "review" else _Proc(5)  # improve exits non-zero
