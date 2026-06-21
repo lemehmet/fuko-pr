@@ -39,11 +39,12 @@ def _two_provider_cfg(**review_kw):
     )
 
 
-def _wire(monkeypatch, cfg, backend, cooled=frozenset()):
+def _wire(monkeypatch, cfg, backend, cooled=frozenset(), required=None):
     monkeypatch.setattr(runner, "load_config", lambda p: cfg)
     monkeypatch.setattr(runner, "build_knowledge", lambda *a, **k: "")
     monkeypatch.setattr(runner, "get_backend", lambda name, c: backend)
     monkeypatch.setattr(runner, "_cb_cooldowns", lambda: set(cooled))
+    monkeypatch.setattr(runner, "_estimate_required_context", lambda *a, **k: required)
     trips = []
     monkeypatch.setattr(runner, "_cb_trip", lambda prov, secs, reason: trips.append((prov, secs)))
     return trips
@@ -101,6 +102,24 @@ def test_review_exhausts_pool_when_all_throttle(monkeypatch):
     assert result.throttled is True
     assert {p for p, _ in trips} == {"zai-coding", "anthropic"}
     assert backend.normalized is None
+
+
+def test_review_demotes_provider_that_cannot_hold_the_job(monkeypatch):
+    cfg = FukoConfig(
+        review=ReviewConfig(
+            providers=[
+                ModelConfig(provider="ollama", name="kimi", max_context=8000),
+                ModelConfig(provider="anthropic", name="claude-sonnet-4-6", max_context=200000),
+            ]
+        )
+    )
+    backend = _FakeBackend([InvokeResult(returncode=0)])
+    _wire(monkeypatch, cfg, backend, required=50000)
+
+    result = runner.review("https://github.com/o/r/pull/1")
+
+    assert result.returncode == 0
+    assert [m.provider for m in backend.models] == ["anthropic"]
 
 
 def test_legacy_single_model_still_runs(monkeypatch):

@@ -23,17 +23,32 @@ def resolve_pool(review: ReviewConfig) -> list[ModelConfig]:
     return list(review.providers) if review.providers else [review.model]
 
 
-def order_pool(pool: Iterable[ModelConfig], cooled: set[str]) -> list[ModelConfig]:
+def order_pool(
+    pool: Iterable[ModelConfig],
+    cooled: set[str],
+    required_tokens: int | None = None,
+) -> list[ModelConfig]:
     """Order ``pool`` for a failover attempt.
 
-    Eligible providers (whose ``provider`` is not in ``cooled``) come first in
-    priority order; providers currently in cooldown are appended as a last
-    resort, so a fully-cooled pool is still attempted rather than failing
-    outright. ``cooled`` is keyed by provider id because the cooldown is global
-    per provider (a shared API key), so two pool entries on the same provider are
-    both treated as cooling.
+    Ranked first by context fit, then by cooldown, with config order (priority)
+    preserved within a tier: a provider whose ``max_context`` cannot hold the job
+    is ranked last (a definite truncation, only a last resort), then a provider
+    in cooldown is ranked after fitting/available ones. So the order is
+    fits+available > fits+cooled > too-small+available > too-small+cooled. A
+    provider with no ``max_context`` is assumed to fit, and ``required_tokens=None``
+    disables the fit check (cooldown-only ordering). ``cooled`` is keyed by
+    provider id because the cooldown is global per provider (a shared API key).
     """
     pool = list(pool)
-    eligible = [m for m in pool if m.provider not in cooled]
-    cooling = [m for m in pool if m.provider in cooled]
-    return eligible + cooling
+
+    def fits(model: ModelConfig) -> bool:
+        return (
+            required_tokens is None
+            or model.max_context is None
+            or model.max_context >= required_tokens
+        )
+
+    def rank(model: ModelConfig) -> tuple[int, int]:
+        return (0 if fits(model) else 1, 0 if model.provider not in cooled else 1)
+
+    return sorted(pool, key=rank)
