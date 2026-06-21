@@ -25,8 +25,23 @@ import httpx
 from ..fukoconfig import ModelConfig, ReviewConfig
 from ..normalizers import pragent_signals
 from ..presets import ProviderPreset
+from ..throttle import is_throttle
 from .base import InvokeResult, PRRef
 from ..signals import ReviewSignal, encode_marker, with_marker
+
+
+def _echo(stdout: str | None, stderr: str | None) -> None:
+    """Re-emit a captured tool's output so CI logs still show PR-Agent's run.
+
+    Output is captured (not inherited) so it can be scanned for a throttle
+    signature; echoing keeps the logs intact at the cost of buffering until each
+    tool finishes.
+    """
+    if stdout:
+        print(stdout, end="", file=sys.stdout)
+    if stderr:
+        print(stderr, end="", file=sys.stderr)
+
 
 _TOOL_FLAGS = {
     "review": "github_action_config.auto_review",
@@ -110,6 +125,12 @@ class PrAgentBackend:
         ``extra_instructions`` out of the command line. The image runs exactly the
         named tool (``review``, ``improve``, ...); no GitHub event payload is
         required, so the runner works from any CI or a laptop.
+
+        Output is captured and re-echoed so it can be scanned for a throttle
+        signature. A throttle (or timeout) on a required tool returns early with
+        ``throttled=True`` so the runner fails over to the next provider without
+        running the remaining tools; the same on an optional tool is a non-fatal
+        skip.
         """
         full_env = {**os.environ, **env}
         forward: list[str] = []
@@ -131,28 +152,46 @@ class PrAgentBackend:
 
         for index, tool in enumerate(tools):
             name = f"fuko-pragent-{os.getpid()}-{index}"
+            optional = tool in self.optional_tools
             try:
                 proc = subprocess.run(
                     [*docker_base, "--name", name, self.image, "--pr_url", pr.url, tool],
                     env=full_env,
                     check=False,
                     timeout=self.tool_timeout,
+                    capture_output=True,
+                    text=True,
                 )
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as exc:
                 # Reap the container so a hung tool can't outlive the killed
                 # subprocess on a persistent self-hosted runner.
+                _echo(exc.stdout, exc.stderr)
                 subprocess.run(
                     ["docker", "kill", name],
                     check=False,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-                _record(
-                    tool, 124, f"{tool} timed out after {self.tool_timeout}s (container killed)"
-                )
+                what = f"{tool} timed out after {self.tool_timeout}s (container killed)"
+                if not optional:
+                    return InvokeResult(
+                        returncode=124, detail="; ".join([*details, what]), throttled=True
+                    )
+                _record(tool, 124, what)
                 continue
+
+            _echo(proc.stdout, proc.stderr)
             if proc.returncode != 0:
-                _record(tool, proc.returncode, f"{tool} exited {proc.returncode}")
+                blob = (proc.stdout or "") + "\n" + (proc.stderr or "")
+                throttled = is_throttle(proc.returncode, blob)
+                if throttled and not optional:
+                    return InvokeResult(
+                        returncode=proc.returncode,
+                        detail="; ".join([*details, f"{tool} throttled (exit {proc.returncode})"]),
+                        throttled=True,
+                    )
+                suffix = " (throttled)" if throttled else ""
+                _record(tool, proc.returncode, f"{tool} exited {proc.returncode}{suffix}")
         return InvokeResult(returncode=rc, detail="; ".join(details))
 
     def normalize_output(self, pr: PRRef, model: str = "") -> list[ReviewSignal]:

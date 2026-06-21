@@ -28,10 +28,18 @@ class PRRef:
 
 @dataclass(frozen=True)
 class InvokeResult:
-    """The outcome of invoking a review backend."""
+    """The outcome of invoking a review backend.
+
+    ``throttled`` is set when the failure looks like provider throttling (429,
+    quota, overload, or a container timeout) -- the signal the runner uses to
+    fail over to the next provider and trip that provider's breaker. ``provider``
+    records which pool entry produced this result.
+    """
 
     returncode: int
     detail: str = ""
+    throttled: bool = False
+    provider: str | None = None
 
 
 @runtime_checkable

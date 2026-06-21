@@ -2,6 +2,7 @@
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 
+from . import circuit_breaker
 from . import models
 from . import threads as threads_mod
 from .config import settings
@@ -94,3 +95,16 @@ def ingest_threads_endpoint(req: models.IngestThreadsRequest) -> dict:
     ]
     inserted, skipped = _store.ingest(req.repo, items)
     return {"considered": len(req.threads), "inserted": inserted, "skipped": skipped}
+
+
+@app.get("/cb/cooldowns", response_model=models.CooldownsResponse, dependencies=[Depends(_auth)])
+def cb_cooldowns_endpoint() -> dict:
+    """Return the providers whose circuit breaker is currently open (cooling down)."""
+    return {"cooldowns": circuit_breaker.get_cooldowns()}
+
+
+@app.post("/cb/trip", response_model=models.TripResponse, dependencies=[Depends(_auth)])
+def cb_trip_endpoint(req: models.TripRequest) -> dict:
+    """Open a provider's circuit breaker for a cooldown window (idempotent upsert)."""
+    until = circuit_breaker.trip(req.provider, req.cooldown_seconds, req.reason or "")
+    return {"provider": req.provider, "cooldown_until": until}

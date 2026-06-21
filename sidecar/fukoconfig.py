@@ -10,25 +10,64 @@ that holds its key. Distinct from :mod:`sidecar.config`, which holds runtime
 import tomllib
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 DEFAULT_CONFIG_PATH = ".fuko.toml"
 
 
 class ModelConfig(BaseModel):
-    """The model a review backend should talk to."""
+    """The model a review backend should talk to.
+
+    ``max_context`` is the model's context window in tokens; it is carried for
+    future context-fit routing (skip a provider that can't hold the job) and is
+    not yet used for gating.
+    """
 
     provider: str = "ollama"
     name: str = "qwen2.5-coder"
     base_url: str | None = None
+    max_context: int | None = None
 
 
 class ReviewConfig(BaseModel):
-    """Which backend to run, with which model, tools, and runtime image."""
+    """Which backend to run, with which model(s), tools, and runtime image.
+
+    For throttle resilience, ``providers`` may list an ordered pool of models;
+    config order is priority and the first eligible provider is pinned for the
+    whole job, failing over to the next only on a throttle (see ``strategy``).
+    When ``providers`` is empty the single ``model`` is used as a one-entry pool,
+    so the legacy config keeps working.
+    """
 
     backend: str = "pr-agent"
     model: ModelConfig = Field(default_factory=ModelConfig)
+    providers: list[ModelConfig] = Field(
+        default_factory=list,
+        description=("Ordered provider pool (priority = order). Empty means use `model`."),
+    )
+    strategy: str = "failover"
+    cooldown_seconds: int = 300
     tools: list[str] = Field(default_factory=lambda: ["review", "improve"])
+
+    @field_validator("strategy")
+    @classmethod
+    def _known_strategy(cls, value: str) -> str:
+        """Reject an unimplemented pool strategy at config-parse time."""
+        allowed = {"failover"}
+        if value not in allowed:
+            raise ValueError(
+                f"unknown review strategy {value!r}; supported: {', '.join(sorted(allowed))}"
+            )
+        return value
+
+    @field_validator("cooldown_seconds")
+    @classmethod
+    def _positive_cooldown(cls, value: int) -> int:
+        """Require a positive circuit-breaker cooldown window."""
+        if value <= 0:
+            raise ValueError("cooldown_seconds must be > 0")
+        return value
+
     image: str | None = None
     docker_extra_args: list[str] = Field(default_factory=list)
     tool_timeout: int = 900

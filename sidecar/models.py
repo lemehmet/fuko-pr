@@ -81,3 +81,24 @@ class IngestThreadsRequest(BaseModel):
     repo: str
     threads: list[dict]
     bot_login: str | None = None
+
+
+class CooldownsResponse(BaseModel):
+    """Body returned by ``GET /cb/cooldowns``: provider -> ISO cooldown end."""
+
+    cooldowns: dict[str, str] = Field(default_factory=dict)
+
+
+class TripRequest(BaseModel):
+    """Body of ``POST /cb/trip``: open a provider's circuit breaker."""
+
+    provider: str
+    cooldown_seconds: int = 300
+    reason: str | None = None
+
+
+class TripResponse(BaseModel):
+    """Body returned by ``POST /cb/trip``."""
+
+    provider: str
+    cooldown_until: str | None = None

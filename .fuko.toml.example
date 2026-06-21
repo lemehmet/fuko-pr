@@ -24,6 +24,26 @@ name = "glm-5.2"
 # name = "qwen2.5-coder:32b"    # point base_url at the host, not localhost:
 # base_url = "http://host.docker.internal:11434"
 
+# Throttle resilience: instead of one [review.model], list an ordered POOL of
+# providers. Config order is priority — the first eligible provider is pinned for
+# the whole review, and a throttle (429/quota/overload/timeout) trips its breaker
+# and fails the job over to the next one. A non-throttle error fails fast. The
+# breaker cooldown is shared across repos (global per provider, since the API key
+# is shared), persisted in the sidecar's Postgres. When [[review.providers]] is
+# set it takes precedence over [review.model].
+# strategy = "failover"          # only strategy for now (round-robin/weighted later)
+# cooldown_seconds = 300         # how long a throttled provider stays skipped
+#
+# [[review.providers]]
+# provider = "zai-coding"        # key from env ZAI_KEY (highest priority)
+# name = "glm-5.2"
+# max_context = 128000           # carried for future context-fit routing (unused)
+#
+# [[review.providers]]
+# provider = "ollama"            # local spillover, no key
+# name = "qwen2.5-coder:32b"
+# base_url = "http://host.docker.internal:11434"
+
 [knowledge]
 store = "postgres"              # postgres | sqlite-vec
 

@@ -17,12 +17,14 @@ from __future__ import annotations
 import os
 import re
 import sys
+from dataclasses import replace
 
 import httpx
 
 from .backends import get_backend
 from .backends.base import InvokeResult, PRRef
-from .fukoconfig import DEFAULT_CONFIG_PATH, FukoConfig, KnowledgeConfig, load_config
+from .fukoconfig import DEFAULT_CONFIG_PATH, FukoConfig, KnowledgeConfig, ModelConfig, load_config
+from .pool import order_pool, resolve_pool
 from .presets import get_preset
 from .stores import get_store
 
@@ -194,27 +196,117 @@ def _github_env(token: str) -> dict[str, str]:
     return {"GITHUB__USER_TOKEN": token, "GITHUB__DEPLOYMENT_TYPE": "user"}
 
 
+def _cb_endpoint() -> tuple[str, str]:
+    """Return ``(fuko_url, fuko_token)`` for the sidecar's circuit-breaker API."""
+    return os.environ.get("FUKO_URL", "").strip(), os.environ.get("FUKO_TOKEN", "")
+
+
+def _cb_cooldowns() -> set[str]:
+    """Provider ids currently in circuit-breaker cooldown (best-effort).
+
+    Reads the shared state from the sidecar over HTTP when ``FUKO_URL`` is set,
+    else from the local Postgres. Any failure yields an empty set -- the breaker
+    is an optimization, so a read error must never block a review.
+    """
+    fuko_url, fuko_token = _cb_endpoint()
+    try:
+        if fuko_url:
+            headers = {"Authorization": "Bearer " + fuko_token} if fuko_token else {}
+            resp = httpx.get(fuko_url.rstrip("/") + "/cb/cooldowns", headers=headers, timeout=10.0)
+            resp.raise_for_status()
+            data = resp.json().get("cooldowns") if isinstance(resp.json(), dict) else None
+            return set(data.keys()) if isinstance(data, dict) else set()
+        from .circuit_breaker import get_cooldowns
+
+        return set(get_cooldowns().keys())
+    except Exception as e:
+        print(f"fuko: circuit-breaker read failed, ignoring cooldowns: {e}", file=sys.stderr)
+        return set()
+
+
+def _cb_trip(provider: str, cooldown_seconds: int, reason: str) -> None:
+    """Open ``provider``'s breaker (best-effort; a failure must not abort failover)."""
+    fuko_url, fuko_token = _cb_endpoint()
+    try:
+        if fuko_url:
+            headers = {"Content-Type": "application/json"}
+            if fuko_token:
+                headers["Authorization"] = "Bearer " + fuko_token
+            resp = httpx.post(
+                fuko_url.rstrip("/") + "/cb/trip",
+                json={
+                    "provider": provider,
+                    "cooldown_seconds": cooldown_seconds,
+                    "reason": (reason or "")[:500],
+                },
+                headers=headers,
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+        else:
+            from .circuit_breaker import trip
+
+            trip(provider, cooldown_seconds, reason)
+    except Exception as e:
+        print(f"fuko: circuit-breaker trip failed (continuing): {e}", file=sys.stderr)
+
+
+def _normalize(backend, pr: PRRef, model: ModelConfig) -> None:
+    """Map the posted review into Review Signals for the winning provider's model."""
+    try:
+        preset = get_preset(model.provider)
+        model_id = preset.litellm_prefix + model.name
+        signals = backend.normalize_output(pr, model=model_id)
+        print(f"fuko: normalized {len(signals)} review signals", file=sys.stderr)
+    except NotImplementedError:
+        pass
+
+
 def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
-    """Run a full review for ``pr_url`` using the backend named in ``config_path``."""
+    """Run a full review for ``pr_url``, failing over across the provider pool.
+
+    Providers are tried in priority order, skipping any that are in
+    circuit-breaker cooldown. The first provider is pinned for the whole job; a
+    throttle (429/quota/overload/timeout) trips its breaker and fails the job
+    over to the next provider, while any other error fails fast (no failover).
+    """
     cfg: FukoConfig = load_config(config_path)
     pr = parse_pr_url(pr_url)
     token = os.environ.get("GITHUB_TOKEN", "")
     api_url = os.environ.get("GITHUB_API_URL", _DEFAULT_API)
 
     backend = get_backend(cfg.review.backend, cfg.review)
-    preset = get_preset(cfg.review.model.provider)
     knowledge = build_knowledge(pr, token, api_url, cfg.knowledge)
+    gh_env = _github_env(token)
 
-    env = backend.build_env(preset, cfg.review.model, knowledge, cfg.review.tools)
-    env.update(_github_env(token))
+    pool = resolve_pool(cfg.review)
+    cooled = _cb_cooldowns()
+    ordered = order_pool(pool, cooled)
 
-    result = backend.invoke(pr, env, cfg.review.tools)
+    result = InvokeResult(returncode=1, detail="no providers configured")
+    for index, model in enumerate(ordered):
+        preset = get_preset(model.provider)
+        env = backend.build_env(preset, model, knowledge, cfg.review.tools)
+        env.update(gh_env)
 
-    try:
-        model_id = preset.litellm_prefix + cfg.review.model.name
-        signals = backend.normalize_output(pr, model=model_id)
-        print(f"fuko: normalized {len(signals)} review signals", file=sys.stderr)
-    except NotImplementedError:
-        pass
+        label = f"{model.provider}/{model.name}"
+        cooling = " (cooling — last resort)" if model.provider in cooled else ""
+        print(
+            f"fuko: review attempt {index + 1}/{len(ordered)} via {label}{cooling}",
+            file=sys.stderr,
+        )
 
+        result = replace(backend.invoke(pr, env, cfg.review.tools), provider=model.provider)
+        if not result.throttled:
+            if result.returncode == 0:
+                _normalize(backend, pr, model)
+            return result
+
+        _cb_trip(model.provider, cfg.review.cooldown_seconds, result.detail)
+        print(
+            f"fuko: {label} throttled ({result.detail}); breaker tripped, failing over",
+            file=sys.stderr,
+        )
+
+    print("fuko: provider pool exhausted; all attempts throttled", file=sys.stderr)
     return result
