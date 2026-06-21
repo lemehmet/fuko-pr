@@ -117,6 +117,35 @@ def fetch_pr_head(pr: PRRef, token: str, api_url: str) -> str:
         return resp.json()["head"]["sha"]
 
 
+def fetch_check_runs(pr: PRRef, ref: str, token: str, api_url: str) -> list[dict]:
+    """Fetch all check-runs for a commit ``ref`` (paginated).
+
+    The list-check-runs endpoint wraps its page under a ``check_runs`` key (unlike
+    the bare-array list endpoints handled by :func:`_paginated_get`), and reports the
+    full count in ``total_count`` — used here to know when to stop. This is the
+    authoritative completion signal for reviewers that publish a check (e.g.
+    CodeRabbit's "Review in progress" → "Review completed").
+    """
+    base = api_url.rstrip("/")
+    out: list[dict] = []
+    page = 1
+    with httpx.Client(timeout=30.0, headers=_gh_headers(token)) as client:
+        while True:
+            resp = client.get(
+                f"{base}/repos/{pr.repo}/commits/{ref}/check-runs",
+                params={"page": page, "per_page": 100},
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            batch = payload.get("check_runs") or []
+            out.extend(batch)
+            total = payload.get("total_count")
+            if not batch or (total is not None and len(out) >= total) or len(batch) < 100:
+                break
+            page += 1
+    return out
+
+
 def _sidecar_query(url: str, token: str, repo: str, files: list[str], pr_body: str) -> list[dict]:
     headers = {"Content-Type": "application/json"}
     if token:
