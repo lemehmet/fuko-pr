@@ -16,6 +16,14 @@ def test_get_preset_known():
     assert p.quirks["custom_model_max_tokens"] == 128000
 
 
+def test_get_preset_ollama_cloud():
+    p = get_preset("ollama-cloud")
+    assert p.litellm_prefix == "openai/"
+    assert p.base_url == "https://ollama.com/v1"
+    assert p.key_env == "OLLAMA_API_KEY"
+    assert p.quirks["custom_model_max_tokens"] == 128000
+
+
 def test_get_preset_unknown():
     with pytest.raises(UnknownPresetError) as e:
         get_preset("no-such-provider")
