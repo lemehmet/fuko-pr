@@ -36,7 +36,19 @@ def test_build_env_ollama_cloud(monkeypatch):
     assert env["OPENAI__API_BASE"] == "https://ollama.com/v1"
     assert env["OPENAI__KEY"] == "ol-secret"
     assert env["CONFIG__CUSTOM_MODEL_MAX_TOKENS"] == "976000"
+    assert env["CONFIG__MAX_MODEL_TOKENS"] == "512000"
     assert env["CONFIG__AI_TIMEOUT"] == "300"
+
+
+def test_build_env_max_model_tokens_override_beats_preset(monkeypatch):
+    monkeypatch.setenv("ZAI_KEY", "k")
+    env = PrAgentBackend().build_env(
+        get_preset("zai-coding"),
+        ModelConfig(provider="zai-coding", name="glm-5.2", max_model_tokens=128000),
+        knowledge="",
+        tools=["review"],
+    )
+    assert env["CONFIG__MAX_MODEL_TOKENS"] == "128000"
 
 
 def test_get_preset_unknown():
@@ -103,6 +115,7 @@ def test_build_env_zai_coding_matches_known_good(monkeypatch):
     assert env["OPENAI__API_BASE"] == "https://api.z.ai/api/coding/paas/v4"
     assert env["OPENAI__KEY"] == "secret-123"
     assert env["CONFIG__CUSTOM_MODEL_MAX_TOKENS"] == "1000000"
+    assert env["CONFIG__MAX_MODEL_TOKENS"] == "512000"
     assert env["CONFIG__AI_TIMEOUT"] == "300"
     assert env["PR_REVIEWER__EXTRA_INSTRUCTIONS"] == "- learn this"
     assert env["PR_CODE_SUGGESTIONS__EXTRA_INSTRUCTIONS"] == "- learn this"

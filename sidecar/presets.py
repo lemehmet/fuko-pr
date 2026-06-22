@@ -23,7 +23,11 @@ PRESETS: dict[str, ProviderPreset] = {
         litellm_prefix="openai/",
         base_url="https://api.z.ai/api/coding/paas/v4",
         key_env="ZAI_KEY",
-        quirks={"custom_model_max_tokens": 1000000, "ai_timeout": 300},
+        quirks={
+            "custom_model_max_tokens": 1000000,
+            "max_model_tokens": 512000,
+            "ai_timeout": 300,
+        },
     ),
     "ollama": ProviderPreset(
         litellm_prefix="ollama/",
@@ -33,7 +37,11 @@ PRESETS: dict[str, ProviderPreset] = {
         litellm_prefix="openai/",
         base_url="https://ollama.com/v1",
         key_env="OLLAMA_API_KEY",
-        quirks={"custom_model_max_tokens": 976000, "ai_timeout": 300},
+        quirks={
+            "custom_model_max_tokens": 976000,
+            "max_model_tokens": 512000,
+            "ai_timeout": 300,
+        },
     ),
     "openai": ProviderPreset(
         litellm_prefix="openai/",

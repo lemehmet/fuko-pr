@@ -39,10 +39,16 @@ name = "glm-5.2"
 # demoted to last resort. Running the SAME model on two providers (different keys/
 # endpoints, so separate throttle buckets) is the simplest real failover.
 #
+# max_model_tokens overrides PR-Agent's per-review token budget — the cap it
+# applies BEFORE the model's window (it defaults to 32000 and would otherwise
+# prune big diffs). The GLM presets default this to 512000; set it lower here to
+# rein in cost/latency on a repo.
+#
 # [[review.providers]]
 # provider = "zai-coding"        # GLM-5.2 via z.ai, key from env ZAI_KEY (priority)
 # name = "glm-5.2"
 # max_context = 1000000
+# # max_model_tokens = 256000    # optional: cap below the preset's 512000 default
 #
 # [[review.providers]]
 # provider = "ollama-cloud"      # same model via Ollama Cloud, key from OLLAMA_API_KEY

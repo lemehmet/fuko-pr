@@ -160,9 +160,9 @@ Initial presets (the ones we actually use):
 
 | preset         | litellm_prefix | base_url                                  | key_env         | quirks                           |
 |----------------|----------------|-------------------------------------------|-----------------|----------------------------------|
-| `zai-coding`   | `openai/`      | `https://api.z.ai/api/coding/paas/v4`     | `ZAI_KEY`       | max_tokens 1000000, timeout 300  |
+| `zai-coding`   | `openai/`      | `https://api.z.ai/api/coding/paas/v4`     | `ZAI_KEY`       | window 1000000, budget 512000, timeout 300 |
 | `ollama`       | `ollama/`      | `http://localhost:11434`                  | —               | —                                |
-| `ollama-cloud` | `openai/`      | `https://ollama.com/v1`                   | `OLLAMA_API_KEY`| max_tokens 976000, timeout 300   |
+| `ollama-cloud` | `openai/`      | `https://ollama.com/v1`                   | `OLLAMA_API_KEY`| window 976000, budget 512000, timeout 300 |
 | `openai`       | `openai/`      | (SDK default)                             | `OPENAI_KEY`    | —                                |
 | `anthropic`    | `anthropic/`   | (SDK default)                             | `ANTHROPIC_KEY` | —                                |
 

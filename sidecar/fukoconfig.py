@@ -18,15 +18,19 @@ DEFAULT_CONFIG_PATH = ".fuko.toml"
 class ModelConfig(BaseModel):
     """The model a review backend should talk to.
 
-    ``max_context`` is the model's context window in tokens; it is carried for
-    future context-fit routing (skip a provider that can't hold the job) and is
-    not yet used for gating.
+    ``max_context`` is the model's context window in tokens, used for context-fit
+    routing (a provider whose window can't hold the job is demoted to last
+    resort). ``max_model_tokens`` overrides PR-Agent's per-review token budget cap
+    (``CONFIG__MAX_MODEL_TOKENS``, which PR-Agent otherwise defaults to 32000 and
+    applies as a hard ``min()`` over the model's window) — leave it unset to take
+    the provider preset's default.
     """
 
     provider: str = "ollama"
     name: str = "qwen2.5-coder"
     base_url: str | None = None
     max_context: int | None = None
+    max_model_tokens: int | None = None
 
 
 class ReviewConfig(BaseModel):
