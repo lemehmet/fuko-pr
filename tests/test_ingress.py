@@ -13,7 +13,7 @@ def test_get_preset_known():
     assert p.litellm_prefix == "openai/"
     assert p.base_url == "https://api.z.ai/api/coding/paas/v4"
     assert p.key_env == "ZAI_KEY"
-    assert p.quirks["custom_model_max_tokens"] == 128000
+    assert p.quirks["custom_model_max_tokens"] == 1000000
 
 
 def test_get_preset_ollama_cloud():
