@@ -134,12 +134,16 @@ def get_pool() -> ConnectionPool:
             max_size=10,
             open=True,
         )
-        dim = _resolve_embed_dim()
-        with pool.connection() as conn:
-            for stmt in _migration_sql(dim):
-                conn.execute(stmt)
-            _ensure_embed_dim(conn, dim)
-            register_vector(conn)
+        try:
+            dim = _resolve_embed_dim()
+            with pool.connection() as conn:
+                for stmt in _migration_sql(dim):
+                    conn.execute(stmt)
+                _ensure_embed_dim(conn, dim)
+                register_vector(conn)
+        except Exception:
+            pool.close()
+            raise
         atexit.register(_close_pool)
         _pool = pool
     return _pool
