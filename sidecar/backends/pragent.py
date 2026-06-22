@@ -107,6 +107,13 @@ class PrAgentBackend:
             env["CONFIG__CUSTOM_MODEL_MAX_TOKENS"] = str(quirks["custom_model_max_tokens"])
         if "ai_timeout" in quirks:
             env["CONFIG__AI_TIMEOUT"] = str(quirks["ai_timeout"])
+        max_model_tokens = (
+            model.max_model_tokens
+            if model.max_model_tokens is not None
+            else quirks.get("max_model_tokens")
+        )
+        if max_model_tokens is not None:
+            env["CONFIG__MAX_MODEL_TOKENS"] = str(max_model_tokens)
 
         if knowledge:
             env["PR_REVIEWER__EXTRA_INSTRUCTIONS"] = knowledge
