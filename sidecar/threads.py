@@ -18,11 +18,13 @@ import re
 from .models import IngestItem
 
 _FIX_ACK_RE = re.compile(
-    r"\b(?:fixed|addressed|resolved|done|implemented|applied|corrected)\s+in\s+[0-9a-f]{7,40}\b",
+    r"\b(?:fixed|addressed|resolved|done|implemented|applied|corrected)"
+    r"\s+in\s+[0-9a-f]{7,40}\b",
     re.IGNORECASE,
 )
 _DEFERRAL_RE = re.compile(
-    r"\b(?:filed as #\d+|tracked in #\d+|follow[- ]?up|out[- ]of[- ]scope|deferr|will (?:file|address|open))\b",
+    r"\b(?:filed as #\d+|tracked in #\d+|follow[- ]?up|out[- ]of[- ]scope"
+    r"|deferr|will (?:file|address|open))\b",
     re.IGNORECASE,
 )
 _MIN_LEARNING_CHARS = 40
