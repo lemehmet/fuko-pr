@@ -48,7 +48,7 @@ name = "glm-5.2"
 # provider = "zai-coding"        # GLM-5.2 via z.ai, key from env ZAI_KEY (priority)
 # name = "glm-5.2"
 # max_context = 1000000
-# # max_model_tokens = 256000    # optional: cap below the preset's 512000 default
+# max_model_tokens = 256000      # optional: cap below the preset's 512000 default
 #
 # [[review.providers]]
 # provider = "ollama-cloud"      # same model via Ollama Cloud, key from OLLAMA_API_KEY

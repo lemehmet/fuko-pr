@@ -32,6 +32,14 @@ class ModelConfig(BaseModel):
     max_context: int | None = None
     max_model_tokens: int | None = None
 
+    @field_validator("max_context", "max_model_tokens")
+    @classmethod
+    def _positive_token_count(cls, value: int | None) -> int | None:
+        """A token count, when set, must be positive."""
+        if value is not None and value <= 0:
+            raise ValueError("token counts must be > 0 when set")
+        return value
+
 
 class ReviewConfig(BaseModel):
     """Which backend to run, with which model(s), tools, and runtime image.
