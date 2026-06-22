@@ -153,17 +153,18 @@ class ProviderPreset:
     litellm_prefix: str            # "openai/", "ollama/", "anthropic/"
     base_url: str | None           # provider endpoint, or None for SDK default
     key_env: str | None            # env var holding the API key, or None (local)
-    quirks: dict[str, object]      # e.g. {"custom_model_max_tokens": 128000, "ai_timeout": 300}
+    quirks: dict[str, object]      # e.g. {"custom_model_max_tokens": 1000000, "ai_timeout": 300}
 ```
 
 Initial presets (the ones we actually use):
 
-| preset       | litellm_prefix | base_url                                  | key_env        | quirks                          |
-|--------------|----------------|-------------------------------------------|----------------|---------------------------------|
-| `zai-coding` | `openai/`      | `https://api.z.ai/api/coding/paas/v4`     | `ZAI_KEY`      | max_tokens 128000, timeout 300  |
-| `ollama`     | `ollama/`      | `http://localhost:11434`                  | —              | —                               |
-| `openai`     | `openai/`      | (SDK default)                             | `OPENAI_KEY`   | —                               |
-| `anthropic`  | `anthropic/`   | (SDK default)                             | `ANTHROPIC_KEY`| —                               |
+| preset         | litellm_prefix | base_url                                  | key_env         | quirks                           |
+|----------------|----------------|-------------------------------------------|-----------------|----------------------------------|
+| `zai-coding`   | `openai/`      | `https://api.z.ai/api/coding/paas/v4`     | `ZAI_KEY`       | max_tokens 1000000, timeout 300  |
+| `ollama`       | `ollama/`      | `http://localhost:11434`                  | —               | —                                |
+| `ollama-cloud` | `openai/`      | `https://ollama.com/v1`                   | `OLLAMA_API_KEY`| max_tokens 976000, timeout 300   |
+| `openai`       | `openai/`      | (SDK default)                             | `OPENAI_KEY`    | —                                |
+| `anthropic`    | `anthropic/`   | (SDK default)                             | `ANTHROPIC_KEY` | —                                |
 
 ### ReviewBackend driver
 
