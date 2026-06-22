@@ -2,6 +2,7 @@
 
 import atexit
 import re
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from psycopg_pool import ConnectionPool
 from .config import settings
 
 _pool: ConnectionPool | None = None
+_pool_lock = threading.Lock()
 
 
 def _resolve_embed_dim() -> int:
@@ -112,22 +114,38 @@ def vector_literal(vec: list[float]) -> str:
 
 
 def get_pool() -> ConnectionPool:
-    """Return the shared connection pool, creating it and running the migration on first use."""
+    """Return the shared connection pool, creating it and running migrations once.
+
+    The pool is published to the module global only after migrations have
+    committed, under a lock, so a concurrent first request can never observe a
+    pool whose schema isn't ready yet (the fresh-DB first-request race). Callers
+    should prefer warming this at startup (see ``main.lifespan``) so the very
+    first request is never the one paying the migration cost.
+    """
     global _pool
-    if _pool is None:
-        _pool = ConnectionPool(
+    if _pool is not None:
+        return _pool
+    with _pool_lock:
+        if _pool is not None:
+            return _pool
+        pool = ConnectionPool(
             conninfo=settings.database_url,
             min_size=1,
             max_size=10,
             open=True,
         )
-        dim = _resolve_embed_dim()
-        with _pool.connection() as conn:
-            for stmt in _migration_sql(dim):
-                conn.execute(stmt)
-            _ensure_embed_dim(conn, dim)
-            register_vector(conn)
+        try:
+            dim = _resolve_embed_dim()
+            with pool.connection() as conn:
+                for stmt in _migration_sql(dim):
+                    conn.execute(stmt)
+                _ensure_embed_dim(conn, dim)
+                register_vector(conn)
+        except Exception:
+            pool.close()
+            raise
         atexit.register(_close_pool)
+        _pool = pool
     return _pool
 
 

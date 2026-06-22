@@ -1,5 +1,8 @@
 """FastAPI app exposing ``/ingest`` ``/query`` ``/forget`` ``/healthz``."""
 
+import sys
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 
 from . import circuit_breaker
@@ -9,7 +12,29 @@ from .config import settings
 from .fukoconfig import load_config
 from .stores import get_store
 
-app = FastAPI(title="fuko-pr sidecar", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Run DB migrations before the sidecar serves traffic.
+
+    Warming the pool at startup means migrations run-and-commit before any
+    request, so a fresh database never 500s on its first ``/query`` / ``/cb``
+    call. Best-effort and gated on a configured Postgres URL: if the database
+    isn't reachable at boot the error is logged and startup proceeds, leaving
+    ``/healthz`` available and the (lock-guarded) lazy ``get_pool()`` path to
+    retry on first use.
+    """
+    if settings.database_url:
+        from .db import get_pool
+
+        try:
+            get_pool()
+        except Exception as e:
+            print(f"fuko: startup migration deferred (database not ready?): {e}", file=sys.stderr)
+    yield
+
+
+app = FastAPI(title="fuko-pr sidecar", version="0.1.0", lifespan=lifespan)
 
 # The sidecar serves one store, selected by .fuko.toml (defaults to Postgres).
 _store = get_store(load_config().knowledge)
