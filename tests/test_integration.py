@@ -90,7 +90,11 @@ def test_ingest_threads_mines_resolved():
             "comments": {
                 "nodes": [
                     {"author": {"login": "github-actions[bot]"}, "body": "consider X", "url": "u1"},
-                    {"author": {"login": "bob"}, "body": "we use pattern Z", "url": "u2"},
+                    {
+                        "author": {"login": "bob"},
+                        "body": "We keep pattern Z intentionally; async reorders otherwise.",
+                        "url": "u2",
+                    },
                 ]
             },
         },
