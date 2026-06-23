@@ -12,6 +12,10 @@ Resolution state is deliberately ignored: in the address-pr-reviews loop a fix
 resolves the thread (last human comment is the fix-ack) while a decline leaves it
 unresolved (last human comment is the correction) — so gating on ``isResolved``
 would keep the noise and drop the signal.
+
+The emitted ``source`` stays ``"resolved_thread"`` for backward compatibility
+(the learnings ``source`` enum and ``/forget source=resolved_thread`` semantics),
+even though an unresolved thread can now contribute a learning.
 """
 
 import re
