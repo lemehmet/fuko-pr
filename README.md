@@ -160,6 +160,18 @@ shared, always-on knowledge endpoint for a fleet. Set `FUKO_AUTH_TOKEN` to requi
 `Authorization: Bearer <token>`. In server-free and managed-DB modes the sidecar is
 optional; `fuko review` talks to the store directly.
 
+To browse a running sidecar's store from any machine, `fuko kb` is an HTTP client
+over `FUKO_URL` + `FUKO_AUTH_TOKEN`:
+
+```bash
+fuko kb count                       # totals + breakdown by repo/source
+fuko kb list --repo owner/name --full
+fuko kb query owner/name --files path/to/changed.py --text "topic"
+fuko kb forget owner/name --id <uuid>
+```
+
+(`fuko query`/`fuko forget` do the same against the *local* store via `.fuko.toml`.)
+
 ## Configuration
 
 - **`.fuko.toml`** (committed, per-repo): backend, model provider, tools, store,
