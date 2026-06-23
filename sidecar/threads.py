@@ -5,10 +5,12 @@ back on a reviewer bot's finding and stating the project's actual convention
 (e.g. "this is intentional because ..."). That is durable repo knowledge worth
 injecting into future reviews. The other classes are NOT learnings and are
 dropped: fix acknowledgements (a completion verb near a commit SHA — "Fixed in
-<sha>", "Already addressed (<sha>)", "in place since <sha>"; the finding was
+<sha>", "Already addressed (<sha>)" — or a comment that opens with a completion
+verb even without a SHA — "Addressed: ...", "Done — ..."; the finding was
 accepted and fixed), deferrals ("Filed as #N", the finding is valid but tracked
-elsewhere), and comments too short to carry meaning. A genuine decline cites no
-commit SHA, so it survives.
+elsewhere), and comments too short to carry meaning. A genuine decline opens with
+its stance ("Declining — ...", "Intentional — ...", "Not applicable — ...") and
+cites no commit SHA, so it survives.
 
 Resolution state is deliberately ignored: in the address-pr-reviews loop a fix
 resolves the thread (last human comment is the fix-ack) while a decline leaves it
@@ -39,6 +41,12 @@ _DEFERRAL_RE = re.compile(
     r"|\bdefer(?:s|red|ring|ral|rals)?\b",
     re.IGNORECASE,
 )
+_FIX_ACK_LEAD_RE = re.compile(
+    r"^\s*(?:already\s+)?"
+    r"(?:address(?:ed|ing)?|fix(?:ed)?|resolved?|implement(?:ed)?"
+    r"|appl(?:y|ied)|correct(?:ed)?|handled|done)\b",
+    re.IGNORECASE,
+)
 _MIN_LEARNING_CHARS = 40
 
 
@@ -55,8 +63,15 @@ def _is_human(comment: dict, bot_login: str | None) -> bool:
 
 
 def _is_noise(body: str) -> bool:
-    """Return True for a fix-ack or a deferral — not a learning."""
-    return bool(_FIX_ACK_RE.search(body) or _DEFERRAL_RE.search(body))
+    """Return True for a fix-ack or a deferral — not a learning.
+
+    A fix-ack is either a completion verb near a commit SHA ("Fixed in <sha>")
+    or a comment that opens with a completion verb ("Addressed: ...", "Done — ...")
+    even when no SHA is cited; both acknowledge a fix rather than state a decision.
+    """
+    return bool(
+        _FIX_ACK_RE.search(body) or _FIX_ACK_LEAD_RE.match(body) or _DEFERRAL_RE.search(body)
+    )
 
 
 def select_learning(thread: dict, bot_login: str | None = None) -> IngestItem | None:
