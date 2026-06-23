@@ -4,9 +4,11 @@ The valuable signal in a review thread is a *decline* — a trusted human pushin
 back on a reviewer bot's finding and stating the project's actual convention
 (e.g. "this is intentional because ..."). That is durable repo knowledge worth
 injecting into future reviews. The other classes are NOT learnings and are
-dropped: fix acknowledgements ("Fixed in <sha>", the finding was accepted and
-fixed), deferrals ("Filed as #N", the finding is valid but tracked elsewhere),
-and comments too short to carry meaning.
+dropped: fix acknowledgements (a completion verb near a commit SHA — "Fixed in
+<sha>", "Already addressed (<sha>)", "in place since <sha>"; the finding was
+accepted and fixed), deferrals ("Filed as #N", the finding is valid but tracked
+elsewhere), and comments too short to carry meaning. A genuine decline cites no
+commit SHA, so it survives.
 
 Resolution state is deliberately ignored: in the address-pr-reviews loop a fix
 resolves the thread (last human comment is the fix-ack) while a decline leaves it
@@ -23,8 +25,10 @@ import re
 from .models import IngestItem
 
 _FIX_ACK_RE = re.compile(
-    r"\b(?:fixed|addressed|resolved|done|implemented|applied|corrected)"
-    r"\s+in\s+[0-9a-f]{7,40}\b",
+    r"\b(?:fix(?:ed)?|address(?:ed)?|resolv(?:ed)?|implement(?:ed)?"
+    r"|appl(?:y|ied)|correct(?:ed)?|done|in place)\b"
+    r"[^.\n]{0,40}?"
+    r"\b[0-9a-f]{7,40}\b",
     re.IGNORECASE,
 )
 _DEFERRAL_RE = re.compile(
