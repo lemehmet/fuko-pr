@@ -25,7 +25,7 @@ import re
 from .models import IngestItem
 
 _FIX_ACK_RE = re.compile(
-    r"\b(?:fix(?:ed)?|address(?:ed)?|resolv(?:ed)?|implement(?:ed)?"
+    r"\b(?:fix(?:ed)?|address(?:ed)?|resolved?|implement(?:ed)?"
     r"|appl(?:y|ied)|correct(?:ed)?|done|in place)\b"
     r"[^.\n]{0,40}?"
     r"\b[0-9a-f]{7,40}\b",

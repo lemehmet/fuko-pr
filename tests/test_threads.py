@@ -45,6 +45,8 @@ def test_unresolved_decline_is_kept():
         "Already addressed (fbffa0b, round 1) — README line 25 reads the right thing.",
         "Not addressing this — already in place since fbffa0b (round 1); see README.",
         "Done in abc1234 — switched to the async path for ordering as suggested.",
+        "Resolved in def5678 — added the missing null check on the request body.",
+        "Resolve handled in 1a2b3c4 by clamping the radius before the query runs.",
     ],
 )
 def test_fix_ack_variants_dropped(body):
