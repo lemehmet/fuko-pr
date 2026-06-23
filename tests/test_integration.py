@@ -92,7 +92,7 @@ def test_ingest_threads_mines_resolved():
                     {"author": {"login": "github-actions[bot]"}, "body": "consider X", "url": "u1"},
                     {
                         "author": {"login": "bob"},
-                        "body": "Pattern Z is intentional here; async reorders otherwise.",
+                        "body": "We keep pattern Z intentionally; async reorders otherwise.",
                         "url": "u2",
                     },
                 ]

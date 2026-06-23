@@ -3,9 +3,10 @@
 The valuable signal in a review thread is a *decline* — a trusted human pushing
 back on a reviewer bot's finding and stating the project's actual convention
 (e.g. "this is intentional because ..."). That is durable repo knowledge worth
-injecting into future reviews. Two other classes are NOT learnings and are
+injecting into future reviews. The other classes are NOT learnings and are
 dropped: fix acknowledgements ("Fixed in <sha>", the finding was accepted and
-fixed) and deferrals ("Filed as #N", the finding is valid but tracked elsewhere).
+fixed), deferrals ("Filed as #N", the finding is valid but tracked elsewhere),
+and comments too short to carry meaning.
 
 Resolution state is deliberately ignored: in the address-pr-reviews loop a fix
 resolves the thread (last human comment is the fix-ack) while a decline leaves it
