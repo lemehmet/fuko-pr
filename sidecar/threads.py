@@ -28,8 +28,7 @@ _DEFERRAL_RE = re.compile(
     r"|tracked in #\d+"
     r"|\bfollow[- ]?up\b"
     r"|\bout[- ]of[- ]scope\b"
-    r"|\bdefer"
-    r"|\bwill (?:file|address|open)\b",
+    r"|\bdefer(?:s|red|ring|ral|rals)?\b",
     re.IGNORECASE,
 )
 _MIN_LEARNING_CHARS = 40

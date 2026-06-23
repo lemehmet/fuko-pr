@@ -71,6 +71,19 @@ def test_deferral_word_forms_dropped(body):
     assert select_learning(t) is None
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "This change will open a security hole if we drop the lock around the cache.",
+        "We will address your concern below: the queue already guarantees ordering.",
+        "Deferential to that point, but the synchronous path is intentional here.",
+    ],
+)
+def test_substantive_decisions_not_dropped_as_deferrals(body):
+    t = _thread(comments=[_comment("alice", body)])
+    assert select_learning(t) is not None
+
+
 def test_short_comment_is_dropped():
     t = _thread(comments=[_comment("alice", "good catch, agreed")])
     assert select_learning(t) is None
