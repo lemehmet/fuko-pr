@@ -12,7 +12,9 @@ is dropped. This is deliberately precision-favouring: fix acknowledgements use a
 open-ended vocabulary ("Fixed in <sha>", "Added <test>", "Updated ...", "Good
 catch — done") that a blocklist can never fully chase, whereas declines share a
 narrow set of stances — so allowlisting the stances keeps the store clean across
-repos at the cost of dropping the occasional unphrased decline.
+repos at the cost of dropping the occasional unphrased decline. Deferrals ("filed
+as #N", "deferring to a follow-up") are excluded even when they match a decline
+marker, since they track the finding elsewhere rather than state a convention.
 
 Resolution state is deliberately ignored: in the address-pr-reviews loop a fix
 resolves the thread while a decline is often left unresolved, so gating on
@@ -31,9 +33,17 @@ _DECLINE_RE = re.compile(
     r"|\bintentional|\bby design\b|\bdeliberate"
     r"|\bfalse positive\b|\bmoot\b|\binherent to\b"
     r"|\bwon'?t\s+(?:change|fix|be|add|do|touch|alter|modify)\b|\bwontfix\b|\bdisagree"
-    r"|\bverified\b|\bkeeping\b|\bleaving (?:it|this|that|them)?\s*as\b|\bas-is\b"
+    r"|\bkeeping\b|\bleaving (?:it|this|that|them)?\s*as\b|\bas-is\b"
     r"|\bactually\s+(?:required|correct|fine|intended|right)\b"
     r"|\b(?:is|are|pin is)\s+correct\b|\bpremis",
+    re.IGNORECASE,
+)
+_DEFERRAL_RE = re.compile(
+    r"filed as #\d+"
+    r"|tracked in #\d+"
+    r"|\bfollow[- ]?up\b"
+    r"|\bout[- ]of[- ]scope\b"
+    r"|\bdefer(?:s|red|ring|ral|rals)?\b",
     re.IGNORECASE,
 )
 _MIN_LEARNING_CHARS = 40
@@ -56,13 +66,23 @@ def _is_decline(body: str) -> bool:
     return bool(_DECLINE_RE.search(body))
 
 
+def _is_deferral(body: str) -> bool:
+    """Return True for a deferral ("filed as #N", "deferring to a follow-up").
+
+    A deferral can match a decline marker ("not addressing it in this PR"), so it
+    is excluded explicitly — it tracks the finding elsewhere rather than stating
+    the project's convention.
+    """
+    return bool(_DEFERRAL_RE.search(body))
+
+
 def select_learning(thread: dict, bot_login: str | None = None) -> IngestItem | None:
     """Return a learning from a review thread's last human comment, or ``None``.
 
-    Keeps the last non-bot comment only when it is long enough to carry meaning
-    and expresses a decline stance — so a reviewer correction is captured while
-    fix acknowledgements and neutral chatter are skipped. Scoped to the thread's
-    file.
+    Keeps the last non-bot comment only when it is long enough to carry meaning,
+    expresses a decline stance, and is not a deferral — so a reviewer correction
+    is captured while fix acknowledgements, deferrals, and neutral chatter are
+    skipped. Scoped to the thread's file.
     """
     comments = (thread.get("comments") or {}).get("nodes") or []
     human = [c for c in comments if _is_human(c, bot_login)]
@@ -70,7 +90,7 @@ def select_learning(thread: dict, bot_login: str | None = None) -> IngestItem | 
         return None
     last = human[-1]
     body = (last.get("body") or "").strip()
-    if len(body) < _MIN_LEARNING_CHARS or not _is_decline(body):
+    if len(body) < _MIN_LEARNING_CHARS or not _is_decline(body) or _is_deferral(body):
         return None
     path = thread.get("path")
     return IngestItem(

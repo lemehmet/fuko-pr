@@ -74,6 +74,18 @@ def test_non_declines_dropped(body):
     assert select_learning(t) is None
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Deferring this to a follow-up; not addressing it in this PR for scope reasons.",
+        "Deferred — not changing it here; tracked in #1344 for a dedicated pass later on.",
+        "Not adding this now — filed as #1290 to handle the device-claim path separately.",
+    ],
+)
+def test_deferrals_dropped_even_when_they_read_as_declines(body):
+    assert select_learning(_thread(comments=[_comment("alice", body)])) is None
+
+
 def test_short_decline_is_dropped():
     t = _thread(comments=[_comment("alice", "Declining.")])
     assert select_learning(t) is None
