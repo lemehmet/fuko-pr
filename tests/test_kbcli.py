@@ -63,7 +63,7 @@ def test_count_paginates_past_the_page_cap(monkeypatch, capsys):
     kbcli._count(_ns(repo=None, source=None))
     out = capsys.readouterr().out
     assert "750 total" in out
-    assert "750" in out.splitlines()[-1]  # the bucket counted all pages, not just 500
+    assert out.splitlines()[-1].strip().endswith("750")
 
 
 def test_call_exits_on_value_error(monkeypatch):

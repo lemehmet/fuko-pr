@@ -105,14 +105,14 @@ def _count(args) -> None:
             break
     print(_color(f"{total} total\n", _BOLD))
     for (repo, source), n in sorted(buckets.items()):
-        print(f"  {repo:24} {_color(source, _DIM):28} {n}")
+        print(f"  {repo:24} {_color(f'{source:16}', _DIM)} {n}")
 
 
 def _query(args) -> None:
     body = {"repo": args.repo, "files": args.files or [], "query_text": args.text}
     if args.pr_body:
         body["pr_body"] = args.pr_body
-    if args.top_k:
+    if args.top_k is not None:
         body["top_k"] = args.top_k
     resp = _call("POST", "/query", body=body)
     results = resp["results"]
@@ -162,9 +162,10 @@ def add_parser(sub) -> None:
 
     pf = kb.add_parser("forget", help="delete learnings by id, source, or all (repo-scoped)")
     pf.add_argument("repo")
-    pf.add_argument("--id")
-    pf.add_argument("--source")
-    pf.add_argument("--all", action="store_true")
+    selector = pf.add_mutually_exclusive_group(required=True)
+    selector.add_argument("--id")
+    selector.add_argument("--source")
+    selector.add_argument("--all", action="store_true")
     pf.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     pf.set_defaults(kb_fn=_forget)
 
