@@ -51,6 +51,8 @@ def _call(method: str, path: str, params: dict | None = None, body: dict | None 
         sys.exit(f"fuko kb: {e.code} {e.reason} — {e.read().decode('utf-8', 'replace')[:300]}")
     except urllib.error.URLError as e:
         sys.exit(f"fuko kb: cannot reach {base} ({e.reason})")
+    except ValueError as e:
+        sys.exit(f"fuko kb: invalid URL or non-JSON response from {base} ({e})")
 
 
 def _print_learning(item: dict, full: bool) -> None:
@@ -85,14 +87,23 @@ def _list(args) -> None:
 
 
 def _count(args) -> None:
-    resp = _call(
-        "GET", "/learnings", params={"repo": args.repo, "source": args.source, "limit": 500}
-    )
     buckets: dict[tuple[str, str], int] = {}
-    for item in resp["learnings"]:
-        key = (item["repo"], item["source"])
-        buckets[key] = buckets.get(key, 0) + 1
-    print(_color(f"{resp['count']} total\n", _BOLD))
+    offset, total = 0, 0
+    while True:
+        resp = _call(
+            "GET",
+            "/learnings",
+            params={"repo": args.repo, "source": args.source, "limit": 500, "offset": offset},
+        )
+        items = resp["learnings"]
+        for item in items:
+            key = (item["repo"], item["source"])
+            buckets[key] = buckets.get(key, 0) + 1
+        total = resp["count"]
+        offset += len(items)
+        if not items or offset >= total:
+            break
+    print(_color(f"{total} total\n", _BOLD))
     for (repo, source), n in sorted(buckets.items()):
         print(f"  {repo:24} {_color(source, _DIM):28} {n}")
 

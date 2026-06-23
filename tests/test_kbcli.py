@@ -51,6 +51,32 @@ def test_count_aggregates_by_repo_and_source(monkeypatch, capsys):
     assert "resolved_thread" in out and "remember" in out
 
 
+def test_count_paginates_past_the_page_cap(monkeypatch, capsys):
+    row = {"repo": "o/r", "source": "remember"}
+
+    def fake(method, path, params=None, body=None):
+        offset = params["offset"]
+        page = [row] * (500 if offset == 0 else 250)
+        return {"learnings": page, "count": 750}
+
+    monkeypatch.setattr(kbcli, "_call", fake)
+    kbcli._count(_ns(repo=None, source=None))
+    out = capsys.readouterr().out
+    assert "750 total" in out
+    assert "750" in out.splitlines()[-1]  # the bucket counted all pages, not just 500
+
+
+def test_call_exits_on_value_error(monkeypatch):
+    monkeypatch.setenv("FUKO_AUTH_TOKEN", "t")
+
+    def boom(*a, **k):
+        raise ValueError("unknown url type")
+
+    monkeypatch.setattr("urllib.request.urlopen", boom)
+    with pytest.raises(SystemExit):
+        kbcli._call("GET", "/learnings")
+
+
 def test_query_builds_post_body(monkeypatch, capsys):
     seen = {}
 
