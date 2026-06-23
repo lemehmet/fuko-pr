@@ -89,6 +89,17 @@ def test_deferrals_dropped_even_when_they_read_as_declines(body):
     assert select_learning(_thread(comments=[_comment("alice", body)])) is None
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Not addressing this — already in place since fbffa0b (round 1); see the README.",
+        "Not changing it — addressed in 9f9ffed5 already, the guard is on the aggregate now.",
+    ],
+)
+def test_fix_acks_dropped_even_when_they_read_as_declines(body):
+    assert select_learning(_thread(comments=[_comment("alice", body)])) is None
+
+
 def test_short_decline_is_dropped():
     t = _thread(comments=[_comment("alice", "Declining.")])
     assert select_learning(t) is None

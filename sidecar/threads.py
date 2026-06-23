@@ -12,9 +12,11 @@ is dropped. This is deliberately precision-favouring: fix acknowledgements use a
 open-ended vocabulary ("Fixed in <sha>", "Added <test>", "Updated ...", "Good
 catch — done") that a blocklist can never fully chase, whereas declines share a
 narrow set of stances — so allowlisting the stances keeps the store clean across
-repos at the cost of dropping the occasional unphrased decline. Deferrals ("filed
-as #N", "deferring to a follow-up") are excluded even when they match a decline
-marker, since they track the finding elsewhere rather than state a convention.
+repos at the cost of dropping the occasional unphrased decline. A second stage
+then excludes deferrals ("filed as #N", "deferring to a follow-up") and fix-acks
+("Not addressing this — already in place since <sha>") that happen to match a
+decline marker, since they track or close the finding rather than state a
+convention.
 
 Resolution state is deliberately ignored: in the address-pr-reviews loop a fix
 resolves the thread while a decline is often left unresolved, so gating on
@@ -46,6 +48,19 @@ _DEFERRAL_RE = re.compile(
     r"|\bdefer(?:s|red|ring|ral|rals)?\b",
     re.IGNORECASE,
 )
+_FIX_ACK_RE = re.compile(
+    r"\b(?:fix(?:ed)?|address(?:ed)?|resolved?|implement(?:ed)?"
+    r"|appl(?:y|ied)|correct(?:ed)?|done|in place)\b"
+    r"[^.\n]{0,40}?"
+    r"\b[0-9a-f]{7,40}\b",
+    re.IGNORECASE,
+)
+_FIX_ACK_LEAD_RE = re.compile(
+    r"^\s*(?:already\s+)?"
+    r"(?:address(?:ed|ing)?|fix(?:ed)?|resolved?|implement(?:ed)?"
+    r"|appl(?:y|ied)|correct(?:ed)?|handled|done)\b",
+    re.IGNORECASE,
+)
 _MIN_LEARNING_CHARS = 40
 
 
@@ -66,23 +81,26 @@ def _is_decline(body: str) -> bool:
     return bool(_DECLINE_RE.search(body))
 
 
-def _is_deferral(body: str) -> bool:
-    """Return True for a deferral ("filed as #N", "deferring to a follow-up").
+def _is_excluded(body: str) -> bool:
+    """Return True for a deferral or a fix-ack that also reads like a decline.
 
-    A deferral can match a decline marker ("not addressing it in this PR"), so it
-    is excluded explicitly — it tracks the finding elsewhere rather than stating
-    the project's convention.
+    A deferral ("filed as #N", "deferring to a follow-up") or a fix-ack ("Not
+    addressing this — already in place since <sha>") can match a decline marker,
+    so both are excluded after the allowlist — they track or close the finding
+    rather than state the project's convention.
     """
-    return bool(_DEFERRAL_RE.search(body))
+    return bool(
+        _DEFERRAL_RE.search(body) or _FIX_ACK_RE.search(body) or _FIX_ACK_LEAD_RE.match(body)
+    )
 
 
 def select_learning(thread: dict, bot_login: str | None = None) -> IngestItem | None:
     """Return a learning from a review thread's last human comment, or ``None``.
 
     Keeps the last non-bot comment only when it is long enough to carry meaning,
-    expresses a decline stance, and is not a deferral — so a reviewer correction
-    is captured while fix acknowledgements, deferrals, and neutral chatter are
-    skipped. Scoped to the thread's file.
+    expresses a decline stance, and is not an excluded deferral or fix-ack — so a
+    reviewer correction is captured while acknowledgements, deferrals, and neutral
+    chatter are skipped. Scoped to the thread's file.
     """
     comments = (thread.get("comments") or {}).get("nodes") or []
     human = [c for c in comments if _is_human(c, bot_login)]
@@ -90,7 +108,7 @@ def select_learning(thread: dict, bot_login: str | None = None) -> IngestItem | 
         return None
     last = human[-1]
     body = (last.get("body") or "").strip()
-    if len(body) < _MIN_LEARNING_CHARS or not _is_decline(body) or _is_deferral(body):
+    if len(body) < _MIN_LEARNING_CHARS or not _is_decline(body) or _is_excluded(body):
         return None
     path = thread.get("path")
     return IngestItem(
