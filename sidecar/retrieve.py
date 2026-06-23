@@ -105,9 +105,7 @@ def list_learnings(
         LIMIT %s OFFSET %s
     """
     with db() as conn:
-        total = conn.execute(f"SELECT count(*) FROM learnings WHERE {clause}", params).fetchall()[
-            0
-        ][0]
+        total = conn.execute(f"SELECT count(*) FROM learnings WHERE {clause}", params).fetchone()[0]
         rows = conn.execute(page_sql, [*params, limit, offset]).fetchall()
     items = [
         {
