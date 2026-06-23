@@ -1,5 +1,7 @@
 """Unit tests for review-thread learning selection (decline capture)."""
 
+import pytest
+
 from sidecar.threads import select_learning
 
 _DECLINE = (
@@ -53,6 +55,19 @@ def test_deferral_is_dropped():
             _comment("alice", "Filed as #1344 — paginate reviewThreads beyond 100 for large PRs."),
         ]
     )
+    assert select_learning(t) is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Deferring this to a follow-up; not addressing it in this PR for scope reasons.",
+        "Deferred — this is out of scope for the current change, tracking separately.",
+        "This is a valid deferral, will address in a dedicated change later on here.",
+    ],
+)
+def test_deferral_word_forms_dropped(body):
+    t = _thread(comments=[_comment("alice", body)])
     assert select_learning(t) is None
 
 

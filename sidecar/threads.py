@@ -24,8 +24,12 @@ _FIX_ACK_RE = re.compile(
     re.IGNORECASE,
 )
 _DEFERRAL_RE = re.compile(
-    r"\b(?:filed as #\d+|tracked in #\d+|follow[- ]?up|out[- ]of[- ]scope"
-    r"|deferr|will (?:file|address|open))\b",
+    r"filed as #\d+"
+    r"|tracked in #\d+"
+    r"|\bfollow[- ]?up\b"
+    r"|\bout[- ]of[- ]scope\b"
+    r"|\bdefer"
+    r"|\bwill (?:file|address|open)\b",
     re.IGNORECASE,
 )
 _MIN_LEARNING_CHARS = 40
