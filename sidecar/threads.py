@@ -30,9 +30,9 @@ _DECLINE_RE = re.compile(
     r"|\bnot\s+(?:a|an)\s+(?:bug|issue|problem|concern|regression)\b"
     r"|\bintentional|\bby design\b|\bdeliberate"
     r"|\bfalse positive\b|\bmoot\b|\binherent to\b"
-    r"|\bwon'?t\b|\bwontfix\b|\bdisagree"
+    r"|\bwon'?t\s+(?:change|fix|be|add|do|touch|alter|modify)\b|\bwontfix\b|\bdisagree"
     r"|\bverified\b|\bkeeping\b|\bleaving (?:it|this|that|them)?\s*as\b|\bas-is\b"
-    r"|\bactually\s+(?:required|correct|fine|intended|right|the)\b"
+    r"|\bactually\s+(?:required|correct|fine|intended|right)\b"
     r"|\b(?:is|are|pin is)\s+correct\b|\bpremis",
     re.IGNORECASE,
 )

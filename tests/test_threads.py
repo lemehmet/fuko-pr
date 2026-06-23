@@ -30,6 +30,7 @@ def test_selects_substantive_decline():
     assert item.source == "resolved_thread"
     assert item.topic == "review decision"
     assert item.file_globs == ["src/a.py"]
+    assert item.source_url == "u"
 
 
 def test_unresolved_decline_is_kept():
