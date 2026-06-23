@@ -59,6 +59,32 @@ def test_sha_free_decline_is_kept():
     assert select_learning(_thread(comments=[_comment("alice", body)])) is not None
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Addressed: the script skips gracefully when FUKO_URL is unset (exits 0).",
+        "Addressed in the current workflow: the trust filter excludes bots three ways.",
+        "Done — switched to the async path so ordering is preserved across the queue.",
+        "Already addressed: README line 25 now states the Docker Compose requirement.",
+    ],
+)
+def test_verb_led_acks_dropped_without_sha(body):
+    assert select_learning(_thread(comments=[_comment("alice", body)])) is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Declining — vitest hoists vi.mock and vi.hoisted above the file imports here.",
+        "Intentional — committing the SealedSecret in base is the sealed-secrets design.",
+        "Verified false positive — eslint-config-next 16.2.4 DOES export a flat config.",
+        "Not applicable — salePrice and soldAt are not part of the OpenSearch projection.",
+    ],
+)
+def test_genuine_declines_kept(body):
+    assert select_learning(_thread(comments=[_comment("alice", body)])) is not None
+
+
 def test_deferral_is_dropped():
     t = _thread(
         comments=[
