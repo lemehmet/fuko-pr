@@ -1,6 +1,6 @@
 [project]
 name = "fuko-pr"
-version = "0.1.4"
+version = "0.2.0"
 description = "A vendor-neutral layer over PR review bots, with a knowledge base you own"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -34,7 +34,7 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="fuko-pr sidecar", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="fuko-pr sidecar", version="0.2.0", lifespan=lifespan)
 
 # The sidecar serves one store, selected by .fuko.toml (defaults to Postgres).
 _store = get_store(load_config().knowledge)
