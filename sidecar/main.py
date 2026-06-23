@@ -1,4 +1,4 @@
-"""FastAPI app exposing ``/ingest`` ``/query`` ``/forget`` ``/healthz``."""
+"""FastAPI app exposing ``/ingest`` ``/query`` ``/learnings`` ``/forget`` ``/healthz``."""
 
 import sys
 from contextlib import asynccontextmanager
@@ -77,6 +77,25 @@ def query_endpoint(req: models.QueryRequest) -> dict:
     """Retrieve the most relevant learnings for a pull request."""
     results = _store.query(req.repo, req.files, req.pr_body, req.query_text, req.top_k)
     return {"results": results}
+
+
+@app.get("/learnings", response_model=models.ListLearningsResponse, dependencies=[Depends(_auth)])
+def list_learnings_endpoint(
+    repo: str | None = None,
+    source: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict:
+    """List stored learnings for browsing, newest first.
+
+    Unlike ``/query`` (semantic + file-scoped, for review-time retrieval) this is
+    a plain inspection listing, optionally filtered by ``repo`` and ``source``.
+    ``limit`` is clamped to 500 and ``offset`` floored at 0 to bound the response.
+    """
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    learnings = _store.list_learnings(repo=repo, source=source, limit=limit, offset=offset)
+    return {"learnings": learnings, "count": len(learnings)}
 
 
 @app.post("/forget", dependencies=[Depends(_auth)])

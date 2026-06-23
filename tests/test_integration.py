@@ -77,6 +77,36 @@ def test_api_endpoints():
     assert f.json()["deleted"] >= 0
 
 
+def test_list_learnings_endpoint():
+    from fastapi.testclient import TestClient
+
+    from sidecar import ingest as I
+    from sidecar.main import app
+    from sidecar.models import IngestItem
+
+    I.ingest(
+        TEST_REPO,
+        [
+            IngestItem(
+                text="Declining — this synchronous path is intentional for ordering here.",
+                source="resolved_thread",
+                file_globs=["src/q.py"],
+            ),
+            IngestItem(text="Use absolute imports across the codebase always.", source="remember"),
+        ],
+    )
+    client = TestClient(app, headers=_AUTH)
+
+    r = client.get("/learnings", params={"repo": TEST_REPO})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] >= 2
+    assert any("intentional for ordering" in x["text"] for x in body["learnings"])
+
+    scoped = client.get("/learnings", params={"repo": TEST_REPO, "source": "remember"})
+    assert [x["source"] for x in scoped.json()["learnings"]] == ["remember"]
+
+
 def test_ingest_threads_mines_resolved():
     from fastapi.testclient import TestClient
 

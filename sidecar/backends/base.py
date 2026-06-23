@@ -98,3 +98,13 @@ class Store(Protocol):
     ) -> int:
         """Delete learnings matching the given selector; return the count removed."""
         ...
+
+    def list_learnings(
+        self,
+        repo: str | None = None,
+        source: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        """List stored learnings newest-first for browsing (no ranking)."""
+        ...

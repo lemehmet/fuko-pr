@@ -74,6 +74,51 @@ def query(
     return results[:k]
 
 
+def list_learnings(
+    repo: str | None = None,
+    source: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict]:
+    """Return stored learnings newest-first for browsing, without ranking.
+
+    Unlike :func:`query`, this is neither semantic nor file-scoped -- it lists
+    rows for inspection, optionally narrowed by ``repo`` and ``source``. Embeddings
+    are not returned.
+    """
+    where = ["TRUE"]
+    params: list = []
+    if repo:
+        where.append("repo = %s")
+        params.append(repo)
+    if source:
+        where.append("source = %s")
+        params.append(source)
+    sql = f"""
+        SELECT id, repo, text, source, source_url, file_globs, topic, created_at
+        FROM learnings
+        WHERE {" AND ".join(where)}
+        ORDER BY created_at DESC
+        LIMIT %s OFFSET %s
+    """
+    params.extend([limit, offset])
+    with db() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [
+        {
+            "id": str(row[0]),
+            "repo": row[1],
+            "text": row[2],
+            "source": row[3],
+            "source_url": row[4],
+            "file_globs": list(row[5] or []),
+            "topic": row[6],
+            "created_at": row[7].isoformat() if row[7] else None,
+        }
+        for row in rows
+    ]
+
+
 def _fetch_scoped(conn, vec: str, repo: str, cand_k: int) -> list[tuple]:
     sql = """
         SELECT id, text, source, source_url, file_globs, topic,

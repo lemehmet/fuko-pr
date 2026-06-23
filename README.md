@@ -154,8 +154,8 @@ by author and mapped best-effort (`severity_source` records which). See
 
 ## Optional: the knowledge sidecar
 
-`fuko serve` runs a small FastAPI service (`/ingest`, `/query`, `/forget`,
-`/healthz`, `/comment`, `/ingest-threads`) over your store — useful when you want a
+`fuko serve` runs a small FastAPI service (`/ingest`, `/query`, `/learnings`,
+`/forget`, `/healthz`, `/comment`, `/ingest-threads`) over your store — useful when you want a
 shared, always-on knowledge endpoint for a fleet. Set `FUKO_AUTH_TOKEN` to require
 `Authorization: Bearer <token>`. In server-free and managed-DB modes the sidecar is
 optional; `fuko review` talks to the store directly.

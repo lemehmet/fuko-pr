@@ -48,6 +48,16 @@ class PostgresStore:
         """Delete learnings by id, source, or wholesale; return the count removed."""
         return _ingest.forget(repo, id=id, source=source, all_=all)
 
+    def list_learnings(
+        self,
+        repo: str | None = None,
+        source: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        """List stored learnings newest-first for browsing (no ranking)."""
+        return _retrieve.list_learnings(repo, source, limit, offset)
+
 
 class UnknownStoreError(ValueError):
     """Raised when ``.fuko.toml`` names a knowledge store that is not implemented."""

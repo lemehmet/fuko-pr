@@ -283,3 +283,42 @@ class SqliteVecStore:
             return len(rows)
 
         return self._mutate(fn)
+
+    def list_learnings(
+        self,
+        repo: str | None = None,
+        source: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        """List stored learnings for browsing (no ranking; newest insert first)."""
+        where, params = ["1 = 1"], []
+        if repo:
+            where.append("repo = ?")
+            params.append(repo)
+        if source:
+            where.append("source = ?")
+            params.append(source)
+        sql = (
+            "SELECT lid, repo, text, source, source_url, file_globs, topic "
+            f"FROM learnings WHERE {' AND '.join(where)} ORDER BY rowid DESC LIMIT ? OFFSET ?"
+        )
+        params.extend([limit, offset])
+
+        def fn(conn: sqlite3.Connection) -> list[dict]:
+            rows = conn.execute(sql, params).fetchall()
+            return [
+                {
+                    "id": row[0],
+                    "repo": row[1],
+                    "text": row[2],
+                    "source": row[3],
+                    "source_url": row[4],
+                    "file_globs": json.loads(row[5]) if row[5] else [],
+                    "topic": row[6],
+                    "created_at": None,
+                }
+                for row in rows
+            ]
+
+        return self._read(fn)
