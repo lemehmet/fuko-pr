@@ -38,14 +38,25 @@ def test_unresolved_decline_is_kept():
     assert select_learning(t) is not None
 
 
-def test_fix_ack_is_dropped():
-    t = _thread(
-        comments=[
-            _comment("coderabbitai[bot]", "bug here"),
-            _comment("alice", "Fixed in 98df6b4 — the confirmation now resets on new input."),
-        ]
-    )
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Fixed in 98df6b4 — the confirmation now resets on new input as requested.",
+        "Already addressed (fbffa0b, round 1) — README line 25 reads the right thing.",
+        "Not addressing this — already in place since fbffa0b (round 1); see README.",
+        "Done in abc1234 — switched to the async path for ordering as suggested.",
+        "Resolved in def5678 — added the missing null check on the request body.",
+        "Resolve handled in 1a2b3c4 by clamping the radius before the query runs.",
+    ],
+)
+def test_fix_ack_variants_dropped(body):
+    t = _thread(comments=[_comment("coderabbitai[bot]", "bug here"), _comment("alice", body)])
     assert select_learning(t) is None
+
+
+def test_sha_free_decline_is_kept():
+    body = "Not addressing this — verified it is not an issue for this opensearch image."
+    assert select_learning(_thread(comments=[_comment("alice", body)])) is not None
 
 
 def test_deferral_is_dropped():
