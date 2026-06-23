@@ -67,6 +67,7 @@ def test_decline_stances_kept(body):
         "Strengthened in 1aa7f907: the assertion now matches the full leg-prefixed string.",
         "Switched to the JSON form in 3b3f809a so the parser stops tripping on tart output.",
         "Filed as #1344 — paginate reviewThreads beyond 100 for very large pull requests.",
+        "Good spot — the output is correct now after I normalized the casing in 7e1f0a2.",
     ],
 )
 def test_non_declines_dropped(body):

@@ -35,7 +35,7 @@ _DECLINE_RE = re.compile(
     r"|\bwon'?t\s+(?:change|fix|be|add|do|touch|alter|modify)\b|\bwontfix\b|\bdisagree"
     r"|\bkeeping\b|\bleaving (?:it|this|that|them)?\s*as\b|\bas-is\b"
     r"|\bactually\s+(?:required|correct|fine|intended|right)\b"
-    r"|\b(?:is|are|pin is)\s+correct\b|\bpremis",
+    r"|\bpremis",
     re.IGNORECASE,
 )
 _DEFERRAL_RE = re.compile(
