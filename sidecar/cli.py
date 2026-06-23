@@ -62,6 +62,10 @@ def main() -> None:
     p_retrieve.add_argument("--pr-body", default=None)
     p_retrieve.add_argument("--config", default=".fuko.toml", help="path to .fuko.toml")
 
+    from . import kbcli
+
+    kbcli.add_parser(sub)
+
     args = parser.parse_args()
     {
         "serve": _cmd_serve,
@@ -72,6 +76,7 @@ def main() -> None:
         "ingest-docs": _cmd_ingest_docs,
         "forget": _cmd_forget,
         "retrieve": _cmd_retrieve,
+        "kb": kbcli.dispatch,
     }[args.cmd](args)
 
 
