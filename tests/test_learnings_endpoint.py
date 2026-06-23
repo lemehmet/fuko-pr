@@ -24,11 +24,12 @@ def _client(monkeypatch, fake):
     return TestClient(main.app, headers={"Authorization": f"Bearer {_TOKEN}"})
 
 
-def test_returns_items_and_count(monkeypatch):
-    resp = _client(monkeypatch, lambda **kw: [_ROW]).get("/learnings?repo=o/r")
+def test_returns_items_and_total_count(monkeypatch):
+    resp = _client(monkeypatch, lambda **kw: ([_ROW], 42)).get("/learnings?repo=o/r")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["count"] == 1
+    assert body["count"] == 42  # total matching, not the page size
+    assert len(body["learnings"]) == 1
     assert body["learnings"][0]["text"].startswith("Declining")
 
 
@@ -37,7 +38,7 @@ def test_clamps_limit_and_offset(monkeypatch):
 
     def fake(**kw):
         seen.update(kw)
-        return []
+        return [], 0
 
     _client(monkeypatch, fake).get("/learnings?limit=9999&offset=-5")
     assert seen["limit"] == 500
@@ -49,7 +50,7 @@ def test_passes_filters_through(monkeypatch):
 
     def fake(**kw):
         seen.update(kw)
-        return []
+        return [], 0
 
     _client(monkeypatch, fake).get("/learnings?repo=o/r&source=resolved_thread&limit=10&offset=20")
     assert seen == {"repo": "o/r", "source": "resolved_thread", "limit": 10, "offset": 20}

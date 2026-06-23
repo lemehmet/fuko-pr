@@ -64,7 +64,11 @@ class StoredLearning(BaseModel):
 
 
 class ListLearningsResponse(BaseModel):
-    """Body returned by ``GET /learnings``."""
+    """Body returned by ``GET /learnings``.
+
+    ``count`` is the total number of learnings matching the filters (for paging),
+    independent of ``limit``/``offset``; ``learnings`` is the requested page.
+    """
 
     learnings: list[StoredLearning]
     count: int

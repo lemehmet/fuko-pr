@@ -105,6 +105,6 @@ class Store(Protocol):
         source: str | None = None,
         limit: int = 100,
         offset: int = 0,
-    ) -> list[dict]:
-        """List stored learnings newest-first for browsing (no ranking)."""
+    ) -> tuple[list[dict], int]:
+        """Return a page of live learnings (newest-first) plus the total match count."""
         ...

@@ -86,14 +86,17 @@ def test_list_learnings(store):
     )
     store.ingest("other/repo", [IngestItem(text="ui spacing convention", source="remember")])
 
-    all_for_repo = store.list_learnings(repo="o/r")
+    all_for_repo, total = store.list_learnings(repo="o/r")
     assert {r["text"] for r in all_for_repo} == {"auth login flow notes", "db migration notes here"}
+    assert total == 2
 
-    docs_only = store.list_learnings(repo="o/r", source="docs")
+    docs_only, docs_total = store.list_learnings(repo="o/r", source="docs")
     assert [r["text"] for r in docs_only] == ["db migration notes here"]
     assert docs_only[0]["file_globs"] == []
+    assert docs_total == 1
 
-    assert len(store.list_learnings(repo="o/r", limit=1)) == 1
+    page, page_total = store.list_learnings(repo="o/r", limit=1)
+    assert len(page) == 1 and page_total == 2  # one row returned, two total
 
 
 def test_ingest_dedup_and_query_scoping(store):

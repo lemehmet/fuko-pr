@@ -290,24 +290,28 @@ class SqliteVecStore:
         source: str | None = None,
         limit: int = 100,
         offset: int = 0,
-    ) -> list[dict]:
-        """List stored learnings for browsing (no ranking; newest insert first)."""
-        where, params = ["1 = 1"], []
+    ) -> tuple[list[dict], int]:
+        """Return a page of live learnings (newest insert first) plus the total count."""
+        now = datetime.now(timezone.utc).isoformat()
+        where, params = ["(expires_at IS NULL OR expires_at > ?)"], [now]
         if repo:
             where.append("repo = ?")
             params.append(repo)
         if source:
             where.append("source = ?")
             params.append(source)
-        sql = (
+        clause = " AND ".join(where)
+        page_sql = (
             "SELECT lid, repo, text, source, source_url, file_globs, topic "
-            f"FROM learnings WHERE {' AND '.join(where)} ORDER BY rowid DESC LIMIT ? OFFSET ?"
+            f"FROM learnings WHERE {clause} ORDER BY rowid DESC LIMIT ? OFFSET ?"
         )
-        params.extend([limit, offset])
 
-        def fn(conn: sqlite3.Connection) -> list[dict]:
-            rows = conn.execute(sql, params).fetchall()
-            return [
+        def fn(conn: sqlite3.Connection) -> tuple[list[dict], int]:
+            total = conn.execute(
+                f"SELECT count(*) FROM learnings WHERE {clause}", params
+            ).fetchone()[0]
+            rows = conn.execute(page_sql, [*params, limit, offset]).fetchall()
+            items = [
                 {
                     "id": row[0],
                     "repo": row[1],
@@ -320,5 +324,6 @@ class SqliteVecStore:
                 }
                 for row in rows
             ]
+            return items, int(total)
 
         return self._read(fn)

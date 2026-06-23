@@ -89,13 +89,15 @@ def list_learnings_endpoint(
     """List stored learnings for browsing, newest first.
 
     Unlike ``/query`` (semantic + file-scoped, for review-time retrieval) this is
-    a plain inspection listing, optionally filtered by ``repo`` and ``source``.
-    ``limit`` is clamped to 500 and ``offset`` floored at 0 to bound the response.
+    a plain inspection listing of live (non-expired) learnings, optionally filtered
+    by ``repo`` and ``source``. ``limit`` is clamped to 500 and ``offset`` floored
+    at 0. ``count`` is the total matching the filters (for paging), not the page
+    size.
     """
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
-    learnings = _store.list_learnings(repo=repo, source=source, limit=limit, offset=offset)
-    return {"learnings": learnings, "count": len(learnings)}
+    learnings, total = _store.list_learnings(repo=repo, source=source, limit=limit, offset=offset)
+    return {"learnings": learnings, "count": total}
 
 
 @app.post("/forget", dependencies=[Depends(_auth)])
