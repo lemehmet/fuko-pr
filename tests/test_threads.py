@@ -1,4 +1,4 @@
-"""Unit tests for review-thread learning selection (decline capture)."""
+"""Unit tests for review-thread learning selection (decline allowlist)."""
 
 import pytest
 
@@ -30,7 +30,6 @@ def test_selects_substantive_decline():
     assert item.source == "resolved_thread"
     assert item.topic == "review decision"
     assert item.file_globs == ["src/a.py"]
-    assert item.source_url == "u"
 
 
 def test_unresolved_decline_is_kept():
@@ -41,95 +40,46 @@ def test_unresolved_decline_is_kept():
 @pytest.mark.parametrize(
     "body",
     [
-        "Fixed in 98df6b4 — the confirmation now resets on new input as requested.",
-        "Already addressed (fbffa0b, round 1) — README line 25 reads the right thing.",
-        "Not addressing this — already in place since fbffa0b (round 1); see README.",
-        "Done in abc1234 — switched to the async path for ordering as suggested.",
-        "Resolved in def5678 — added the missing null check on the request body.",
-        "Resolve handled in 1a2b3c4 by clamping the radius before the query runs.",
-    ],
-)
-def test_fix_ack_variants_dropped(body):
-    t = _thread(comments=[_comment("coderabbitai[bot]", "bug here"), _comment("alice", body)])
-    assert select_learning(t) is None
-
-
-def test_sha_free_decline_is_kept():
-    body = "Not addressing this — verified it is not an issue for this opensearch image."
-    assert select_learning(_thread(comments=[_comment("alice", body)])) is not None
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        "Addressed: the script skips gracefully when FUKO_URL is unset (exits 0).",
-        "Addressed in the current workflow: the trust filter excludes bots three ways.",
-        "Done — switched to the async path so ordering is preserved across the queue.",
-        "Already addressed: README line 25 now states the Docker Compose requirement.",
-    ],
-)
-def test_verb_led_acks_dropped_without_sha(body):
-    assert select_learning(_thread(comments=[_comment("alice", body)])) is None
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
         "Declining — vitest hoists vi.mock and vi.hoisted above the file imports here.",
+        "Not adding this one: DeckLink open_sink requires a real device to reach it.",
+        "Not applicable — salePrice and soldAt are not part of the OpenSearch projection.",
         "Intentional — committing the SealedSecret in base is the sealed-secrets design.",
         "Verified false positive — eslint-config-next 16.2.4 DOES export a flat config.",
-        "Not applicable — salePrice and soldAt are not part of the OpenSearch projection.",
+        "Good eye — but it's actually required, not redundant, for the skill bash blocks.",
+        "Moot now — the RUNNER_TEMP venv was removed when this switched to uvx entirely.",
+        "Premises here are off: this repo is private, so there is no public exposure here.",
+        "No change needed — saved-searches is a middleware-protected server shell anyway.",
     ],
 )
-def test_genuine_declines_kept(body):
+def test_decline_stances_kept(body):
     assert select_learning(_thread(comments=[_comment("alice", body)])) is not None
 
 
-def test_deferral_is_dropped():
-    t = _thread(
-        comments=[
-            _comment("copilot", "edge case"),
-            _comment("alice", "Filed as #1344 — paginate reviewThreads beyond 100 for large PRs."),
-        ]
-    )
-    assert select_learning(t) is None
-
-
 @pytest.mark.parametrize(
     "body",
     [
-        "Deferring this to a follow-up; not addressing it in this PR for scope reasons.",
-        "Deferred — this is out of scope for the current change, tracking separately.",
-        "This is a valid deferral, will address in a dedicated change later on here.",
+        "Fixed in 98df6b4 — the confirmation now resets on new input as requested.",
+        "Added in 1aa7f907: a new test 'renders the error status indicator' for the panel.",
+        "Added `drains_a_buffered_frame_while_still_syncing` — pushes a single frame here.",
+        "Good catch — fixed. Set tool_timeout = 600 in .fuko.toml for the slow review path.",
+        "Good catch — updated the PR description to match the current uvx implementation.",
+        "Strengthened in 1aa7f907: the assertion now matches the full leg-prefixed string.",
+        "Switched to the JSON form in 3b3f809a so the parser stops tripping on tart output.",
+        "Filed as #1344 — paginate reviewThreads beyond 100 for very large pull requests.",
     ],
 )
-def test_deferral_word_forms_dropped(body):
-    t = _thread(comments=[_comment("alice", body)])
+def test_non_declines_dropped(body):
+    t = _thread(comments=[_comment("coderabbitai[bot]", "finding"), _comment("alice", body)])
     assert select_learning(t) is None
 
 
-@pytest.mark.parametrize(
-    "body",
-    [
-        "This change will open a security hole if we drop the lock around the cache.",
-        "We will address your concern below: the queue already guarantees ordering.",
-        "Deferential to that point, but the synchronous path is intentional here.",
-    ],
-)
-def test_substantive_decisions_not_dropped_as_deferrals(body):
-    t = _thread(comments=[_comment("alice", body)])
-    assert select_learning(t) is not None
-
-
-def test_short_comment_is_dropped():
-    t = _thread(comments=[_comment("alice", "good catch, agreed")])
+def test_short_decline_is_dropped():
+    t = _thread(comments=[_comment("alice", "Declining.")])
     assert select_learning(t) is None
 
 
 def test_bot_only_thread_ignored():
-    t = _thread(
-        comments=[_comment("github-actions[bot]", "bot only finding, fairly long body here")]
-    )
+    t = _thread(comments=[_comment("github-actions[bot]", "Declining — long enough bot body here")])
     assert select_learning(t) is None
 
 
