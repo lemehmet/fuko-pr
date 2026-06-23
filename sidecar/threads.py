@@ -27,13 +27,13 @@ from .models import IngestItem
 
 _DECLINE_RE = re.compile(
     r"\bdeclin"
-    r"|\bnot\s+(?:address|add|chang|appl|need|actionabl|going|doing|relevant|required)"
+    r"|\bnot\s+(?:address|add|chang|appl|need|actionabl|relevant|required)"
     r"|\bno\s+change\s+(?:needed|required|necessary)"
     r"|\bnot\s+(?:a|an)\s+(?:bug|issue|problem|concern|regression)\b"
     r"|\bintentional|\bby design\b|\bdeliberate"
     r"|\bfalse positive\b|\bmoot\b|\binherent to\b"
     r"|\bwon'?t\s+(?:change|fix|be|add|do|touch|alter|modify)\b|\bwontfix\b|\bdisagree"
-    r"|\bkeeping\b|\bleaving (?:it|this|that|them)?\s*as\b|\bas-is\b"
+    r"|\bkeeping\s+(?:it|this|that|them)?\s*as\b|\bleaving (?:it|this|that|them)?\s*as\b|\bas-is\b"
     r"|\bactually\s+(?:required|correct|fine|intended|right)\b"
     r"|\bpremis",
     re.IGNORECASE,

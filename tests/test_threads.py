@@ -68,6 +68,8 @@ def test_decline_stances_kept(body):
         "Switched to the JSON form in 3b3f809a so the parser stops tripping on tart output.",
         "Filed as #1344 — paginate reviewThreads beyond 100 for very large pull requests.",
         "Good spot — the output is correct now after I normalized the casing in 7e1f0a2.",
+        "Not going to lie — good catch; fixed the flaky import ordering in abc1234 now.",
+        "Keeping the tests green here — fixed the broken import path in def5678 as well.",
     ],
 )
 def test_non_declines_dropped(body):
