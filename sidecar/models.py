@@ -50,6 +50,30 @@ class QueryResponse(BaseModel):
     results: list[LearningResult]
 
 
+class StoredLearning(BaseModel):
+    """One stored learning as listed by ``GET /learnings`` (no similarity score)."""
+
+    id: str
+    repo: str
+    text: str
+    source: str
+    source_url: str | None
+    file_globs: list[str]
+    topic: str | None
+    created_at: str | None = None
+
+
+class ListLearningsResponse(BaseModel):
+    """Body returned by ``GET /learnings``.
+
+    ``count`` is the total number of learnings matching the filters (for paging),
+    independent of ``limit``/``offset``; ``learnings`` is the requested page.
+    """
+
+    learnings: list[StoredLearning]
+    count: int
+
+
 class IngestResponse(BaseModel):
     """Body returned by ``POST /ingest``."""
 

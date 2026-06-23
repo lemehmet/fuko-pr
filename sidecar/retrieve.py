@@ -74,6 +74,55 @@ def query(
     return results[:k]
 
 
+def list_learnings(
+    repo: str | None = None,
+    source: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> tuple[list[dict], int]:
+    """Return a page of live learnings (newest-first) plus the total match count.
+
+    Unlike :func:`query`, this is neither semantic nor file-scoped -- it lists
+    rows for inspection, optionally narrowed by ``repo`` and ``source``, and
+    excludes expired learnings to match what retrieval would surface. Embeddings
+    are not returned. The second element is the total matching the filters,
+    independent of ``limit``/``offset``, for pagination.
+    """
+    where = ["(expires_at IS NULL OR expires_at > now())"]
+    params: list = []
+    if repo:
+        where.append("repo = %s")
+        params.append(repo)
+    if source:
+        where.append("source = %s")
+        params.append(source)
+    clause = " AND ".join(where)
+    page_sql = f"""
+        SELECT id, repo, text, source, source_url, file_globs, topic, created_at
+        FROM learnings
+        WHERE {clause}
+        ORDER BY created_at DESC
+        LIMIT %s OFFSET %s
+    """
+    with db() as conn:
+        total = conn.execute(f"SELECT count(*) FROM learnings WHERE {clause}", params).fetchone()[0]
+        rows = conn.execute(page_sql, [*params, limit, offset]).fetchall()
+    items = [
+        {
+            "id": str(row[0]),
+            "repo": row[1],
+            "text": row[2],
+            "source": row[3],
+            "source_url": row[4],
+            "file_globs": list(row[5] or []),
+            "topic": row[6],
+            "created_at": row[7].isoformat() if row[7] else None,
+        }
+        for row in rows
+    ]
+    return items, int(total)
+
+
 def _fetch_scoped(conn, vec: str, repo: str, cand_k: int) -> list[tuple]:
     sql = """
         SELECT id, text, source, source_url, file_globs, topic,
