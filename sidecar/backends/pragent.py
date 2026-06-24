@@ -27,7 +27,7 @@ from ..normalizers import pragent_signals
 from ..presets import ProviderPreset
 from ..throttle import is_throttle
 from .base import InvokeResult, PRRef
-from ..signals import ReviewSignal, extract_markers, with_marker
+from ..signals import ReviewSignal, extract_markers, with_marker, with_visible_label
 
 
 def _echo(stdout: str | None, stderr: str | None) -> None:
@@ -201,7 +201,9 @@ class PrAgentBackend:
                 _record(tool, proc.returncode, f"{tool} exited {proc.returncode}{suffix}")
         return InvokeResult(returncode=rc, detail="; ".join(details))
 
-    def normalize_output(self, pr: PRRef, model: str = "") -> list[ReviewSignal]:
+    def normalize_output(
+        self, pr: PRRef, model: str = "", *, compare_label: str | None = None
+    ) -> list[ReviewSignal]:
         """Read PR-Agent's inline comments, map them to Review Signals, and mark them.
 
         Detection is by comment *format* (PR-Agent posts under whatever token ran
@@ -209,6 +211,11 @@ class PrAgentBackend:
         Marker injection is best-effort: GitHub only allows editing comments the
         current token authored, so foreign comments simply stay unmarked. Failure
         to read comments degrades to an empty list -- the review itself already ran.
+
+        When ``compare_label`` is set (A/B mode) the newly marked comments also get
+        a compact visible tag of that label, so the producing branch is legible on
+        the diff. The label is the configured ``provider/name`` (matching the branch
+        header), distinct from the litellm-prefixed ``model`` in the marker.
         """
         token = os.environ.get("GITHUB_TOKEN", "")
         api = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
@@ -226,7 +233,7 @@ class PrAgentBackend:
             return []
 
         pairs = pragent_signals(comments, model)
-        self._inject_markers(api, pr, headers, pairs)
+        self._inject_markers(api, pr, headers, pairs, label=compare_label)
         return [p["signal"] for p in pairs]
 
     def _fetch_review_comments(self, api: str, pr: PRRef, headers: dict[str, str]) -> list[dict]:
@@ -250,7 +257,12 @@ class PrAgentBackend:
         return out
 
     def _inject_markers(
-        self, api: str, pr: PRRef, headers: dict[str, str], pairs: list[dict]
+        self,
+        api: str,
+        pr: PRRef,
+        headers: dict[str, str],
+        pairs: list[dict],
+        label: str | None = None,
     ) -> None:
         """Best-effort: append each signal's marker to its comment (skip on any error).
 
@@ -259,6 +271,10 @@ class PrAgentBackend:
         fuko-signal marker is left untouched: re-running a review must not relabel a
         comment, and in A/B compare mode it keeps each branch from overwriting the
         marker an earlier branch wrote on its own suggestions.
+
+        When ``label`` is given (A/B compare mode), the comment is also prefixed with
+        a compact visible model tag so the producing branch is legible on the diff;
+        only the comments this branch newly marks get tagged.
         """
         if not pairs or "Authorization" not in headers:
             return
@@ -268,10 +284,13 @@ class PrAgentBackend:
                 body = comment.get("body") or ""
                 if extract_markers(body):
                     continue
+                new_body = (
+                    with_visible_label(body, label, signal) if label else with_marker(body, signal)
+                )
                 try:
                     resp = client.patch(
                         f"{api}/repos/{pr.repo}/pulls/comments/{comment['id']}",
-                        json={"body": with_marker(body, signal)},
+                        json={"body": new_body},
                     )
                     resp.raise_for_status()
                 except httpx.HTTPError:

@@ -82,3 +82,29 @@ def strip_markers(text: str) -> str:
 def with_marker(body: str, signal: ReviewSignal) -> str:
     """Return ``body`` with ``signal``'s marker appended, replacing any existing marker."""
     return strip_markers(body).rstrip() + "\n\n" + encode_marker(signal)
+
+
+_VISIBLE_LABEL_RE = re.compile(r"^🤖 `[^`]+`\n\n")
+
+
+def visible_label(label: str) -> str:
+    """Return the compact visible model tag prepended to A/B inline comments."""
+    return f"🤖 `{label}`"
+
+
+def with_visible_label(body: str, label: str, signal: ReviewSignal) -> str:
+    """Return ``body`` tagged with a visible ``label`` and ``signal``'s invisible marker.
+
+    The visible tag makes the producing model legible on the diff (where both A/B
+    branches attach to the same lines), while the marker keeps machine attribution
+    intact. Any prior visible tag is stripped first so re-tagging stays idempotent.
+
+    ``_VISIBLE_LABEL_RE`` is anchored to the absolute start of the string (no
+    ``MULTILINE``): the tag is only ever prepended at the very beginning, so a
+    ``🤖 `...` `` line appearing later in the body (e.g. quoted inside a suggestion)
+    is legitimate content and is left intact. Only leading newlines are stripped
+    before re-tagging — never indentation — so the anchored pattern reliably matches
+    a prior tag while preserving any meaningful leading whitespace in the suggestion.
+    """
+    tagged = _VISIBLE_LABEL_RE.sub("", strip_markers(body).lstrip("\n"))
+    return visible_label(label) + "\n\n" + with_marker(tagged, signal)

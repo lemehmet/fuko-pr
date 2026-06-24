@@ -264,11 +264,15 @@ def test_normalize_output_returns_only_pragent_signals(monkeypatch):
     )
     injected = []
     monkeypatch.setattr(
-        PrAgentBackend, "_inject_markers", lambda self, a, p, h, pairs: injected.extend(pairs)
+        PrAgentBackend,
+        "_inject_markers",
+        lambda self, a, p, h, pairs, label=None: injected.append((pairs, label)),
     )
     sigs = PrAgentBackend().normalize_output(PRRef("o/r", 8, "u"), model="anthropic/claude")
     assert [s.severity for s in sigs] == ["high"]
     assert len(injected) == 1
+    assert len(injected[0][0]) == 1
+    assert injected[0][1] is None
 
 
 def test_normalize_output_degrades_when_fetch_fails(monkeypatch):
@@ -338,6 +342,50 @@ def test_inject_markers_skips_marker_from_another_model(monkeypatch):
         "https://api", PRRef("o/r", 8, "u"), _AUTH, [{"comment": marked, "signal": mine}]
     )
     assert _PatchClient.calls == []
+
+
+def test_inject_markers_adds_visible_label_in_compare_mode(monkeypatch):
+    _PatchClient.calls = []
+    monkeypatch.setattr(pragent.httpx, "Client", _PatchClient)
+    pairs = pragent_signals([PRAGENT], model="anthropic/claude")
+    PrAgentBackend()._inject_markers(
+        "https://api", PRRef("o/r", 8, "u"), _AUTH, pairs, label="anthropic/claude"
+    )
+    assert len(_PatchClient.calls) == 1
+    body = _PatchClient.calls[0][1]["body"]
+    assert body.startswith("🤖 `anthropic/claude`\n\n")
+    assert "fuko-signal:v1" in body
+
+
+def test_inject_markers_no_visible_label_without_compare(monkeypatch):
+    _PatchClient.calls = []
+    monkeypatch.setattr(pragent.httpx, "Client", _PatchClient)
+    pairs = pragent_signals([PRAGENT], model="anthropic/claude")
+    PrAgentBackend()._inject_markers("https://api", PRRef("o/r", 8, "u"), _AUTH, pairs)
+    body = _PatchClient.calls[0][1]["body"]
+    assert "🤖" not in body
+    assert "fuko-signal:v1" in body
+
+
+def test_normalize_output_passes_compare_label_through(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "ghtok")
+    monkeypatch.setattr(PrAgentBackend, "_fetch_review_comments", lambda self, a, p, h: [PRAGENT])
+    seen = []
+    monkeypatch.setattr(
+        PrAgentBackend,
+        "_inject_markers",
+        lambda self, a, p, h, pairs, label=None: seen.append(label),
+    )
+    backend = PrAgentBackend()
+    # No compare_label → no visible tag. A compare_label distinct from ``model``
+    # (the marker id) is passed through verbatim as the visible label, so a
+    # ``zai-coding`` branch tags ``zai-coding/glm`` rather than its litellm
+    # alias ``openai/glm``.
+    backend.normalize_output(PRRef("o/r", 8, "u"), model="openai/glm")
+    backend.normalize_output(
+        PRRef("o/r", 8, "u"), model="openai/glm", compare_label="zai-coding/glm"
+    )
+    assert seen == [None, "zai-coding/glm"]
 
 
 def test_inject_markers_empty_is_noop(monkeypatch):

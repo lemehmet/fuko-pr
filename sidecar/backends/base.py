@@ -64,8 +64,18 @@ class ReviewBackend(Protocol):
         """Run the backend's ``tools`` against ``pr`` with the translated environment."""
         ...
 
-    def normalize_output(self, pr: PRRef, model: str = "") -> list[ReviewSignal]:
-        """Read the backend's posted review and map it to Review Signals (egress)."""
+    def normalize_output(
+        self, pr: PRRef, model: str = "", *, compare_label: str | None = None
+    ) -> list[ReviewSignal]:
+        """Read the backend's posted review and map it to Review Signals (egress).
+
+        When ``compare_label`` is set (A/B mode) the backend additionally prepends
+        that visible label to each inline comment it newly marks, so a human reading
+        the diff can tell which branch produced which suggestion. The label is the
+        configured ``provider/name`` (matching the per-branch summary header), kept
+        distinct from ``model`` (the litellm-prefixed id used in the invisible
+        marker) so the visible tag never shows a provider's litellm alias.
+        """
         ...
 
 

@@ -565,7 +565,7 @@ def test_review_wires_config_to_backend(monkeypatch, tmp_path):
             seen.update(env=env, tools=tools)
             return InvokeResult(returncode=0)
 
-        def normalize_output(self, pr, model=""):
+        def normalize_output(self, pr, model="", *, compare_label=None):
             return []
 
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
@@ -591,7 +591,7 @@ def test_review_swallows_unimplemented_normalize(monkeypatch, tmp_path):
         def invoke(self, pr, env, tools):
             return InvokeResult(returncode=0)
 
-        def normalize_output(self, pr, model=""):
+        def normalize_output(self, pr, model="", *, compare_label=None):
             raise NotImplementedError
 
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
@@ -636,7 +636,7 @@ def test_review_compare_runs_each_model_fresh_without_describe(monkeypatch, tmp_
             calls.append({"model": env["CONFIG__MODEL"], "tools": list(tools), "env": env})
             return InvokeResult(returncode=0)
 
-        def normalize_output(self, pr, model=""):
+        def normalize_output(self, pr, model="", *, compare_label=None):
             return []
 
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
@@ -649,6 +649,32 @@ def test_review_compare_runs_each_model_fresh_without_describe(monkeypatch, tmp_
     assert all(c["env"]["PR_REVIEWER__PERSISTENT_COMMENT"] == "false" for c in calls)
     assert all(c["env"]["PR_CODE_SUGGESTIONS__PERSISTENT_COMMENT"] == "false" for c in calls)
     assert "anthropic/claude-sonnet-4-6" in result.detail
+
+
+def test_normalize_compare_label_uses_provider_not_litellm_prefix(monkeypatch):
+    """In compare mode the visible label is ``provider/name`` (matching the branch
+    header), not the litellm-prefixed marker id — so a ``zai-coding`` branch reads
+    ``zai-coding/glm`` on the diff rather than its litellm alias ``openai/glm``."""
+    from sidecar.fukoconfig import ModelConfig
+
+    seen = {}
+
+    class FakeBackend:
+        def normalize_output(self, pr, model="", *, compare_label=None):
+            seen["model"] = model
+            seen["compare_label"] = compare_label
+            return []
+
+    model = ModelConfig(provider="zai-coding", name="glm")
+    runner._normalize(FakeBackend(), PRRef("o/r", 8, "u"), model, compare=True)
+    # Marker id keeps the litellm prefix (machine attribution / fuko signals);
+    # the visible label is the configured provider/name.
+    assert seen["model"] == "openai/glm"
+    assert seen["compare_label"] == "zai-coding/glm"
+
+    seen.clear()
+    runner._normalize(FakeBackend(), PRRef("o/r", 8, "u"), model, compare=False)
+    assert seen["compare_label"] is None
 
 
 @pytest.mark.parametrize("returncodes,expected", [([1, 0], 0), ([0, 1], 0), ([1, 1], 1)])
@@ -674,7 +700,7 @@ def test_review_compare_is_green_when_any_branch_posts(
         def invoke(self, pr, env, tools):
             return InvokeResult(returncode=next(rcs), detail="d")
 
-        def normalize_output(self, pr, model=""):
+        def normalize_output(self, pr, model="", *, compare_label=None):
             return []
 
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
@@ -698,7 +724,7 @@ def test_review_compare_fails_when_describe_is_only_tool(monkeypatch, tmp_path):
         def invoke(self, pr, env, tools):
             raise AssertionError("no branch may run when the tool list is empty")
 
-        def normalize_output(self, pr, model=""):
+        def normalize_output(self, pr, model="", *, compare_label=None):
             return []
 
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())

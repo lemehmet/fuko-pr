@@ -6,7 +6,9 @@ from sidecar.signals import (
     extract_markers,
     make_id,
     strip_markers,
+    visible_label,
     with_marker,
+    with_visible_label,
 )
 
 
@@ -108,3 +110,37 @@ def test_with_marker_is_idempotent():
     twice = with_marker(once, _signal(id="fk_x"))
     assert twice.count("fuko-signal:v1") == 1
     assert extract_markers(twice)[0].id == "fk_x"
+
+
+def test_with_visible_label_prepends_tag_and_marker():
+    out = with_visible_label("Suggestion text", "anthropic/claude", _signal(id="fk_x"))
+    assert out.startswith(visible_label("anthropic/claude") + "\n\n")
+    assert "Suggestion text" in out
+    assert extract_markers(out)[0].id == "fk_x"
+
+
+def test_with_visible_label_is_idempotent():
+    once = with_visible_label("Suggestion text", "anthropic/claude", _signal(id="fk_x"))
+    twice = with_visible_label(once, "anthropic/claude", _signal(id="fk_x"))
+    assert twice.count("🤖") == 1
+    assert twice.count("fuko-signal:v1") == 1
+    assert "Suggestion text" in twice
+
+
+def test_with_visible_label_replaces_prior_tag():
+    once = with_visible_label("Suggestion text", "model-a", _signal(id="fk_x"))
+    relabeled = with_visible_label(once, "model-b", _signal(id="fk_x"))
+    assert "model-a" not in relabeled
+    assert relabeled.startswith(visible_label("model-b") + "\n\n")
+
+
+def test_with_visible_label_preserves_tag_like_line_mid_body():
+    # A line that looks like the visible tag but appears later in the body (e.g.
+    # quoted inside the suggestion) must be left intact — only the prepended
+    # leading tag is the strip target. Guards against the MULTILINE-anchor bug.
+    body = "Real suggestion\n\n🤖 `not-a-real-tag`\n\nmore text"
+    out = with_visible_label(body, "model-a", _signal(id="fk_x"))
+    assert out.startswith(visible_label("model-a") + "\n\n")
+    assert "🤖 `not-a-real-tag`" in out
+    # The genuine prepended tag (model-a) and the quoted look-alike → 2 robots.
+    assert out.count("🤖") == 2
