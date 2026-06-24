@@ -128,7 +128,7 @@ def test_coderabbit_pending_via_walkthrough_range_line_only():
     assert "walkthrough range line covers HEAD" in s["detail"]
 
 
-def test_coderabbit_in_progress_when_header_names_head_and_active_notice():
+def test_coderabbit_in_progress_when_range_line_covers_head_and_active_notice():
     """issue #34: range line covering HEAD plus an explicit in-progress notice -> in_progress.
 
     Demonstrable engagement (an active-scan notice) alongside the range line is enough to
@@ -140,7 +140,7 @@ def test_coderabbit_in_progress_when_header_names_head_and_active_notice():
     assert s["head_reviewed"] == HEAD
 
 
-def test_coderabbit_in_progress_when_header_names_head_and_check_running():
+def test_coderabbit_in_progress_when_range_line_covers_head_and_check_running():
     """issue #34: a still-running CR check-run on HEAD is authoritative engagement.
 
     The check-run overrides the range-line-only pending classification.
