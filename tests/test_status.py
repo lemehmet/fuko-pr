@@ -113,11 +113,32 @@ def test_coderabbit_done_with_findings_via_walkthrough_marker():
     assert "inline" in s["detail"]
 
 
-def test_coderabbit_in_progress_via_walkthrough_without_marker():
-    # HEAD scanned (range line matches) but no completion marker yet -> still in progress.
+def test_coderabbit_pending_via_walkthrough_header_only():
+    # issue #34: the walkthrough header names HEAD (range line matches) but there is no
+    # completion marker, no submitted review on HEAD, and no in-progress check-run or
+    # notice. Under a rapid-push skip CR can update this header and then never engage the
+    # HEAD, so the header alone is NOT evidence of an active scan -> pending (the
+    # consumer's unresponsive timeout governs), NOT a never-ending in_progress.
     s = coderabbit_state(HEAD, [_walk(HEAD)], [])
+    assert s["state"] == "pending"
+    assert s["head_reviewed"] == HEAD
+    assert "walkthrough header names HEAD" in s["detail"]
+
+
+def test_coderabbit_in_progress_when_header_names_head_and_active_notice():
+    # issue #34: when CR both names HEAD in its header AND posts an explicit in-progress
+    # notice, that IS demonstrable engagement -> in_progress (not pending).
+    cs = [_walk(HEAD), _cr("🔬 review in progress — Currently processing new changes")]
+    s = coderabbit_state(HEAD, cs, [])
     assert s["state"] == "in_progress"
-    assert "completion marker" in s["detail"]
+    assert s["head_reviewed"] == HEAD
+
+
+def test_coderabbit_in_progress_when_header_names_head_and_check_running():
+    # issue #34: a still-running CR check-run on HEAD is authoritative engagement, even
+    # when the walkthrough header alone would now report pending.
+    s = coderabbit_state(HEAD, [_walk(HEAD)], [], [_check("in_progress")])
+    assert s["state"] == "in_progress"
 
 
 def test_coderabbit_done_via_review_commit_id_with_marker():
@@ -163,11 +184,26 @@ def test_coderabbit_stale_marker_in_old_review_does_not_satisfy_head():
     # Current HEAD is covered only by the up-front walkthrough (range line, no submitted
     # review yet). An older review for a previous HEAD carries the terminal marker; that
     # stale marker must NOT satisfy done for the new HEAD (CodeRabbit finding, round 1).
+    # With only the header naming HEAD (no in-progress signal), this is pending (#34), not
+    # done — the stale marker is correctly ignored.
     old = _cr_review("0000aaa", body=_review_body("0000aaa", posted=3))
     walk = _walk(HEAD)
     s = coderabbit_state(HEAD, [walk], [old])
-    assert s["state"] == "in_progress"
+    assert s["state"] == "pending"
     # head_reviewed must be the current HEAD, not the older scan's sha matched first.
+    assert s["head_reviewed"] == HEAD
+
+
+def test_coderabbit_rapid_push_skip_reports_pending_not_indefinite_in_progress():
+    # issue #34 acceptance: rapid-push skip. CR reviewed the PREVIOUS commit
+    # (CHANGES_REQUESTED), then its walkthrough header was bumped to the latest HEAD after
+    # ≥3 quick pushes, but CR never engaged that HEAD (no check-run, no review on HEAD, no
+    # terminal marker for HEAD). fuko must report pending — not a never-ending in_progress
+    # that burns the consumer's full per-bot timeout.
+    prev = _cr_review("0000aaa", state="CHANGES_REQUESTED", body=_review_body("0000aaa", posted=2))
+    header_on_head = _walk(HEAD)  # header bumped to HEAD, no marker
+    s = coderabbit_state(HEAD, [header_on_head], [prev])
+    assert s["state"] == "pending"
     assert s["head_reviewed"] == HEAD
 
 

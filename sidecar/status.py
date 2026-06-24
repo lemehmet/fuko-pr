@@ -90,10 +90,19 @@ def coderabbit_state(
     even with an empty body (an APPROVED review often carries no marker). The issue #17
     race is the *up-front walkthrough* issue comment, which CR posts before it has
     finished; so when only that range line covers HEAD and CR has not yet submitted a
-    review, a terminal marker is still required, else ``in_progress``. Marker text is
+    review, a terminal marker is still required to report ``done``. Marker text is
     scoped to the current HEAD (a range line ending at HEAD, an on-HEAD review body, or
     — once CR has reviewed HEAD — its in-place summary) so a prior HEAD's stale marker
     can no longer report done early.
+
+    When only the walkthrough *header* names HEAD — no CR check-run, no submitted review
+    on HEAD, no terminal marker, and no explicit "review in progress" text — this is
+    **not** asserted as ``in_progress`` but reported as ``pending`` (issue #34). Under a
+    rapid-push skip CR can update its "Reviewing … commit X" header and then never
+    engage that HEAD, so the header alone is not evidence of an active scan; ``pending``
+    lets the consumer's own unresponsive timeout govern instead of an implied
+    never-ending scan. ``in_progress`` is reserved for demonstrable engagement: a CR
+    check-run that is still running, or an explicit in-progress notice in CR's body.
     """
     cr_issue_bodies = [
         c.get("body", "") or ""
@@ -153,11 +162,19 @@ def coderabbit_state(
         + (cr_issue_bodies if review_on_head else [])
     )
     if not review_on_head and not _CR_DONE_MARKER.search(head_blob):
+        if _CR_IN_PROGRESS.search(blob):
+            return _row(
+                "coderabbit",
+                "in_progress",
+                head_sha,
+                "review in progress (CR named HEAD and reports an active scan)",
+            )
         return _row(
             "coderabbit",
-            "in_progress",
+            "pending",
             head_sha,
-            "HEAD scanned but no completion marker yet (inline comments may still be posting)",
+            "walkthrough header names HEAD but CR shows no completion marker, "
+            "submitted review, or in-progress check-run yet",
         )
 
     zero = bool(_CR_DONE_ZERO.search(head_blob))
