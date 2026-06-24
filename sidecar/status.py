@@ -103,7 +103,10 @@ def coderabbit_state(
     then never engage it, so the range line alone is not evidence of an active scan;
     ``pending`` lets the consumer's own unresponsive timeout govern instead of an implied
     never-ending scan. ``in_progress`` is reserved for demonstrable engagement: a CR
-    check-run that is still running, or an explicit in-progress notice in CR's body.
+    check-run that is still running, or an explicit in-progress notice in CR's live
+    status *issue comment* (the in-progress text is scoped to ``cr_issue_bodies`` so a
+    stale phrase in an older submitted review body for a prior HEAD cannot spuriously
+    flip the current HEAD back to ``in_progress``).
     """
     cr_issue_bodies = [
         c.get("body", "") or ""
@@ -136,6 +139,7 @@ def coderabbit_state(
         )
 
     blob = "\n".join(bodies)
+    issue_blob = "\n".join(cr_issue_bodies)
     walkthrough = next((b for b in bodies if _CR_REVIEWING.search(b)), "")
     m = _CR_REVIEWING.search(walkthrough)
     walk_head = m.group(2) if m else None
@@ -151,7 +155,7 @@ def coderabbit_state(
             )
         if _CR_PAUSED.search(blob):
             return _row("coderabbit", "paused", walk_head, "reviews paused; HEAD not yet scanned")
-        if _CR_IN_PROGRESS.search(blob):
+        if _CR_IN_PROGRESS.search(issue_blob):
             return _row("coderabbit", "in_progress", walk_head, "review in progress")
         return _row(
             "coderabbit", "pending", walk_head, "neither walkthrough nor review covers the HEAD"
@@ -163,7 +167,7 @@ def coderabbit_state(
         + (cr_issue_bodies if review_on_head else [])
     )
     if not review_on_head and not _CR_DONE_MARKER.search(head_blob):
-        if _CR_IN_PROGRESS.search(blob):
+        if _CR_IN_PROGRESS.search(issue_blob):
             return _row(
                 "coderabbit",
                 "in_progress",

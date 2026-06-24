@@ -140,13 +140,18 @@ def test_coderabbit_in_progress_when_range_line_covers_head_and_active_notice():
     assert s["head_reviewed"] == HEAD
 
 
-def test_coderabbit_in_progress_when_range_line_covers_head_and_check_running():
-    """issue #34: a still-running CR check-run on HEAD is authoritative engagement.
+def test_coderabbit_pending_when_in_progress_phrase_only_in_stale_review_body():
+    """The in-progress notice is scoped to CR's live status issue comments.
 
-    The check-run overrides the range-line-only pending classification.
+    A stale "review in progress" phrase carried in an older submitted review body (for a
+    prior HEAD) must NOT flip the range-line-only HEAD back to in_progress — otherwise the
+    rapid-push-skip case (#34) would never settle to pending. Only the live status issue
+    comment counts as an active-scan notice.
     """
-    s = coderabbit_state(HEAD, [_walk(HEAD)], [], [_check("in_progress")])
-    assert s["state"] == "in_progress"
+    stale = _cr_review("0000aaa", body="🔬 review in progress — Currently processing new changes")
+    s = coderabbit_state(HEAD, [_walk(HEAD)], [stale])
+    assert s["state"] == "pending"
+    assert s["head_reviewed"] == HEAD
 
 
 def test_coderabbit_done_via_review_commit_id_with_marker():
