@@ -270,6 +270,7 @@ def test_normalize_output_returns_only_pragent_signals(monkeypatch):
     )
     sigs = PrAgentBackend().normalize_output(PRRef("o/r", 8, "u"), model="anthropic/claude")
     assert [s.severity for s in sigs] == ["high"]
+    assert len(injected) == 1
     assert len(injected[0][0]) == 1
     assert injected[0][1] is None
 
