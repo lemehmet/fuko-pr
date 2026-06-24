@@ -1,0 +1,86 @@
+# fuko-pr review workflow — fuko-pr reviewing its OWN PRs (dogfood).
+#
+# Unlike the distributable template (workflows/pr-review.yml) and the consumer
+# repos (shuanda, mepro) — which pin `uvx --from git+...@<commit>` to a released
+# fuko-pr — this job runs the runner from the CHECKED-OUT PR code (`uv run fuko`)
+# so a PR is reviewed by the very runner it is changing. That is what lets a PR
+# that adds a feature (e.g. `[[review.compare]]` A/B) be exercised by that feature.
+#
+# Runner: ubuntu-latest (GitHub-hosted). It has Docker for PR-Agent's image and
+# can reach the public z.ai / Ollama Cloud APIs. NOTE: a LAN knowledge sidecar
+# (FUKO_URL) is NOT reachable from GitHub-hosted runners — the review degrades to
+# KB-less there (it still runs, just without injected learnings). Register a
+# self-hosted homelab runner (as shuanda/mepro have) to use the sidecar.
+#
+# Posts as the "Fuko PR Review" GitHub App when configured (repo VARIABLE
+# FUKO_APP_ID + secret FUKO_APP_PRIVATE_KEY, App installed); otherwise
+# github-actions[bot]. Observe-only — posts reviews, gates nothing.
+
+name: fuko-pr review
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+concurrency:
+  group: fuko-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Skip drafts, and never run fork-PR head code with this repo's secrets.
+    if: ${{ github.event.pull_request.draft == false && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-latest
+    # A/B runs two models sequentially; keep this above fuko-pr's per-tool budget
+    # so the graceful per-tool timeout + docker kill fire before GitHub cancels.
+    timeout-minutes: 40
+    permissions:
+      contents: read # reads PR data + posts comments only; no commits/pushes
+      pull-requests: write
+      issues: write
+    steps:
+      # Post as the "Fuko PR Review" GitHub App when configured: set repo VARIABLE
+      # FUKO_APP_ID + secret FUKO_APP_PRIVATE_KEY and install the App on the repo.
+      # (App ID is a variable, not a secret — the `secrets` context is not allowed
+      # in step `if:` conditions, but `vars` is.) Falls back to github-actions[bot].
+      - name: Mint Fuko PR Review app token
+        id: app-token
+        if: ${{ vars.FUKO_APP_ID != '' }}
+        continue-on-error: true # if minting fails (App uninstalled, etc.), fall back to github-actions[bot] rather than failing the PR check
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ vars.FUKO_APP_ID }}
+          private-key: ${{ secrets.FUKO_APP_PRIVATE_KEY }}
+
+      # Bring the PR's code + .fuko.toml into the workspace; the runner is then
+      # built from this checkout (dogfood), not a pinned release.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4
+        with:
+          persist-credentials: false
+
+      # uv is self-contained and brings its own Python. Pin it.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.22"
+
+      - name: Review
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          # Knowledge base: the LAN fuko sidecar when reachable (self-hosted
+          # runner). On ubuntu-latest these resolve to an unreachable host and the
+          # runner degrades to KB-less — harmless, just no injected learnings.
+          FUKO_URL: ${{ secrets.FUKO_URL }}
+          FUKO_TOKEN: ${{ secrets.FUKO_TOKEN }}
+          # Reviewer model keys for the .fuko.toml A/B pool: GLM-5.2 via z.ai
+          # (zai-coding, branch a) and a model via Ollama Cloud (ollama-cloud,
+          # branch b). Separate keys = separate throttle buckets.
+          ZAI_KEY: ${{ secrets.ZAI_KEY }}
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY }}
+          # Pass the PR URL through the environment rather than expanding
+          # ${{ github.event... }} directly in run: (avoids shell injection).
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        # `uv run` syncs the checkout's deps and runs its `fuko` entry point, so the
+        # PR's own runner code performs the review.
+        run: uv run fuko review --pr-url "$PR_URL"

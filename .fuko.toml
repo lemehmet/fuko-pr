@@ -1,0 +1,16 @@
+[review]
+image = "ghcr.io/lemehmet/pr-agent:0.36.1@sha256:f480d06cf9ec49d6e2da8897a8904c844cd46fc1030f077814b51a8d2c40953a"
+
+[review.model]
+provider = "anthropic"
+name = "claude-sonnet-4-6"
+
+[[review.compare]]
+provider = "zai-coding"
+name = "glm-5.2"
+max_context = 1000000
+
+[[review.compare]]
+provider = "ollama-cloud"
+name = "qwen3.6:35b"
+max_context = 976000
