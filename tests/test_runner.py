@@ -737,6 +737,121 @@ def test_review_compare_fails_when_describe_is_only_tool(monkeypatch, tmp_path):
     assert "describe" in result.detail
 
 
+def test_warn_compare_overrides_names_ignored_failover_pool(capsys):
+    from sidecar.fukoconfig import ModelConfig, ReviewConfig
+
+    review = ReviewConfig(
+        compare=[CompareModel(provider="anthropic", name="a")],
+        providers=[
+            ModelConfig(provider="anthropic", name="a"),
+            ModelConfig(provider="ollama", name="b"),
+        ],
+    )
+    runner._warn_compare_overrides(review)
+    err = capsys.readouterr().err
+    assert "A/B compare mode active" in err
+    assert "2-provider failover pool" in err
+    assert "[[review.providers]]" in err
+
+
+def test_warn_compare_overrides_warns_on_inert_single_model(capsys):
+    from sidecar.fukoconfig import ModelConfig, ReviewConfig
+
+    review = ReviewConfig(
+        compare=[CompareModel(provider="anthropic", name="a")],
+        model=ModelConfig(provider="ollama", name="custom"),
+    )
+    runner._warn_compare_overrides(review)
+    err = capsys.readouterr().err
+    assert "A/B compare mode active" in err
+    assert "[review.model]" in err
+
+
+def test_warn_compare_overrides_warns_on_explicitly_set_default_model(capsys):
+    """An explicitly-configured ``[review.model]`` must warn even when its values
+    equal the defaults — the gate is *explicit configuration*, not *non-default
+    values* (a value comparison stays silent on an explicit-default model and
+    misses the override). Detected via Pydantic's ``model_fields_set``."""
+    from sidecar.fukoconfig import ModelConfig, ReviewConfig
+
+    review = ReviewConfig(
+        compare=[CompareModel(provider="anthropic", name="a")],
+        model=ModelConfig(),
+    )
+    assert review.model == ModelConfig()
+    runner._warn_compare_overrides(review)
+    err = capsys.readouterr().err
+    assert "A/B compare mode active" in err
+    assert "[review.model]" in err
+
+
+def test_warn_compare_overrides_silent_with_only_compare(capsys):
+    from sidecar.fukoconfig import ReviewConfig
+
+    review = ReviewConfig(compare=[CompareModel(provider="anthropic", name="a")])
+    runner._warn_compare_overrides(review)
+    assert capsys.readouterr().err == ""
+
+
+def test_warn_compare_overrides_silent_when_compare_unset(capsys):
+    """The helper is a no-op without ``[[review.compare]]`` even when a pool or
+    explicit model is configured — it must not warn for non-compare reviews if
+    ever called outside the guarded ``review()`` dispatch."""
+    from sidecar.fukoconfig import ModelConfig, ReviewConfig
+
+    review = ReviewConfig(
+        providers=[ModelConfig(provider="anthropic", name="a")],
+        model=ModelConfig(provider="ollama", name="custom"),
+    )
+    runner._warn_compare_overrides(review)
+    assert capsys.readouterr().err == ""
+
+
+def test_warn_compare_overrides_prefers_pool_warning_over_model(capsys):
+    from sidecar.fukoconfig import ModelConfig, ReviewConfig
+
+    review = ReviewConfig(
+        compare=[CompareModel(provider="anthropic", name="a")],
+        providers=[ModelConfig(provider="ollama", name="b")],
+        model=ModelConfig(provider="ollama", name="custom"),
+    )
+    runner._warn_compare_overrides(review)
+    err = capsys.readouterr().err
+    assert "failover pool" in err
+    assert "[review.model] is ignored" not in err
+
+
+def test_review_warns_when_compare_overrides_providers(monkeypatch, tmp_path, capsys):
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text(
+        '[[review.providers]]\nprovider = "anthropic"\nname = "a"\n'
+        '[[review.providers]]\nprovider = "ollama"\nname = "b"\n'
+        '[[review.compare]]\nprovider = "anthropic"\nname = "a"\n'
+        '[[review.compare]]\nprovider = "ollama"\nname = "b"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ANTHROPIC_KEY", "k")
+    _stub_compare_io(monkeypatch)
+    monkeypatch.setattr(runner, "_post_branch_header", lambda *a: None)
+
+    class FakeBackend:
+        def build_env(self, preset, model, knowledge, tools):
+            return {}
+
+        def invoke(self, pr, env, tools):
+            return InvokeResult(returncode=0)
+
+        def normalize_output(self, pr, model="", *, compare_label=None, **_kw):
+            return []
+
+    monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
+    result = runner.review("https://github.com/o/r/pull/7", str(cfg))
+    assert result.returncode == 0
+    err = capsys.readouterr().err
+    assert "A/B compare mode active" in err
+    assert "2-provider failover pool" in err
+
+
 def test_post_branch_header_skips_without_token(monkeypatch):
     def boom(*a, **k):
         raise AssertionError("must not POST without a token")

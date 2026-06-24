@@ -598,6 +598,35 @@ def _review_compare(
     return InvokeResult(returncode=rc, detail=detail)
 
 
+def _warn_compare_overrides(review: ReviewConfig) -> None:
+    """Warn when A/B compare silently sidelines a configured failover pool or model.
+
+    ``[[review.compare]]`` wins by strict precedence over ``[[review.providers]]``
+    and ``[review.model]`` (each branch is a single model; A/B deliberately does no
+    failover). That override is intended, but should not be silent: a user who has a
+    working failover pool and later adds compare entries would otherwise lose
+    failover with no signal. Emits a one-line stderr warning naming what is ignored.
+
+    No-op unless ``[[review.compare]]`` is actually set, so the helper stays
+    self-consistent if called outside the guarded ``review()`` dispatch.
+    """
+    if not review.compare:
+        return
+    if review.providers:
+        print(
+            f"fuko: A/B compare mode active — the {len(review.providers)}-provider "
+            "failover pool ([[review.providers]]) is ignored (compare runs each "
+            "branch as a single model with no failover)",
+            file=sys.stderr,
+        )
+    elif "model" in review.model_fields_set:
+        print(
+            "fuko: A/B compare mode active — the single [review.model] is ignored "
+            "(compare reviews only the listed [[review.compare]] models)",
+            file=sys.stderr,
+        )
+
+
 def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
     """Run a full review for ``pr_url`` through the configured backend.
 
@@ -619,6 +648,7 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
     required = _estimate_required_context(pr, token, api_url, knowledge)
 
     if cfg.review.compare:
+        _warn_compare_overrides(cfg.review)
         return _review_compare(
             backend, pr, knowledge, gh_env, cfg.review, token, api_url, cooled, required
         )
