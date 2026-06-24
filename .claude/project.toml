@@ -37,12 +37,15 @@ login = "fuko-pr-review[bot]"
 gated = false   # observe-only: triaged + replied, but not a round-gate participant
 
 [ci]
-# Workflow names to ignore in BUILD_STATE (GitHub's mirror of a bot review).
-# On this repo the Copilot review surfaces in actions/runs as "Running Copilot
-# Code Review" (verified) — NOT the template's "Copilot code review" — so match
-# that exact name. CodeRabbit posts check-runs, not Actions runs, so it never
-# enters BUILD_STATE and needs no exclusion here.
-excluded_workflow_names = ["Running Copilot Code Review"]
+# Workflow names to ignore in BUILD_STATE (observe-only or bot-review mirrors,
+# not merge gates). On this repo the Copilot review surfaces in actions/runs as
+# "Running Copilot Code Review" (verified) — NOT the template's "Copilot code
+# review" — so match that exact name. "fuko-pr review" is the recursive-dogfood
+# A/B self-review (observe-only per [bots.fuko_pr].gated=false); it runs ~30 min
+# on every push and must not gate the cycle. CodeRabbit posts check-runs, not
+# Actions runs, so it never enters BUILD_STATE and needs no exclusion here. The
+# real gate left is "ci" (ruff + pytest).
+excluded_workflow_names = ["Running Copilot Code Review", "fuko-pr review"]
 
 # Local pre-push verification gates + web smoke build. Mirrors .github/workflows/ci.yml.
 [toolchain]

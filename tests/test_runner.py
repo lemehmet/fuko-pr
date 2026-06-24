@@ -596,3 +596,135 @@ def test_review_swallows_unimplemented_normalize(monkeypatch, tmp_path):
 
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
     assert runner.review("https://github.com/o/r/pull/7", str(cfg)).returncode == 0
+
+
+def _stub_compare_io(monkeypatch):
+    """Neutralize knowledge, cooldown, and sizing I/O for A/B runner tests.
+
+    The per-branch header (`_post_branch_header`) is patched separately by each
+    test that needs it, so it is intentionally left untouched here.
+    """
+    monkeypatch.setattr(runner, "build_knowledge", lambda *a: "")
+    monkeypatch.setattr(runner, "_cb_cooldowns", lambda: set())
+    monkeypatch.setattr(runner, "_estimate_required_context", lambda *a: None)
+
+
+def test_review_compare_runs_each_model_fresh_without_describe(monkeypatch, tmp_path):
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text(
+        '[review]\ntools = ["review", "improve", "describe"]\n'
+        '[[review.compare]]\nprovider = "anthropic"\nname = "claude-sonnet-4-6"\n'
+        '[[review.compare]]\nprovider = "ollama"\nname = "qwen2.5-coder"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GITHUB_TOKEN", "ghtok")
+    monkeypatch.setenv("ANTHROPIC_KEY", "antkey")
+    _stub_compare_io(monkeypatch)
+
+    headers = []
+    monkeypatch.setattr(
+        runner, "_post_branch_header", lambda pr, token, api, label: headers.append(label)
+    )
+
+    calls = []
+
+    class FakeBackend:
+        def build_env(self, preset, model, knowledge, tools):
+            return {"CONFIG__MODEL": preset.litellm_prefix + model.name}
+
+        def invoke(self, pr, env, tools):
+            calls.append({"model": env["CONFIG__MODEL"], "tools": list(tools), "env": env})
+            return InvokeResult(returncode=0)
+
+        def normalize_output(self, pr, model=""):
+            return []
+
+    monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
+    result = runner.review("https://github.com/o/r/pull/7", str(cfg))
+
+    assert result.returncode == 0
+    assert headers == ["anthropic/claude-sonnet-4-6", "ollama/qwen2.5-coder"]
+    assert [c["model"] for c in calls] == ["anthropic/claude-sonnet-4-6", "ollama/qwen2.5-coder"]
+    assert all("describe" not in c["tools"] for c in calls)
+    assert all(c["env"]["PR_REVIEWER__PERSISTENT_COMMENT"] == "false" for c in calls)
+    assert all(c["env"]["PR_CODE_SUGGESTIONS__PERSISTENT_COMMENT"] == "false" for c in calls)
+    assert "anthropic/claude-sonnet-4-6" in result.detail
+
+
+@pytest.mark.parametrize("returncodes,expected", [([1, 0], 0), ([0, 1], 0), ([1, 1], 1)])
+def test_review_compare_is_green_when_any_branch_posts(
+    monkeypatch, tmp_path, returncodes, expected
+):
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text(
+        '[[review.compare]]\nprovider = "anthropic"\nname = "a"\n'
+        '[[review.compare]]\nprovider = "ollama"\nname = "b"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ANTHROPIC_KEY", "k")
+    _stub_compare_io(monkeypatch)
+    monkeypatch.setattr(runner, "_post_branch_header", lambda *a: None)
+
+    rcs = iter(returncodes)
+
+    class FakeBackend:
+        def build_env(self, preset, model, knowledge, tools):
+            return {}
+
+        def invoke(self, pr, env, tools):
+            return InvokeResult(returncode=next(rcs), detail="d")
+
+        def normalize_output(self, pr, model=""):
+            return []
+
+    monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
+    assert runner.review("https://github.com/o/r/pull/7", str(cfg)).returncode == expected
+
+
+def test_review_compare_fails_when_describe_is_only_tool(monkeypatch, tmp_path):
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text(
+        '[review]\ntools = ["describe"]\n[[review.compare]]\nprovider = "anthropic"\nname = "a"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ANTHROPIC_KEY", "k")
+    _stub_compare_io(monkeypatch)
+    monkeypatch.setattr(runner, "_post_branch_header", lambda *a: None)
+
+    class FakeBackend:
+        def build_env(self, preset, model, knowledge, tools):
+            raise AssertionError("no branch may run when the tool list is empty")
+
+        def invoke(self, pr, env, tools):
+            raise AssertionError("no branch may run when the tool list is empty")
+
+        def normalize_output(self, pr, model=""):
+            return []
+
+    monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
+    result = runner.review("https://github.com/o/r/pull/7", str(cfg))
+    assert result.returncode == 1
+    assert "describe" in result.detail
+
+
+def test_post_branch_header_skips_without_token(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("must not POST without a token")
+
+    monkeypatch.setattr(runner.httpx, "post", boom)
+    runner._post_branch_header(PRRef("o/r", 8, "u"), "", "https://api.github.com", "anthropic/x")
+
+
+def test_post_branch_header_posts_labelled_comment(monkeypatch):
+    posted = {}
+
+    def fake_post(url, json, headers, timeout):
+        posted.update(url=url, body=json["body"])
+        return _Resp({})
+
+    monkeypatch.setattr(runner.httpx, "post", fake_post)
+    runner._post_branch_header(
+        PRRef("o/r", 8, "u"), "ghtok", "https://api.github.com", "anthropic/claude"
+    )
+    assert posted["url"].endswith("/repos/o/r/issues/8/comments")
+    assert "anthropic/claude" in posted["body"]

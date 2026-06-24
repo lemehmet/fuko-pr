@@ -328,6 +328,18 @@ def test_inject_markers_skips_already_marked(monkeypatch):
     assert _PatchClient.calls == []
 
 
+def test_inject_markers_skips_marker_from_another_model(monkeypatch):
+    _PatchClient.calls = []
+    monkeypatch.setattr(pragent.httpx, "Client", _PatchClient)
+    other = pragent_signal(PRAGENT, model="model-a")
+    marked = dict(PRAGENT, body=PRAGENT["body"] + "\n\n" + encode_marker(other))
+    mine = pragent_signal(marked, model="model-b")
+    PrAgentBackend()._inject_markers(
+        "https://api", PRRef("o/r", 8, "u"), _AUTH, [{"comment": marked, "signal": mine}]
+    )
+    assert _PatchClient.calls == []
+
+
 def test_inject_markers_empty_is_noop(monkeypatch):
     _PatchClient.calls = []
     monkeypatch.setattr(pragent.httpx, "Client", _PatchClient)
