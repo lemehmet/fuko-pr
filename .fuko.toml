@@ -4,8 +4,9 @@ tool_timeout = 600
 optional_tools = ["improve"]
 
 [review.model]
-provider = "anthropic"
-name = "claude-sonnet-4-6"
+provider = "zai-coding"
+name = "glm-5.2"
+max_context = 1000000
 
 [[review.compare]]
 provider = "zai-coding"
