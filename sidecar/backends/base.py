@@ -64,8 +64,15 @@ class ReviewBackend(Protocol):
         """Run the backend's ``tools`` against ``pr`` with the translated environment."""
         ...
 
-    def normalize_output(self, pr: PRRef, model: str = "") -> list[ReviewSignal]:
-        """Read the backend's posted review and map it to Review Signals (egress)."""
+    def normalize_output(
+        self, pr: PRRef, model: str = "", *, compare: bool = False
+    ) -> list[ReviewSignal]:
+        """Read the backend's posted review and map it to Review Signals (egress).
+
+        In ``compare`` (A/B) mode a backend additionally prepends a visible model
+        tag to each inline comment it newly marks, so a human reading the diff can
+        tell which branch produced which suggestion.
+        """
         ...
 
 

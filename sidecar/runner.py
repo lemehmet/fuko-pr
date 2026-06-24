@@ -259,12 +259,16 @@ def _cb_trip(provider: str, cooldown_seconds: int, reason: str) -> None:
         print(f"fuko: circuit-breaker trip failed (continuing): {e}", file=sys.stderr)
 
 
-def _normalize(backend, pr: PRRef, model: ModelConfig) -> None:
-    """Map the posted review into Review Signals for the winning provider's model."""
+def _normalize(backend, pr: PRRef, model: ModelConfig, *, compare: bool = False) -> None:
+    """Map the posted review into Review Signals for the winning provider's model.
+
+    In A/B ``compare`` mode the backend additionally tags each newly marked inline
+    comment with a visible model label so the producing branch is legible on the diff.
+    """
     try:
         preset = get_preset(model.provider)
         model_id = preset.litellm_prefix + model.name
-        signals = backend.normalize_output(pr, model=model_id)
+        signals = backend.normalize_output(pr, model=model_id, compare=compare)
         print(f"fuko: normalized {len(signals)} review signals", file=sys.stderr)
     except NotImplementedError:
         pass
@@ -330,6 +334,7 @@ def _run_pool(
     *,
     tools: list[str] | None = None,
     fresh_comment: bool = False,
+    compare: bool = False,
 ) -> InvokeResult:
     """Run one review over ``pool`` with failover, normalizing the winner's output.
 
@@ -338,8 +343,9 @@ def _run_pool(
     first provider is pinned for the whole job; a throttle (429/quota/overload/
     timeout) trips its breaker and fails over, while any other error fails fast.
     ``tools`` overrides the configured tool list (used to drop ``describe`` in A/B
-    mode) and ``fresh_comment`` posts a new summary instead of updating PR-Agent's
-    persistent one.
+    mode), ``fresh_comment`` posts a new summary instead of updating PR-Agent's
+    persistent one, and ``compare`` tags each branch's inline suggestions with a
+    visible model label.
     """
     tools = review.tools if tools is None else tools
     ordered = order_pool(pool, cooled, required)
@@ -362,7 +368,7 @@ def _run_pool(
         result = replace(backend.invoke(pr, env, tools), provider=model.provider)
         if not result.throttled:
             if result.returncode == 0:
-                _normalize(backend, pr, model)
+                _normalize(backend, pr, model, compare=compare)
             return result
 
         _cb_trip(model.provider, review.cooldown_seconds, result.detail)
@@ -422,6 +428,7 @@ def _review_compare(
             required,
             tools=tools,
             fresh_comment=True,
+            compare=True,
         )
         outcomes.append((label, result))
 

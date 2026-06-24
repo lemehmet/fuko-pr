@@ -82,3 +82,22 @@ def strip_markers(text: str) -> str:
 def with_marker(body: str, signal: ReviewSignal) -> str:
     """Return ``body`` with ``signal``'s marker appended, replacing any existing marker."""
     return strip_markers(body).rstrip() + "\n\n" + encode_marker(signal)
+
+
+_VISIBLE_LABEL_RE = re.compile(r"^🤖 `[^`]+`\n\n", flags=re.MULTILINE)
+
+
+def visible_label(label: str) -> str:
+    """Return the compact visible model tag prepended to A/B inline comments."""
+    return f"🤖 `{label}`"
+
+
+def with_visible_label(body: str, label: str, signal: ReviewSignal) -> str:
+    """Return ``body`` tagged with a visible ``label`` and ``signal``'s invisible marker.
+
+    The visible tag makes the producing model legible on the diff (where both A/B
+    branches attach to the same lines), while the marker keeps machine attribution
+    intact. Any prior visible tag is stripped first so re-tagging stays idempotent.
+    """
+    tagged = _VISIBLE_LABEL_RE.sub("", strip_markers(body).lstrip())
+    return visible_label(label) + "\n\n" + with_marker(tagged, signal)

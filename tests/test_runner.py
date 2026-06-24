@@ -565,7 +565,7 @@ def test_review_wires_config_to_backend(monkeypatch, tmp_path):
             seen.update(env=env, tools=tools)
             return InvokeResult(returncode=0)
 
-        def normalize_output(self, pr, model=""):
+        def normalize_output(self, pr, model="", *, compare=False):
             return []
 
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
@@ -591,7 +591,7 @@ def test_review_swallows_unimplemented_normalize(monkeypatch, tmp_path):
         def invoke(self, pr, env, tools):
             return InvokeResult(returncode=0)
 
-        def normalize_output(self, pr, model=""):
+        def normalize_output(self, pr, model="", *, compare=False):
             raise NotImplementedError
 
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
@@ -636,7 +636,7 @@ def test_review_compare_runs_each_model_fresh_without_describe(monkeypatch, tmp_
             calls.append({"model": env["CONFIG__MODEL"], "tools": list(tools), "env": env})
             return InvokeResult(returncode=0)
 
-        def normalize_output(self, pr, model=""):
+        def normalize_output(self, pr, model="", *, compare=False):
             return []
 
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
@@ -674,7 +674,7 @@ def test_review_compare_is_green_when_any_branch_posts(
         def invoke(self, pr, env, tools):
             return InvokeResult(returncode=next(rcs), detail="d")
 
-        def normalize_output(self, pr, model=""):
+        def normalize_output(self, pr, model="", *, compare=False):
             return []
 
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
@@ -698,7 +698,7 @@ def test_review_compare_fails_when_describe_is_only_tool(monkeypatch, tmp_path):
         def invoke(self, pr, env, tools):
             raise AssertionError("no branch may run when the tool list is empty")
 
-        def normalize_output(self, pr, model=""):
+        def normalize_output(self, pr, model="", *, compare=False):
             return []
 
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
