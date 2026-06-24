@@ -12,5 +12,5 @@ max_context = 1000000
 
 [[review.compare]]
 provider = "ollama-cloud"
-name = "qwen3.6:35b"
+name = "minimax-m3:cloud"
 max_context = 976000
