@@ -28,7 +28,7 @@ PRAGENT = {
     "line": 4,
     "start_line": None,
     "html_url": "https://github.com/o/r/pull/8#discussion_r111",
-    "user": {"login": "lemehmet"},
+    "user": {"login": "lemehmet", "id": 7},
     "body": (
         "**Suggestion:** When `completedFocusCount` is 0, the modulo condition is "
         "true (0 % 4 === 0), so the very first call returns a long break of 15 "
@@ -284,9 +284,16 @@ def test_normalize_output_degrades_when_fetch_fails(monkeypatch):
 
 
 class _PatchClient:
-    """Fake httpx.Client capturing PATCH calls."""
+    """Fake httpx.Client capturing PATCH calls.
+
+    ``GET /user`` resolves the marking identity to actor id ``7`` -- the same id as
+    the ``PRAGENT`` fixture's author -- so the author-filter in ``_inject_markers``
+    keeps that comment. ``actor_id`` can be overridden per test to simulate marking
+    under a *different* identity (where the sibling's comment is skipped).
+    """
 
     calls: list = []
+    actor_id: int = 7
 
     def __init__(self, *a, **k):
         pass
@@ -296,6 +303,18 @@ class _PatchClient:
 
     def __exit__(self, *exc):
         return False
+
+    def get(self, url, params=None):
+        assert url.endswith("/user")
+
+        class _R:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"id": _PatchClient.actor_id}
+
+        return _R()
 
     def patch(self, url, json):
         _PatchClient.calls.append((url, json))
@@ -414,12 +433,51 @@ def test_inject_markers_skips_on_patch_error(monkeypatch):
         def __exit__(self, *exc):
             return False
 
+        def get(self, url, params=None):
+            class _R:
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {"id": 7}  # matches the PRAGENT author, so it isn't filtered
+
+            return _R()
+
         def patch(self, url, json):
             raise httpx.HTTPError("403 not your comment")
 
     monkeypatch.setattr(pragent.httpx, "Client", _ErrClient)
     pairs = pragent_signals([PRAGENT], model="m")
     PrAgentBackend()._inject_markers("https://api", PRRef("o/r", 8, "u"), _AUTH, pairs)
+
+
+def test_inject_markers_skips_sibling_authored_comment(monkeypatch):
+    # Concurrent A/B mode: marking under actor id 99 must NOT PATCH the PRAGENT
+    # comment authored by actor id 7 (a sibling branch's). Without the author
+    # filter every such PATCH would 403 and burn API quota.
+    _PatchClient.calls = []
+    _PatchClient.actor_id = 99
+    monkeypatch.setattr(pragent.httpx, "Client", _PatchClient)
+    try:
+        pairs = pragent_signals([PRAGENT], model="m")
+        PrAgentBackend()._inject_markers("https://api", PRRef("o/r", 8, "u"), _AUTH, pairs)
+        assert _PatchClient.calls == []
+    finally:
+        _PatchClient.actor_id = 7
+
+
+def test_inject_markers_marks_all_when_actor_unresolved(monkeypatch):
+    # If GET /user can't resolve the identity, fall back to marking best-effort
+    # across all comments (prior behavior) rather than skip everything.
+    _PatchClient.calls = []
+    _PatchClient.actor_id = None
+    monkeypatch.setattr(pragent.httpx, "Client", _PatchClient)
+    try:
+        pairs = pragent_signals([PRAGENT], model="m")
+        PrAgentBackend()._inject_markers("https://api", PRRef("o/r", 8, "u"), _AUTH, pairs)
+        assert len(_PatchClient.calls) == 1
+    finally:
+        _PatchClient.actor_id = 7
 
 
 class _GetClient:

@@ -21,7 +21,7 @@ class _FakeBackend:
     def invoke(self, pr, env, tools):
         return self._results.pop(0)
 
-    def normalize_output(self, pr, model="", *, compare_label=None):
+    def normalize_output(self, pr, model="", *, compare_label=None, **_kw):
         self.normalized = model
         return []
 
