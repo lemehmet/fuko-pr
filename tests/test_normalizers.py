@@ -366,7 +366,7 @@ def test_inject_markers_no_visible_label_without_compare(monkeypatch):
     assert "fuko-signal:v1" in body
 
 
-def test_normalize_output_passes_label_only_in_compare_mode(monkeypatch):
+def test_normalize_output_passes_compare_label_through(monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "ghtok")
     monkeypatch.setattr(PrAgentBackend, "_fetch_review_comments", lambda self, a, p, h: [PRAGENT])
     seen = []
@@ -376,9 +376,15 @@ def test_normalize_output_passes_label_only_in_compare_mode(monkeypatch):
         lambda self, a, p, h, pairs, label=None: seen.append(label),
     )
     backend = PrAgentBackend()
-    backend.normalize_output(PRRef("o/r", 8, "u"), model="anthropic/claude")
-    backend.normalize_output(PRRef("o/r", 8, "u"), model="anthropic/claude", compare=True)
-    assert seen == [None, "anthropic/claude"]
+    # No compare_label → no visible tag. A compare_label distinct from ``model``
+    # (the marker id) is passed through verbatim as the visible label, so a
+    # ``zai-coding`` branch tags ``zai-coding/glm`` rather than its litellm
+    # alias ``openai/glm``.
+    backend.normalize_output(PRRef("o/r", 8, "u"), model="openai/glm")
+    backend.normalize_output(
+        PRRef("o/r", 8, "u"), model="openai/glm", compare_label="zai-coding/glm"
+    )
+    assert seen == [None, "zai-coding/glm"]
 
 
 def test_inject_markers_empty_is_noop(monkeypatch):

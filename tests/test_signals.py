@@ -132,3 +132,15 @@ def test_with_visible_label_replaces_prior_tag():
     relabeled = with_visible_label(once, "model-b", _signal(id="fk_x"))
     assert "model-a" not in relabeled
     assert relabeled.startswith(visible_label("model-b") + "\n\n")
+
+
+def test_with_visible_label_preserves_tag_like_line_mid_body():
+    # A line that looks like the visible tag but appears later in the body (e.g.
+    # quoted inside the suggestion) must be left intact — only the prepended
+    # leading tag is the strip target. Guards against the MULTILINE-anchor bug.
+    body = "Real suggestion\n\n🤖 `not-a-real-tag`\n\nmore text"
+    out = with_visible_label(body, "model-a", _signal(id="fk_x"))
+    assert out.startswith(visible_label("model-a") + "\n\n")
+    assert "🤖 `not-a-real-tag`" in out
+    # The genuine prepended tag (model-a) and the quoted look-alike → 2 robots.
+    assert out.count("🤖") == 2

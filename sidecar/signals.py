@@ -84,7 +84,11 @@ def with_marker(body: str, signal: ReviewSignal) -> str:
     return strip_markers(body).rstrip() + "\n\n" + encode_marker(signal)
 
 
-_VISIBLE_LABEL_RE = re.compile(r"^🤖 `[^`]+`\n\n", flags=re.MULTILINE)
+# Anchored to the absolute start of the string (no MULTILINE): the visible tag is
+# only ever prepended at the very beginning by ``with_visible_label``, so stripping
+# must target that position only — a ``🤖 `...` `` line later in the body (e.g. quoted
+# inside a suggestion) is legitimate content and must be left intact.
+_VISIBLE_LABEL_RE = re.compile(r"^🤖 `[^`]+`\n\n")
 
 
 def visible_label(label: str) -> str:
@@ -99,5 +103,8 @@ def with_visible_label(body: str, label: str, signal: ReviewSignal) -> str:
     branches attach to the same lines), while the marker keeps machine attribution
     intact. Any prior visible tag is stripped first so re-tagging stays idempotent.
     """
-    tagged = _VISIBLE_LABEL_RE.sub("", strip_markers(body).lstrip())
+    # Strip only leading newlines (not indentation) before re-tagging, so the
+    # string-anchored ``_VISIBLE_LABEL_RE`` reliably matches a prior tag while
+    # legitimate leading whitespace in the suggestion is preserved.
+    tagged = _VISIBLE_LABEL_RE.sub("", strip_markers(body).lstrip("\n"))
     return visible_label(label) + "\n\n" + with_marker(tagged, signal)

@@ -263,12 +263,17 @@ def _normalize(backend, pr: PRRef, model: ModelConfig, *, compare: bool = False)
     """Map the posted review into Review Signals for the winning provider's model.
 
     In A/B ``compare`` mode the backend additionally tags each newly marked inline
-    comment with a visible model label so the producing branch is legible on the diff.
+    comment with a visible label so the producing branch is legible on the diff. That
+    visible label is the configured ``provider/name`` (matching the per-branch summary
+    header), kept distinct from the litellm-prefixed ``model_id`` that feeds the
+    invisible marker — so a ``zai-coding`` branch reads ``zai-coding/<name>`` on the
+    diff rather than its litellm alias ``openai/<name>``.
     """
     try:
         preset = get_preset(model.provider)
         model_id = preset.litellm_prefix + model.name
-        signals = backend.normalize_output(pr, model=model_id, compare=compare)
+        compare_label = f"{model.provider}/{model.name}" if compare else None
+        signals = backend.normalize_output(pr, model=model_id, compare_label=compare_label)
         print(f"fuko: normalized {len(signals)} review signals", file=sys.stderr)
     except NotImplementedError:
         pass

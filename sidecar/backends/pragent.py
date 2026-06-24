@@ -202,7 +202,7 @@ class PrAgentBackend:
         return InvokeResult(returncode=rc, detail="; ".join(details))
 
     def normalize_output(
-        self, pr: PRRef, model: str = "", *, compare: bool = False
+        self, pr: PRRef, model: str = "", *, compare_label: str | None = None
     ) -> list[ReviewSignal]:
         """Read PR-Agent's inline comments, map them to Review Signals, and mark them.
 
@@ -212,8 +212,10 @@ class PrAgentBackend:
         current token authored, so foreign comments simply stay unmarked. Failure
         to read comments degrades to an empty list -- the review itself already ran.
 
-        In ``compare`` (A/B) mode the newly marked comments also get a compact
-        visible ``model`` tag, so the producing branch is legible on the diff.
+        When ``compare_label`` is set (A/B mode) the newly marked comments also get
+        a compact visible tag of that label, so the producing branch is legible on
+        the diff. The label is the configured ``provider/name`` (matching the branch
+        header), distinct from the litellm-prefixed ``model`` in the marker.
         """
         token = os.environ.get("GITHUB_TOKEN", "")
         api = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
@@ -231,7 +233,7 @@ class PrAgentBackend:
             return []
 
         pairs = pragent_signals(comments, model)
-        self._inject_markers(api, pr, headers, pairs, label=model if compare else None)
+        self._inject_markers(api, pr, headers, pairs, label=compare_label)
         return [p["signal"] for p in pairs]
 
     def _fetch_review_comments(self, api: str, pr: PRRef, headers: dict[str, str]) -> list[dict]:
