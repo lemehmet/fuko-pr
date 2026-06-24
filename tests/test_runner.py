@@ -767,6 +767,24 @@ def test_warn_compare_overrides_warns_on_inert_single_model(capsys):
     assert "[review.model]" in err
 
 
+def test_warn_compare_overrides_warns_on_explicitly_set_default_model(capsys):
+    """An explicitly-configured ``[review.model]`` must warn even when its values
+    equal the defaults — the gate is *explicit configuration*, not *non-default
+    values* (a value comparison stays silent on an explicit-default model and
+    misses the override). Detected via Pydantic's ``model_fields_set``."""
+    from sidecar.fukoconfig import ModelConfig, ReviewConfig
+
+    review = ReviewConfig(
+        compare=[CompareModel(provider="anthropic", name="a")],
+        model=ModelConfig(),
+    )
+    assert review.model == ModelConfig()  # values are the defaults...
+    runner._warn_compare_overrides(review)  # ...but it was set explicitly, so warn
+    err = capsys.readouterr().err
+    assert "A/B compare mode active" in err
+    assert "[review.model]" in err
+
+
 def test_warn_compare_overrides_silent_with_only_compare(capsys):
     from sidecar.fukoconfig import ReviewConfig
 

@@ -614,7 +614,7 @@ def _warn_compare_overrides(review: ReviewConfig) -> None:
             "branch as a single model with no failover)",
             file=sys.stderr,
         )
-    elif review.model != ModelConfig():
+    elif "model" in review.model_fields_set:
         print(
             "fuko: A/B compare mode active — the single [review.model] is ignored "
             "(compare reviews only the listed [[review.compare]] models)",
