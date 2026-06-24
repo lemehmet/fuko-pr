@@ -400,6 +400,11 @@ def _review_compare(
             "fuko: A/B compare mode — 'describe' disabled (a PR has one description)",
             file=sys.stderr,
         )
+    if not tools:
+        return InvokeResult(
+            returncode=1,
+            detail="A/B compare disables 'describe'; configure at least one non-describe tool",
+        )
 
     outcomes: list[tuple[str, InvokeResult]] = []
     for index, entry in enumerate(review.compare):

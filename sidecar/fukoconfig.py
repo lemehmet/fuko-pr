@@ -79,7 +79,7 @@ class ReviewConfig(BaseModel):
     )
     compare: list[CompareModel] = Field(
         default_factory=list,
-        description=("Models to A/B on one PR. Two or more entries enable compare mode."),
+        description="Models to A/B on one PR. Non-empty enables compare mode; 2+ to compare.",
     )
     strategy: str = "failover"
     cooldown_seconds: int = 300

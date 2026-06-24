@@ -52,8 +52,9 @@ Requires the extra: `pip install "fuko-pr[sqlite]"` (sqlite-vec + boto3).
 > locking; on exhaustion the write raises and the learning is dropped). Reads are
 > always safe — `fuko review` only queries the store, so any number of reviewers
 > (including a multi-model **A/B** comparison on one PR) can run at once. The limit
-> is concurrent *writers*: the KB is written only out of band — `/remember`, the
-> resolved-thread sweep, and `ingest-docs` — and if two of those overlap on one
+> is concurrent *writers*: the KB is written only out of band — `/remember` and
+> `/forget` commands, the resolved-thread sweep, and `ingest-docs` — and if two of
+> those overlap on one
 > shared file (a fleet whose repos share a bucket, or a sweep landing during a
 > `/remember`) the loser exhausts its retries and drops the learning. For a
 > shared, multi-repo knowledge base, use the **Postgres** mode below: it is a real

@@ -599,7 +599,11 @@ def test_review_swallows_unimplemented_normalize(monkeypatch, tmp_path):
 
 
 def _stub_compare_io(monkeypatch):
-    """Neutralize knowledge, cooldown, sizing, and header I/O for A/B runner tests."""
+    """Neutralize knowledge, cooldown, and sizing I/O for A/B runner tests.
+
+    The per-branch header (`_post_branch_header`) is patched separately by each
+    test that needs it, so it is intentionally left untouched here.
+    """
     monkeypatch.setattr(runner, "build_knowledge", lambda *a: "")
     monkeypatch.setattr(runner, "_cb_cooldowns", lambda: set())
     monkeypatch.setattr(runner, "_estimate_required_context", lambda *a: None)
@@ -675,6 +679,32 @@ def test_review_compare_is_green_when_any_branch_posts(
 
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
     assert runner.review("https://github.com/o/r/pull/7", str(cfg)).returncode == expected
+
+
+def test_review_compare_fails_when_describe_is_only_tool(monkeypatch, tmp_path):
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text(
+        '[review]\ntools = ["describe"]\n[[review.compare]]\nprovider = "anthropic"\nname = "a"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ANTHROPIC_KEY", "k")
+    _stub_compare_io(monkeypatch)
+    monkeypatch.setattr(runner, "_post_branch_header", lambda *a: None)
+
+    class FakeBackend:
+        def build_env(self, preset, model, knowledge, tools):
+            raise AssertionError("no branch may run when the tool list is empty")
+
+        def invoke(self, pr, env, tools):
+            raise AssertionError("no branch may run when the tool list is empty")
+
+        def normalize_output(self, pr, model=""):
+            return []
+
+    monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
+    result = runner.review("https://github.com/o/r/pull/7", str(cfg))
+    assert result.returncode == 1
+    assert "describe" in result.detail
 
 
 def test_post_branch_header_skips_without_token(monkeypatch):
