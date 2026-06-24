@@ -499,7 +499,7 @@ def _run_compare_branch(
             token=token,
             api_url=api_url,
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         print(f"fuko: A/B branch {label} failed in isolation: {e}", file=sys.stderr)
         return label, InvokeResult(returncode=1, detail=f"{label} errored: {e}")
     return label, result
