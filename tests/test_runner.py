@@ -778,8 +778,8 @@ def test_warn_compare_overrides_warns_on_explicitly_set_default_model(capsys):
         compare=[CompareModel(provider="anthropic", name="a")],
         model=ModelConfig(),
     )
-    assert review.model == ModelConfig()  # values are the defaults...
-    runner._warn_compare_overrides(review)  # ...but it was set explicitly, so warn
+    assert review.model == ModelConfig()
+    runner._warn_compare_overrides(review)
     err = capsys.readouterr().err
     assert "A/B compare mode active" in err
     assert "[review.model]" in err
@@ -789,6 +789,20 @@ def test_warn_compare_overrides_silent_with_only_compare(capsys):
     from sidecar.fukoconfig import ReviewConfig
 
     review = ReviewConfig(compare=[CompareModel(provider="anthropic", name="a")])
+    runner._warn_compare_overrides(review)
+    assert capsys.readouterr().err == ""
+
+
+def test_warn_compare_overrides_silent_when_compare_unset(capsys):
+    """The helper is a no-op without ``[[review.compare]]`` even when a pool or
+    explicit model is configured — it must not warn for non-compare reviews if
+    ever called outside the guarded ``review()`` dispatch."""
+    from sidecar.fukoconfig import ModelConfig, ReviewConfig
+
+    review = ReviewConfig(
+        providers=[ModelConfig(provider="anthropic", name="a")],
+        model=ModelConfig(provider="ollama", name="custom"),
+    )
     runner._warn_compare_overrides(review)
     assert capsys.readouterr().err == ""
 
