@@ -41,6 +41,19 @@ class ModelConfig(BaseModel):
         return value
 
 
+class CompareModel(ModelConfig):
+    """One branch of an A/B comparison: a model plus an optional dedicated identity.
+
+    ``token_env`` names the GitHub token this branch should post under; it is the
+    seam for the planned concurrent mode, where each branch runs under its own bot
+    identity so comments are separable by author and runs cannot edit each other's.
+    Until that lands, branches run sequentially under the shared ``GITHUB_TOKEN``
+    and ``token_env`` is ignored.
+    """
+
+    token_env: str | None = None
+
+
 class ReviewConfig(BaseModel):
     """Which backend to run, with which model(s), tools, and runtime image.
 
@@ -49,6 +62,13 @@ class ReviewConfig(BaseModel):
     whole job, failing over to the next only on a throttle (see ``strategy``).
     When ``providers`` is empty the single ``model`` is used as a one-entry pool,
     so the legacy config keeps working.
+
+    ``compare`` turns one ``fuko review`` into an A/B comparison: when it is
+    non-empty the PR is reviewed once per listed model (sequentially), each branch
+    posting its own fresh summary under a model-labelled header. List two or more
+    models for an actual comparison. The ``describe`` tool is suppressed in this
+    mode because a PR has a single description the branches would otherwise
+    overwrite.
     """
 
     backend: str = "pr-agent"
@@ -56,6 +76,10 @@ class ReviewConfig(BaseModel):
     providers: list[ModelConfig] = Field(
         default_factory=list,
         description=("Ordered provider pool (priority = order). Empty means use `model`."),
+    )
+    compare: list[CompareModel] = Field(
+        default_factory=list,
+        description=("Models to A/B on one PR. Two or more entries enable compare mode."),
     )
     strategy: str = "failover"
     cooldown_seconds: int = 300

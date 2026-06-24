@@ -27,7 +27,7 @@ from ..normalizers import pragent_signals
 from ..presets import ProviderPreset
 from ..throttle import is_throttle
 from .base import InvokeResult, PRRef
-from ..signals import ReviewSignal, encode_marker, with_marker
+from ..signals import ReviewSignal, extract_markers, with_marker
 
 
 def _echo(stdout: str | None, stderr: str | None) -> None:
@@ -255,7 +255,10 @@ class PrAgentBackend:
         """Best-effort: append each signal's marker to its comment (skip on any error).
 
         Skips entirely when unauthenticated -- every PATCH would 401, so there is no
-        point generating the API traffic.
+        point generating the API traffic. A comment that already carries *any*
+        fuko-signal marker is left untouched: re-running a review must not relabel a
+        comment, and in A/B compare mode it keeps each branch from overwriting the
+        marker an earlier branch wrote on its own suggestions.
         """
         if not pairs or "Authorization" not in headers:
             return
@@ -263,7 +266,7 @@ class PrAgentBackend:
             for pair in pairs:
                 comment, signal = pair["comment"], pair["signal"]
                 body = comment.get("body") or ""
-                if encode_marker(signal) in body:
+                if extract_markers(body):
                     continue
                 try:
                     resp = client.patch(

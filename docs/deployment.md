@@ -4,11 +4,17 @@ fuko-pr's knowledge store is pluggable. Pick the mode that matches where your CI
 runs. In every mode the store lives in **your** infrastructure — fuko never hosts
 a multitenant knowledge base.
 
-| Mode | Store | Server? | Embeddings |
-|------|-------|---------|------------|
-| Homelab / self-host | Postgres + pgvector | sidecar (`fuko serve`) | local Ollama |
-| Managed DB | Neon / Supabase pgvector | optional | remote provider |
-| Server-free | sqlite-vec file in S3/R2 | none | remote provider |
+| Mode | Store | Server? | Embeddings | Concurrent writers |
+|------|-------|---------|------------|--------------------|
+| Homelab / self-host | Postgres + pgvector | sidecar (`fuko serve`) | local Ollama | yes |
+| Managed DB | Neon / Supabase pgvector | optional | remote provider | yes |
+| Server-free | sqlite-vec file in S3/R2 | none | remote provider | no (single-writer) |
+
+If several instances will **write** to one shared knowledge base — a fleet whose
+repos share a store, or overlapping `/remember` and thread-sweep jobs — pick a
+Postgres mode. The server-free sqlite-vec store is single-writer (reads, including
+a multi-model A/B review, are always safe); see the caveat under
+[Server-free](#server-free-sqlite-vec-in-s3r2) below.
 
 ## Homelab / self-host (Postgres)
 
@@ -39,6 +45,20 @@ in-process, and (on writes) uploads it back with optimistic-concurrency conditio
 writes (retrying if it loses a race).
 
 Requires the extra: `pip install "fuko-pr[sqlite]"` (sqlite-vec + boto3).
+
+> **Single-writer by design.** The store is one file guarded by optimistic
+> concurrency: a write downloads the file, mutates it locally, and conditionally
+> uploads it back, retrying only if it lost a race (5 attempts, no backoff, no
+> locking; on exhaustion the write raises and the learning is dropped). Reads are
+> always safe — `fuko review` only queries the store, so any number of reviewers
+> (including a multi-model **A/B** comparison on one PR) can run at once. The limit
+> is concurrent *writers*: the KB is written only out of band — `/remember`, the
+> resolved-thread sweep, and `ingest-docs` — and if two of those overlap on one
+> shared file (a fleet whose repos share a bucket, or a sweep landing during a
+> `/remember`) the loser exhausts its retries and drops the learning. For a
+> shared, multi-repo knowledge base, use the **Postgres** mode below: it is a real
+> concurrent store (pooled connections, row-level dedup, a shared provider cooldown
+> table) and stays correct when more than one writer commits at the same time.
 
 ```toml
 [knowledge]

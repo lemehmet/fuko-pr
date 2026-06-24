@@ -23,7 +23,14 @@ import httpx
 
 from .backends import get_backend
 from .backends.base import InvokeResult, PRRef
-from .fukoconfig import DEFAULT_CONFIG_PATH, FukoConfig, KnowledgeConfig, ModelConfig, load_config
+from .fukoconfig import (
+    DEFAULT_CONFIG_PATH,
+    FukoConfig,
+    KnowledgeConfig,
+    ModelConfig,
+    ReviewConfig,
+    load_config,
+)
 from .pool import order_pool, resolve_pool
 from .presets import get_preset
 from .sizing import required_context
@@ -283,14 +290,148 @@ def _estimate_required_context(pr: PRRef, token: str, api_url: str, knowledge: s
         return None
 
 
-def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
-    """Run a full review for ``pr_url``, failing over across the provider pool.
+_FRESH_COMMENT_ENV = {
+    "PR_REVIEWER__PERSISTENT_COMMENT": "false",
+    "PR_CODE_SUGGESTIONS__PERSISTENT_COMMENT": "false",
+}
+
+
+def _post_branch_header(pr: PRRef, token: str, api_url: str, label: str) -> None:
+    """Post a model-labelled header issue comment for one A/B branch (best-effort).
+
+    It gives a human a visible anchor for which model produced the summary that
+    follows; a failure here must never abort the branch, so it only logs.
+    """
+    if not token:
+        return
+    base = api_url.rstrip("/")
+    body = f"🤖 **fuko A/B** — model `{label}`"
+    try:
+        resp = httpx.post(
+            f"{base}/repos/{pr.repo}/issues/{pr.number}/comments",
+            json={"body": body},
+            headers=_gh_headers(token),
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError as e:
+        print(f"fuko: could not post A/B branch header for {label}: {e}", file=sys.stderr)
+
+
+def _run_pool(
+    backend,
+    pr: PRRef,
+    knowledge: str,
+    gh_env: dict[str, str],
+    review: ReviewConfig,
+    pool: list[ModelConfig],
+    cooled: set[str],
+    required: int | None,
+    *,
+    tools: list[str] | None = None,
+    fresh_comment: bool = False,
+) -> InvokeResult:
+    """Run one review over ``pool`` with failover, normalizing the winner's output.
 
     Providers are tried in priority order, with those whose context window can't
-    hold the job and those in circuit-breaker cooldown demoted to last resort.
-    The first provider is pinned for the whole job; a throttle (429/quota/
-    overload/timeout) trips its breaker and fails the job over to the next
-    provider, while any other error fails fast (no failover).
+    hold the job and those in circuit-breaker cooldown demoted to last resort. The
+    first provider is pinned for the whole job; a throttle (429/quota/overload/
+    timeout) trips its breaker and fails over, while any other error fails fast.
+    ``tools`` overrides the configured tool list (used to drop ``describe`` in A/B
+    mode) and ``fresh_comment`` posts a new summary instead of updating PR-Agent's
+    persistent one.
+    """
+    tools = review.tools if tools is None else tools
+    ordered = order_pool(pool, cooled, required)
+
+    result = InvokeResult(returncode=1, detail="no providers configured")
+    for index, model in enumerate(ordered):
+        preset = get_preset(model.provider)
+        env = backend.build_env(preset, model, knowledge, tools)
+        env.update(gh_env)
+        if fresh_comment:
+            env.update(_FRESH_COMMENT_ENV)
+
+        label = f"{model.provider}/{model.name}"
+        cooling = " (cooling — last resort)" if model.provider in cooled else ""
+        print(
+            f"fuko: review attempt {index + 1}/{len(ordered)} via {label}{cooling}",
+            file=sys.stderr,
+        )
+
+        result = replace(backend.invoke(pr, env, tools), provider=model.provider)
+        if not result.throttled:
+            if result.returncode == 0:
+                _normalize(backend, pr, model)
+            return result
+
+        _cb_trip(model.provider, review.cooldown_seconds, result.detail)
+        print(
+            f"fuko: {label} throttled ({result.detail}); breaker tripped, failing over",
+            file=sys.stderr,
+        )
+
+    print("fuko: provider pool exhausted; all attempts throttled", file=sys.stderr)
+    return result
+
+
+def _review_compare(
+    backend,
+    pr: PRRef,
+    knowledge: str,
+    gh_env: dict[str, str],
+    review: ReviewConfig,
+    token: str,
+    api_url: str,
+    cooled: set[str],
+    required: int | None,
+) -> InvokeResult:
+    """Review ``pr`` once per ``review.compare`` entry for an A/B model comparison.
+
+    Branches run sequentially under the shared token: each posts a model-labelled
+    header then its own fresh summary, and marker injection is idempotent so a later
+    branch never relabels an earlier branch's suggestions. ``describe`` is dropped
+    because a PR has one description the branches would otherwise overwrite. The
+    overall result is green when any branch posted a review.
+    """
+    tools = [t for t in review.tools if t != "describe"]
+    if "describe" in review.tools:
+        print(
+            "fuko: A/B compare mode — 'describe' disabled (a PR has one description)",
+            file=sys.stderr,
+        )
+
+    outcomes: list[tuple[str, InvokeResult]] = []
+    for index, entry in enumerate(review.compare):
+        label = f"{entry.provider}/{entry.name}"
+        print(f"fuko: A/B branch {index + 1}/{len(review.compare)}: {label}", file=sys.stderr)
+        _post_branch_header(pr, token, api_url, label)
+        result = _run_pool(
+            backend,
+            pr,
+            knowledge,
+            gh_env,
+            review,
+            [entry],
+            cooled,
+            required,
+            tools=tools,
+            fresh_comment=True,
+        )
+        outcomes.append((label, result))
+
+    detail = "; ".join(f"{label}: {r.detail or 'ok'}" for label, r in outcomes)
+    rc = 0 if any(r.returncode == 0 for _, r in outcomes) else 1
+    return InvokeResult(returncode=rc, detail=detail)
+
+
+def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
+    """Run a full review for ``pr_url`` through the configured backend.
+
+    With a single model (or a ``[[review.providers]]`` pool) the PR is reviewed
+    once, failing over across the pool on throttling. When ``[[review.compare]]``
+    is set, the PR is instead A/B'd once per listed model (see
+    :func:`_review_compare`).
     """
     cfg: FukoConfig = load_config(config_path)
     pr = parse_pr_url(pr_url)
@@ -301,35 +442,13 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
     knowledge = build_knowledge(pr, token, api_url, cfg.knowledge)
     gh_env = _github_env(token)
 
-    pool = resolve_pool(cfg.review)
     cooled = _cb_cooldowns()
     required = _estimate_required_context(pr, token, api_url, knowledge)
-    ordered = order_pool(pool, cooled, required)
 
-    result = InvokeResult(returncode=1, detail="no providers configured")
-    for index, model in enumerate(ordered):
-        preset = get_preset(model.provider)
-        env = backend.build_env(preset, model, knowledge, cfg.review.tools)
-        env.update(gh_env)
-
-        label = f"{model.provider}/{model.name}"
-        cooling = " (cooling — last resort)" if model.provider in cooled else ""
-        print(
-            f"fuko: review attempt {index + 1}/{len(ordered)} via {label}{cooling}",
-            file=sys.stderr,
+    if cfg.review.compare:
+        return _review_compare(
+            backend, pr, knowledge, gh_env, cfg.review, token, api_url, cooled, required
         )
 
-        result = replace(backend.invoke(pr, env, cfg.review.tools), provider=model.provider)
-        if not result.throttled:
-            if result.returncode == 0:
-                _normalize(backend, pr, model)
-            return result
-
-        _cb_trip(model.provider, cfg.review.cooldown_seconds, result.detail)
-        print(
-            f"fuko: {label} throttled ({result.detail}); breaker tripped, failing over",
-            file=sys.stderr,
-        )
-
-    print("fuko: provider pool exhausted; all attempts throttled", file=sys.stderr)
-    return result
+    pool = resolve_pool(cfg.review)
+    return _run_pool(backend, pr, knowledge, gh_env, cfg.review, pool, cooled, required)

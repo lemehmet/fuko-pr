@@ -55,6 +55,27 @@ name = "glm-5.2"
 # name = "glm-5.2:cloud"
 # max_context = 976000           # ~1M window too (a touch under z.ai); both hold any PR
 
+# A/B comparison: list two or more models and `fuko review` reviews the PR once
+# per model (sequentially), each branch posting its own fresh summary under a
+# "🤖 fuko A/B — model <id>" header so you can compare them side by side. The
+# `describe` tool is auto-disabled in this mode (a PR has one description). Use a
+# shared Postgres knowledge base if several reviewers will WRITE to it — the
+# server-free sqlite-vec store is single-writer (see docs/deployment.md).
+#
+# [[review.compare]]
+# provider = "anthropic"         # key from ANTHROPIC_KEY
+# name = "claude-sonnet-4-6"
+#
+# [[review.compare]]
+# provider = "ollama"            # local model, no key
+# name = "qwen2.5-coder"
+# token_env = "FUKO_GITHUB_TOKEN_B"   # reserved for the planned concurrent mode; ignored today
+#
+# [[review.compare]]
+# provider = "ollama-cloud"      # hosted model via Ollama Cloud, key from OLLAMA_API_KEY
+# name = "glm-5.2:cloud"
+# max_context = 976000
+
 [knowledge]
 store = "postgres"              # postgres | sqlite-vec
 
