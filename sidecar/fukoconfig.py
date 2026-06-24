@@ -44,11 +44,13 @@ class ModelConfig(BaseModel):
 class CompareModel(ModelConfig):
     """One branch of an A/B comparison: a model plus an optional dedicated identity.
 
-    ``token_env`` names the GitHub token this branch should post under; it is the
-    seam for the planned concurrent mode, where each branch runs under its own bot
-    identity so comments are separable by author and runs cannot edit each other's.
-    Until that lands, branches run sequentially under the shared ``GITHUB_TOKEN``
-    and ``token_env`` is ignored.
+    ``token_env`` names the GitHub token this branch posts and edits comments
+    under. When *every* compare entry sets a ``token_env`` whose env var resolves
+    to a distinct token, the branches run concurrently, each under its own bot
+    identity so comments are separable by author and one branch cannot edit
+    another's. If any branch lacks ``token_env``, its env var is unset, or two
+    branches resolve to the same identity, the whole run falls back to the
+    sequential single-token path under the shared ``GITHUB_TOKEN``.
     """
 
     token_env: str | None = None
@@ -64,11 +66,12 @@ class ReviewConfig(BaseModel):
     so the legacy config keeps working.
 
     ``compare`` turns one ``fuko review`` into an A/B comparison: when it is
-    non-empty the PR is reviewed once per listed model (sequentially), each branch
-    posting its own fresh summary under a model-labelled header. List two or more
-    models for an actual comparison. The ``describe`` tool is suppressed in this
-    mode because a PR has a single description the branches would otherwise
-    overwrite.
+    non-empty the PR is reviewed once per listed model, each branch posting its own
+    fresh summary under a model-labelled header. List two or more models for an
+    actual comparison. Branches run concurrently when every entry has a distinct
+    ``token_env`` identity (see :class:`CompareModel`), else sequentially under the
+    shared token. The ``describe`` tool is suppressed in this mode because a PR has
+    a single description the branches would otherwise overwrite.
     """
 
     backend: str = "pr-agent"

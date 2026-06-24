@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 import httpx
@@ -25,6 +26,7 @@ from .backends import get_backend
 from .backends.base import InvokeResult, PRRef
 from .fukoconfig import (
     DEFAULT_CONFIG_PATH,
+    CompareModel,
     FukoConfig,
     KnowledgeConfig,
     ModelConfig,
@@ -259,7 +261,15 @@ def _cb_trip(provider: str, cooldown_seconds: int, reason: str) -> None:
         print(f"fuko: circuit-breaker trip failed (continuing): {e}", file=sys.stderr)
 
 
-def _normalize(backend, pr: PRRef, model: ModelConfig, *, compare: bool = False) -> None:
+def _normalize(
+    backend,
+    pr: PRRef,
+    model: ModelConfig,
+    *,
+    compare: bool = False,
+    token: str | None = None,
+    api_url: str | None = None,
+) -> None:
     """Map the posted review into Review Signals for the winning provider's model.
 
     In A/B ``compare`` mode the backend additionally tags each newly marked inline
@@ -268,12 +278,18 @@ def _normalize(backend, pr: PRRef, model: ModelConfig, *, compare: bool = False)
     header), kept distinct from the litellm-prefixed ``model_id`` that feeds the
     invisible marker — so a ``zai-coding`` branch reads ``zai-coding/<name>`` on the
     diff rather than its litellm alias ``openai/<name>``.
+
+    ``token``/``api_url`` pin the GitHub identity used to read and edit the comments;
+    in concurrent A/B mode each branch passes its own so marking happens under that
+    branch's identity. When unset the backend falls back to the process token.
     """
     try:
         preset = get_preset(model.provider)
         model_id = preset.litellm_prefix + model.name
         compare_label = f"{model.provider}/{model.name}" if compare else None
-        signals = backend.normalize_output(pr, model=model_id, compare_label=compare_label)
+        signals = backend.normalize_output(
+            pr, model=model_id, compare_label=compare_label, token=token, api_url=api_url
+        )
         print(f"fuko: normalized {len(signals)} review signals", file=sys.stderr)
     except NotImplementedError:
         pass
@@ -340,6 +356,8 @@ def _run_pool(
     tools: list[str] | None = None,
     fresh_comment: bool = False,
     compare: bool = False,
+    token: str | None = None,
+    api_url: str | None = None,
 ) -> InvokeResult:
     """Run one review over ``pool`` with failover, normalizing the winner's output.
 
@@ -351,6 +369,10 @@ def _run_pool(
     mode), ``fresh_comment`` posts a new summary instead of updating PR-Agent's
     persistent one, and ``compare`` tags each branch's inline suggestions with a
     visible model label.
+
+    ``token``/``api_url`` pin the GitHub identity that normalization reads/edits
+    comments under; concurrent A/B branches pass their own so marking is
+    author-separated. When unset normalization falls back to the process token.
     """
     tools = review.tools if tools is None else tools
     ordered = order_pool(pool, cooled, required)
@@ -373,7 +395,7 @@ def _run_pool(
         result = replace(backend.invoke(pr, env, tools), provider=model.provider)
         if not result.throttled:
             if result.returncode == 0:
-                _normalize(backend, pr, model, compare=compare)
+                _normalize(backend, pr, model, compare=compare, token=token, api_url=api_url)
             return result
 
         _cb_trip(model.provider, review.cooldown_seconds, result.detail)
@@ -384,6 +406,74 @@ def _run_pool(
 
     print("fuko: provider pool exhausted; all attempts throttled", file=sys.stderr)
     return result
+
+
+def _resolve_branch_identities(compare: list[CompareModel]) -> list[str] | None:
+    """Return one distinct GitHub token per branch, or ``None`` to run sequentially.
+
+    Concurrent A/B mode is all-or-nothing and needs no config flag: it activates
+    *iff* every compare entry names a ``token_env`` whose env var resolves to a
+    non-empty value **and** the resolved tokens are all distinct identities. If any
+    branch lacks ``token_env``, its env var is unset/empty, or two branches resolve
+    to the same token, the whole run falls back to the sequential single-token path
+    (``None``). Distinctness is by token value -- two branches sharing one identity
+    would race on each other's comments exactly as a single token does.
+    """
+    tokens: list[str] = []
+    for entry in compare:
+        if not entry.token_env:
+            return None
+        value = os.environ.get(entry.token_env, "")
+        if not value:
+            return None
+        tokens.append(value)
+    if len(set(tokens)) != len(tokens):
+        return None
+    return tokens
+
+
+def _run_compare_branch(
+    backend,
+    pr: PRRef,
+    knowledge: str,
+    review: ReviewConfig,
+    entry: CompareModel,
+    cooled: set[str],
+    required: int | None,
+    tools: list[str],
+    api_url: str,
+    token: str,
+) -> tuple[str, InvokeResult]:
+    """Run one A/B branch end-to-end under its own ``token`` identity.
+
+    Posts the branch's model-labelled header, then its fresh summary + inline
+    suggestions, marking and editing only under ``token`` so GitHub's permissions
+    stop this branch touching another branch's comments. Returns ``(label, result)``.
+    Any exception is captured as a failed result so one branch's failure can never
+    abort or corrupt a sibling running concurrently.
+    """
+    label = f"{entry.provider}/{entry.name}"
+    try:
+        _post_branch_header(pr, token, api_url, label)
+        result = _run_pool(
+            backend,
+            pr,
+            knowledge,
+            _github_env(token),
+            review,
+            [entry],
+            cooled,
+            required,
+            tools=tools,
+            fresh_comment=True,
+            compare=True,
+            token=token,
+            api_url=api_url,
+        )
+    except Exception as e:  # noqa: BLE001 - isolate a branch failure from its siblings
+        print(f"fuko: A/B branch {label} failed in isolation: {e}", file=sys.stderr)
+        return label, InvokeResult(returncode=1, detail=f"{label} errored: {e}")
+    return label, result
 
 
 def _review_compare(
@@ -399,11 +489,20 @@ def _review_compare(
 ) -> InvokeResult:
     """Review ``pr`` once per ``review.compare`` entry for an A/B model comparison.
 
-    Branches run sequentially under the shared token: each posts a model-labelled
-    header then its own fresh summary, and marker injection is idempotent so a later
-    branch never relabels an earlier branch's suggestions. ``describe`` is dropped
-    because a PR has one description the branches would otherwise overwrite. The
-    overall result is green when any branch posted a review.
+    Two execution modes, auto-selected by :func:`_resolve_branch_identities`:
+
+    - **Concurrent** (every branch has a distinct, resolvable ``token_env``): the
+      branches run in a thread pool, one thread per branch, each posting and editing
+      under its own GitHub identity. Total wall-clock is the slowest single branch,
+      and author separation plus idempotent marking keep comments uncrossed.
+    - **Sequential** (the default; any branch lacks a distinct token): branches run
+      one after another under the shared token exactly as before, marker injection
+      staying idempotent so a later branch never relabels an earlier one's
+      suggestions.
+
+    ``describe`` is dropped in both modes because a PR has one description the
+    branches would otherwise overwrite. The overall result is green when any branch
+    posted a review.
     """
     tools = [t for t in review.tools if t != "describe"]
     if "describe" in review.tools:
@@ -417,25 +516,53 @@ def _review_compare(
             detail="A/B compare disables 'describe'; configure at least one non-describe tool",
         )
 
-    outcomes: list[tuple[str, InvokeResult]] = []
-    for index, entry in enumerate(review.compare):
-        label = f"{entry.provider}/{entry.name}"
-        print(f"fuko: A/B branch {index + 1}/{len(review.compare)}: {label}", file=sys.stderr)
-        _post_branch_header(pr, token, api_url, label)
-        result = _run_pool(
-            backend,
-            pr,
-            knowledge,
-            gh_env,
-            review,
-            [entry],
-            cooled,
-            required,
-            tools=tools,
-            fresh_comment=True,
-            compare=True,
+    identities = _resolve_branch_identities(review.compare)
+    if identities is not None:
+        print(
+            f"fuko: A/B compare mode — running {len(review.compare)} branches concurrently "
+            "under per-branch identities",
+            file=sys.stderr,
         )
-        outcomes.append((label, result))
+        with ThreadPoolExecutor(max_workers=len(review.compare)) as pool:
+            futures = [
+                pool.submit(
+                    _run_compare_branch,
+                    backend,
+                    pr,
+                    knowledge,
+                    review,
+                    entry,
+                    cooled,
+                    required,
+                    tools,
+                    api_url,
+                    branch_token,
+                )
+                for entry, branch_token in zip(review.compare, identities)
+            ]
+            outcomes = [f.result() for f in futures]
+    else:
+        outcomes = []
+        for index, entry in enumerate(review.compare):
+            label = f"{entry.provider}/{entry.name}"
+            print(f"fuko: A/B branch {index + 1}/{len(review.compare)}: {label}", file=sys.stderr)
+            _post_branch_header(pr, token, api_url, label)
+            result = _run_pool(
+                backend,
+                pr,
+                knowledge,
+                gh_env,
+                review,
+                [entry],
+                cooled,
+                required,
+                tools=tools,
+                fresh_comment=True,
+                compare=True,
+                token=token,
+                api_url=api_url,
+            )
+            outcomes.append((label, result))
 
     detail = "; ".join(f"{label}: {r.detail or 'ok'}" for label, r in outcomes)
     rc = 0 if any(r.returncode == 0 for _, r in outcomes) else 1

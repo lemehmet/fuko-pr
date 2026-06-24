@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 
 import httpx
 
@@ -158,7 +159,7 @@ class PrAgentBackend:
                 details.append(what)
 
         for index, tool in enumerate(tools):
-            name = f"fuko-pragent-{os.getpid()}-{index}"
+            name = f"fuko-pragent-{os.getpid()}-{threading.get_ident()}-{index}"
             optional = tool in self.optional_tools
             try:
                 proc = subprocess.run(
@@ -202,7 +203,13 @@ class PrAgentBackend:
         return InvokeResult(returncode=rc, detail="; ".join(details))
 
     def normalize_output(
-        self, pr: PRRef, model: str = "", *, compare_label: str | None = None
+        self,
+        pr: PRRef,
+        model: str = "",
+        *,
+        compare_label: str | None = None,
+        token: str | None = None,
+        api_url: str | None = None,
     ) -> list[ReviewSignal]:
         """Read PR-Agent's inline comments, map them to Review Signals, and mark them.
 
@@ -216,9 +223,17 @@ class PrAgentBackend:
         a compact visible tag of that label, so the producing branch is legible on
         the diff. The label is the configured ``provider/name`` (matching the branch
         header), distinct from the litellm-prefixed ``model`` in the marker.
+
+        ``token``/``api_url`` pin the GitHub identity that reads and edits comments.
+        They are required for concurrent A/B mode, where each branch must mark its
+        own suggestions under its own identity (so GitHub's permissions stop one
+        branch editing another's). When unset they fall back to the process
+        ``GITHUB_TOKEN``/``GITHUB_API_URL`` -- the sequential single-token path.
         """
-        token = os.environ.get("GITHUB_TOKEN", "")
-        api = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
+        token = os.environ.get("GITHUB_TOKEN", "") if token is None else token
+        if api_url is None:
+            api_url = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+        api = api_url.rstrip("/")
         headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",

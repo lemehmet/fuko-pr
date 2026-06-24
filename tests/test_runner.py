@@ -6,7 +6,7 @@ import pytest
 from sidecar import runner
 from sidecar.backends import pragent
 from sidecar.backends.base import InvokeResult, PRRef
-from sidecar.fukoconfig import KnowledgeConfig
+from sidecar.fukoconfig import CompareModel, KnowledgeConfig
 
 
 class _Resp:
@@ -565,7 +565,7 @@ def test_review_wires_config_to_backend(monkeypatch, tmp_path):
             seen.update(env=env, tools=tools)
             return InvokeResult(returncode=0)
 
-        def normalize_output(self, pr, model="", *, compare_label=None):
+        def normalize_output(self, pr, model="", *, compare_label=None, **_kw):
             return []
 
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
@@ -591,7 +591,7 @@ def test_review_swallows_unimplemented_normalize(monkeypatch, tmp_path):
         def invoke(self, pr, env, tools):
             return InvokeResult(returncode=0)
 
-        def normalize_output(self, pr, model="", *, compare_label=None):
+        def normalize_output(self, pr, model="", *, compare_label=None, **_kw):
             raise NotImplementedError
 
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
@@ -636,7 +636,7 @@ def test_review_compare_runs_each_model_fresh_without_describe(monkeypatch, tmp_
             calls.append({"model": env["CONFIG__MODEL"], "tools": list(tools), "env": env})
             return InvokeResult(returncode=0)
 
-        def normalize_output(self, pr, model="", *, compare_label=None):
+        def normalize_output(self, pr, model="", *, compare_label=None, **_kw):
             return []
 
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
@@ -660,7 +660,7 @@ def test_normalize_compare_label_uses_provider_not_litellm_prefix(monkeypatch):
     seen = {}
 
     class FakeBackend:
-        def normalize_output(self, pr, model="", *, compare_label=None):
+        def normalize_output(self, pr, model="", *, compare_label=None, **_kw):
             seen["model"] = model
             seen["compare_label"] = compare_label
             return []
@@ -700,7 +700,7 @@ def test_review_compare_is_green_when_any_branch_posts(
         def invoke(self, pr, env, tools):
             return InvokeResult(returncode=next(rcs), detail="d")
 
-        def normalize_output(self, pr, model="", *, compare_label=None):
+        def normalize_output(self, pr, model="", *, compare_label=None, **_kw):
             return []
 
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
@@ -724,7 +724,7 @@ def test_review_compare_fails_when_describe_is_only_tool(monkeypatch, tmp_path):
         def invoke(self, pr, env, tools):
             raise AssertionError("no branch may run when the tool list is empty")
 
-        def normalize_output(self, pr, model="", *, compare_label=None):
+        def normalize_output(self, pr, model="", *, compare_label=None, **_kw):
             return []
 
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
@@ -754,3 +754,223 @@ def test_post_branch_header_posts_labelled_comment(monkeypatch):
     )
     assert posted["url"].endswith("/repos/o/r/issues/8/comments")
     assert "anthropic/claude" in posted["body"]
+
+
+# --- A/B concurrent (per-identity) mode -------------------------------------
+
+
+def _compare_cfg(tmp_path, *, token_envs):
+    """Write a two-branch A/B `.fuko.toml`, attaching a `token_env` per branch.
+
+    `token_envs` is a 2-tuple; a `None` entry omits `token_env` for that branch.
+    """
+    lines = ['[review]\ntools = ["review"]\n']
+    specs = [("anthropic", "a"), ("ollama", "b")]
+    for (provider, name), env in zip(specs, token_envs):
+        lines.append(f'[[review.compare]]\nprovider = "{provider}"\nname = "{name}"\n')
+        if env is not None:
+            lines.append(f'token_env = "{env}"\n')
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text("".join(lines), encoding="utf-8")
+    return cfg
+
+
+def test_resolve_branch_identities_activates_on_distinct_tokens(monkeypatch):
+    monkeypatch.setenv("TOK_A", "tok-a")
+    monkeypatch.setenv("TOK_B", "tok-b")
+    compare = [
+        CompareModel(provider="anthropic", name="a", token_env="TOK_A"),
+        CompareModel(provider="ollama", name="b", token_env="TOK_B"),
+    ]
+    assert runner._resolve_branch_identities(compare) == ["tok-a", "tok-b"]
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["missing_token_env", "unset_env_var", "same_identity"],
+)
+def test_resolve_branch_identities_falls_back(monkeypatch, scenario):
+    monkeypatch.delenv("TOK_A", raising=False)
+    monkeypatch.delenv("TOK_B", raising=False)
+    if scenario == "missing_token_env":
+        compare = [
+            CompareModel(provider="anthropic", name="a", token_env="TOK_A"),
+            CompareModel(provider="ollama", name="b"),  # no token_env
+        ]
+        monkeypatch.setenv("TOK_A", "tok-a")
+    elif scenario == "unset_env_var":
+        compare = [
+            CompareModel(provider="anthropic", name="a", token_env="TOK_A"),
+            CompareModel(provider="ollama", name="b", token_env="TOK_B"),
+        ]
+        monkeypatch.setenv("TOK_A", "tok-a")  # TOK_B unset
+    else:  # same_identity
+        compare = [
+            CompareModel(provider="anthropic", name="a", token_env="TOK_A"),
+            CompareModel(provider="ollama", name="b", token_env="TOK_B"),
+        ]
+        monkeypatch.setenv("TOK_A", "shared")
+        monkeypatch.setenv("TOK_B", "shared")
+    assert runner._resolve_branch_identities(compare) is None
+
+
+def test_review_compare_runs_concurrently_under_per_branch_identity(monkeypatch, tmp_path):
+    cfg = _compare_cfg(tmp_path, token_envs=("TOK_A", "TOK_B"))
+    monkeypatch.setenv("TOK_A", "tok-a")
+    monkeypatch.setenv("TOK_B", "tok-b")
+    monkeypatch.setenv("ANTHROPIC_KEY", "antkey")
+    _stub_compare_io(monkeypatch)
+
+    headers = []  # (label, token) the branch header posted under
+    monkeypatch.setattr(
+        runner, "_post_branch_header", lambda pr, token, api, label: headers.append((label, token))
+    )
+
+    seen = []  # one record per branch: the token it ran/normalized under
+
+    class FakeBackend:
+        def build_env(self, preset, model, knowledge, tools):
+            return {"CONFIG__MODEL": preset.litellm_prefix + model.name}
+
+        def invoke(self, pr, env, tools):
+            return InvokeResult(returncode=0)
+
+        def normalize_output(self, pr, model="", *, compare_label=None, token=None, api_url=None):
+            seen.append({"model": model, "token": token, "label": compare_label})
+            return []
+
+    monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
+    result = runner.review("https://github.com/o/r/pull/7", str(cfg))
+
+    assert result.returncode == 0
+    # Each branch ran the docker review under its own GITHUB__USER_TOKEN and
+    # normalized/marked under its own GitHub token — never the other branch's.
+    by_label = {s["label"]: s["token"] for s in seen}
+    assert by_label == {"anthropic/a": "tok-a", "ollama/b": "tok-b"}
+    # Each header posted under the matching per-branch identity.
+    assert dict(headers) == {"anthropic/a": "tok-a", "ollama/b": "tok-b"}
+
+
+def test_review_compare_concurrent_branch_gets_own_github_user_token(monkeypatch, tmp_path):
+    cfg = _compare_cfg(tmp_path, token_envs=("TOK_A", "TOK_B"))
+    monkeypatch.setenv("TOK_A", "tok-a")
+    monkeypatch.setenv("TOK_B", "tok-b")
+    monkeypatch.setenv("ANTHROPIC_KEY", "antkey")
+    _stub_compare_io(monkeypatch)
+    monkeypatch.setattr(runner, "_post_branch_header", lambda *a: None)
+
+    user_tokens = []
+
+    class FakeBackend:
+        def build_env(self, preset, model, knowledge, tools):
+            return {"CONFIG__MODEL": preset.litellm_prefix + model.name}
+
+        def invoke(self, pr, env, tools):
+            user_tokens.append(env["GITHUB__USER_TOKEN"])
+            return InvokeResult(returncode=0)
+
+        def normalize_output(self, pr, model="", *, compare_label=None, token=None, api_url=None):
+            return []
+
+    monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
+    runner.review("https://github.com/o/r/pull/7", str(cfg))
+    # The docker invocation env carries each branch's own user token (per-identity).
+    assert sorted(user_tokens) == ["tok-a", "tok-b"]
+
+
+def test_review_compare_falls_back_to_sequential_shared_token(monkeypatch, tmp_path):
+    # One branch lacks a token_env -> the whole run uses the sequential single
+    # token path under GITHUB_TOKEN, unchanged.
+    cfg = _compare_cfg(tmp_path, token_envs=("TOK_A", None))
+    monkeypatch.setenv("TOK_A", "tok-a")
+    monkeypatch.setenv("GITHUB_TOKEN", "shared-ghtok")
+    monkeypatch.setenv("ANTHROPIC_KEY", "antkey")
+    _stub_compare_io(monkeypatch)
+
+    header_tokens = []
+    monkeypatch.setattr(
+        runner, "_post_branch_header", lambda pr, token, api, label: header_tokens.append(token)
+    )
+
+    invoke_tokens = []
+
+    class FakeBackend:
+        def build_env(self, preset, model, knowledge, tools):
+            return {"CONFIG__MODEL": preset.litellm_prefix + model.name}
+
+        def invoke(self, pr, env, tools):
+            invoke_tokens.append(env["GITHUB__USER_TOKEN"])
+            return InvokeResult(returncode=0)
+
+        def normalize_output(self, pr, model="", *, compare_label=None, token=None, api_url=None):
+            return []
+
+    monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
+    result = runner.review("https://github.com/o/r/pull/7", str(cfg))
+
+    assert result.returncode == 0
+    # Both branches ran under the one shared token (sequential path), not per-branch.
+    assert invoke_tokens == ["shared-ghtok", "shared-ghtok"]
+    assert header_tokens == ["shared-ghtok", "shared-ghtok"]
+
+
+def test_review_compare_concurrent_branch_failure_is_isolated(monkeypatch, tmp_path):
+    cfg = _compare_cfg(tmp_path, token_envs=("TOK_A", "TOK_B"))
+    monkeypatch.setenv("TOK_A", "tok-a")
+    monkeypatch.setenv("TOK_B", "tok-b")
+    monkeypatch.setenv("ANTHROPIC_KEY", "antkey")
+    _stub_compare_io(monkeypatch)
+    monkeypatch.setattr(runner, "_post_branch_header", lambda *a: None)
+
+    class FakeBackend:
+        def build_env(self, preset, model, knowledge, tools):
+            return {"CONFIG__MODEL": preset.litellm_prefix + model.name}
+
+        def invoke(self, pr, env, tools):
+            # The branch holding tok-a raises (e.g. invalid token at run time);
+            # the tok-b branch must still complete and post.
+            if env["GITHUB__USER_TOKEN"] == "tok-a":
+                raise RuntimeError("invalid credentials")
+            return InvokeResult(returncode=0)
+
+        def normalize_output(self, pr, model="", *, compare_label=None, token=None, api_url=None):
+            return []
+
+    monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
+    result = runner.review("https://github.com/o/r/pull/7", str(cfg))
+
+    # One branch errored in isolation, the other posted -> overall green.
+    assert result.returncode == 0
+    assert "errored" in result.detail
+
+
+def test_normalize_output_falls_back_to_env_token(monkeypatch):
+    # token=None / api_url=None -> the backend uses the process env (sequential path).
+    monkeypatch.setenv("GITHUB_TOKEN", "env-tok")
+    monkeypatch.delenv("GITHUB_API_URL", raising=False)
+    captured = {}
+
+    def fake_client(*a, **k):
+        captured["headers"] = k.get("headers", {})
+        return _FakeClient(lambda u, p=None: _Resp([]))
+
+    monkeypatch.setattr(pragent.httpx, "Client", fake_client)
+    out = pragent.PrAgentBackend().normalize_output(PRRef("o/r", 8, "u"), model="m")
+    assert out == []
+    assert captured["headers"]["Authorization"] == "Bearer env-tok"
+
+
+def test_normalize_output_uses_passed_token_over_env(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "env-tok")
+    captured = {}
+
+    def fake_client(*a, **k):
+        captured["headers"] = k.get("headers", {})
+        return _FakeClient(lambda u, p=None: _Resp([]))
+
+    monkeypatch.setattr(pragent.httpx, "Client", fake_client)
+    pragent.PrAgentBackend().normalize_output(
+        PRRef("o/r", 8, "u"), model="m", token="branch-tok", api_url="https://gh.example/api"
+    )
+    # The passed branch token wins over the process env token.
+    assert captured["headers"]["Authorization"] == "Bearer branch-tok"
