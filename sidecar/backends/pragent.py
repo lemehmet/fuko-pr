@@ -271,6 +271,23 @@ class PrAgentBackend:
                 page += 1
         return out
 
+    def _resolve_actor(self, api: str, client: httpx.Client) -> str | None:
+        """Return the GitHub actor id ``client``'s token authenticates as, or ``None``.
+
+        Used to skip PATCHing comments this identity didn't author: in concurrent
+        A/B mode every branch sees the *whole* PR's comments, and PATCHing a
+        sibling branch's comment would only 403 while adding API traffic. Any
+        lookup failure returns ``None``, in which case the caller marks
+        best-effort across all comments (the prior behavior).
+        """
+        try:
+            resp = client.get(f"{api}/user")
+            resp.raise_for_status()
+            actor_id = resp.json().get("id")
+        except (httpx.HTTPError, ValueError):
+            return None
+        return str(actor_id) if actor_id is not None else None
+
     def _inject_markers(
         self,
         api: str,
@@ -287,6 +304,12 @@ class PrAgentBackend:
         comment, and in A/B compare mode it keeps each branch from overwriting the
         marker an earlier branch wrote on its own suggestions.
 
+        Comments authored by a *different* GitHub identity are skipped before any
+        PATCH: in concurrent A/B mode this identity sees every branch's comments, and
+        editing a sibling's comment would only 403 while adding API traffic (and
+        secondary-rate-limit risk) as branch/suggestion count grows. If the identity
+        can't be resolved, it falls back to marking best-effort across all comments.
+
         When ``label`` is given (A/B compare mode), the comment is also prefixed with
         a compact visible model tag so the producing branch is legible on the diff;
         only the comments this branch newly marks get tagged.
@@ -294,8 +317,11 @@ class PrAgentBackend:
         if not pairs or "Authorization" not in headers:
             return
         with httpx.Client(timeout=30.0, headers=headers) as client:
+            actor = self._resolve_actor(api, client)
             for pair in pairs:
                 comment, signal = pair["comment"], pair["signal"]
+                if actor is not None and str((comment.get("user") or {}).get("id")) != actor:
+                    continue
                 body = comment.get("body") or ""
                 if extract_markers(body):
                     continue

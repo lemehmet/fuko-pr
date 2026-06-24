@@ -206,6 +206,26 @@ def _github_env(token: str) -> dict[str, str]:
     return {"GITHUB__USER_TOKEN": token, "GITHUB__DEPLOYMENT_TYPE": "user"}
 
 
+def _resolve_actor(token: str, api_url: str) -> str | None:
+    """Return the GitHub actor id (``"<id>"``) a token authenticates as, or ``None``.
+
+    Calls ``GET /user`` and returns the numeric account id as a string -- the
+    stable identity two tokens share when they belong to the same user/bot, even
+    if the tokens themselves differ. Any failure (network, auth, unexpected
+    payload) returns ``None`` so callers can fall back rather than guess.
+    """
+    if not token:
+        return None
+    base = api_url.rstrip("/")
+    try:
+        resp = httpx.get(f"{base}/user", headers=_gh_headers(token), timeout=30.0)
+        resp.raise_for_status()
+        actor_id = resp.json().get("id")
+    except (httpx.HTTPError, ValueError):
+        return None
+    return str(actor_id) if actor_id is not None else None
+
+
 def _cb_endpoint() -> tuple[str, str]:
     """Return ``(fuko_url, fuko_token)`` for the sidecar's circuit-breaker API."""
     return os.environ.get("FUKO_URL", "").strip(), os.environ.get("FUKO_TOKEN", "")
@@ -408,26 +428,35 @@ def _run_pool(
     return result
 
 
-def _resolve_branch_identities(compare: list[CompareModel]) -> list[str] | None:
-    """Return one distinct GitHub token per branch, or ``None`` to run sequentially.
+def _resolve_branch_identities(compare: list[CompareModel], api_url: str) -> list[str] | None:
+    """Return one distinct-identity GitHub token per branch, or ``None`` (sequential).
 
     Concurrent A/B mode is all-or-nothing and needs no config flag: it activates
     *iff* every compare entry names a ``token_env`` whose env var resolves to a
-    non-empty value **and** the resolved tokens are all distinct identities. If any
-    branch lacks ``token_env``, its env var is unset/empty, or two branches resolve
-    to the same token, the whole run falls back to the sequential single-token path
-    (``None``). Distinctness is by token value -- two branches sharing one identity
-    would race on each other's comments exactly as a single token does.
+    non-empty value **and** the tokens resolve to distinct GitHub *actors*. If any
+    branch lacks ``token_env``, its env var is unset/empty, an actor lookup fails,
+    or two branches resolve to the same actor, the whole run falls back to the
+    sequential single-token path (``None``).
+
+    Distinctness is by resolved actor identity (``GET /user`` id), not raw token
+    value: two different tokens (e.g. two PATs for the same bot user) share one
+    identity and would race on each other's comments exactly as a single token
+    does, so they must not enable concurrency.
     """
     tokens: list[str] = []
+    actors: list[str] = []
     for entry in compare:
         if not entry.token_env:
             return None
         value = os.environ.get(entry.token_env, "")
         if not value:
             return None
+        actor = _resolve_actor(value, api_url)
+        if actor is None:
+            return None
         tokens.append(value)
-    if len(set(tokens)) != len(tokens):
+        actors.append(actor)
+    if len(set(actors)) != len(actors):
         return None
     return tokens
 
@@ -470,7 +499,7 @@ def _run_compare_branch(
             token=token,
             api_url=api_url,
         )
-    except Exception as e:  # noqa: BLE001 - isolate a branch failure from its siblings
+    except Exception as e:  # noqa: BLE001
         print(f"fuko: A/B branch {label} failed in isolation: {e}", file=sys.stderr)
         return label, InvokeResult(returncode=1, detail=f"{label} errored: {e}")
     return label, result
@@ -516,7 +545,7 @@ def _review_compare(
             detail="A/B compare disables 'describe'; configure at least one non-describe tool",
         )
 
-    identities = _resolve_branch_identities(review.compare)
+    identities = _resolve_branch_identities(review.compare, api_url)
     if identities is not None:
         print(
             f"fuko: A/B compare mode — running {len(review.compare)} branches concurrently "

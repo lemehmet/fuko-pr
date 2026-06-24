@@ -607,6 +607,10 @@ def _stub_compare_io(monkeypatch):
     monkeypatch.setattr(runner, "build_knowledge", lambda *a: "")
     monkeypatch.setattr(runner, "_cb_cooldowns", lambda: set())
     monkeypatch.setattr(runner, "_estimate_required_context", lambda *a: None)
+    # Resolve each token to a distinct actor identity equal to the token value, so
+    # the existing distinct-token fixtures keep activating concurrent mode without
+    # a real GET /user call.
+    monkeypatch.setattr(runner, "_resolve_actor", lambda token, api_url: token or None)
 
 
 def test_review_compare_runs_each_model_fresh_without_describe(monkeypatch, tmp_path):
@@ -775,23 +779,52 @@ def _compare_cfg(tmp_path, *, token_envs):
     return cfg
 
 
+def _stub_actor_by_token(monkeypatch, mapping):
+    """Stub ``_resolve_actor`` to map each token value to an actor id from ``mapping``.
+
+    A token absent from ``mapping`` resolves to ``None`` (a failed ``GET /user``).
+    """
+    monkeypatch.setattr(runner, "_resolve_actor", lambda token, api_url: mapping.get(token))
+
+
+def test_resolve_actor_empty_token_is_none():
+    assert runner._resolve_actor("", runner._DEFAULT_API) is None
+
+
+def test_resolve_actor_returns_id_as_string(monkeypatch):
+    monkeypatch.setattr(
+        runner.httpx, "get", lambda url, headers=None, timeout=None: _Resp({"id": 4242})
+    )
+    assert runner._resolve_actor("tok", runner._DEFAULT_API) == "4242"
+
+
+def test_resolve_actor_on_http_error_is_none(monkeypatch):
+    def _boom(url, headers=None, timeout=None):
+        raise httpx.HTTPError("network down")
+
+    monkeypatch.setattr(runner.httpx, "get", _boom)
+    assert runner._resolve_actor("tok", runner._DEFAULT_API) is None
+
+
 def test_resolve_branch_identities_activates_on_distinct_tokens(monkeypatch):
     monkeypatch.setenv("TOK_A", "tok-a")
     monkeypatch.setenv("TOK_B", "tok-b")
+    _stub_actor_by_token(monkeypatch, {"tok-a": "1", "tok-b": "2"})
     compare = [
         CompareModel(provider="anthropic", name="a", token_env="TOK_A"),
         CompareModel(provider="ollama", name="b", token_env="TOK_B"),
     ]
-    assert runner._resolve_branch_identities(compare) == ["tok-a", "tok-b"]
+    assert runner._resolve_branch_identities(compare, runner._DEFAULT_API) == ["tok-a", "tok-b"]
 
 
 @pytest.mark.parametrize(
     "scenario",
-    ["missing_token_env", "unset_env_var", "same_identity"],
+    ["missing_token_env", "unset_env_var", "same_token", "same_actor", "lookup_fails"],
 )
 def test_resolve_branch_identities_falls_back(monkeypatch, scenario):
     monkeypatch.delenv("TOK_A", raising=False)
     monkeypatch.delenv("TOK_B", raising=False)
+    _stub_actor_by_token(monkeypatch, {"tok-a": "1", "tok-b": "2", "shared": "1"})
     if scenario == "missing_token_env":
         compare = [
             CompareModel(provider="anthropic", name="a", token_env="TOK_A"),
@@ -804,14 +837,30 @@ def test_resolve_branch_identities_falls_back(monkeypatch, scenario):
             CompareModel(provider="ollama", name="b", token_env="TOK_B"),
         ]
         monkeypatch.setenv("TOK_A", "tok-a")  # TOK_B unset
-    else:  # same_identity
+    elif scenario == "same_token":
         compare = [
             CompareModel(provider="anthropic", name="a", token_env="TOK_A"),
             CompareModel(provider="ollama", name="b", token_env="TOK_B"),
         ]
         monkeypatch.setenv("TOK_A", "shared")
         monkeypatch.setenv("TOK_B", "shared")
-    assert runner._resolve_branch_identities(compare) is None
+    elif scenario == "same_actor":
+        # Distinct token *strings* that resolve to the SAME GitHub actor must not
+        # enable concurrency (the #40 finding: two PATs for one bot user).
+        compare = [
+            CompareModel(provider="anthropic", name="a", token_env="TOK_A"),
+            CompareModel(provider="ollama", name="b", token_env="TOK_B"),
+        ]
+        monkeypatch.setenv("TOK_A", "tok-a")
+        monkeypatch.setenv("TOK_B", "shared")  # different token, actor id "1"
+    else:  # lookup_fails — an unresolvable token forces the sequential fallback
+        compare = [
+            CompareModel(provider="anthropic", name="a", token_env="TOK_A"),
+            CompareModel(provider="ollama", name="b", token_env="TOK_B"),
+        ]
+        monkeypatch.setenv("TOK_A", "tok-a")
+        monkeypatch.setenv("TOK_B", "unknown")  # not in the actor map -> None
+    assert runner._resolve_branch_identities(compare, runner._DEFAULT_API) is None
 
 
 def test_review_compare_runs_concurrently_under_per_branch_identity(monkeypatch, tmp_path):

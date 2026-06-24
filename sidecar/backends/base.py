@@ -65,7 +65,13 @@ class ReviewBackend(Protocol):
         ...
 
     def normalize_output(
-        self, pr: PRRef, model: str = "", *, compare_label: str | None = None
+        self,
+        pr: PRRef,
+        model: str = "",
+        *,
+        compare_label: str | None = None,
+        token: str | None = None,
+        api_url: str | None = None,
     ) -> list[ReviewSignal]:
         """Read the backend's posted review and map it to Review Signals (egress).
 
@@ -75,6 +81,11 @@ class ReviewBackend(Protocol):
         configured ``provider/name`` (matching the per-branch summary header), kept
         distinct from ``model`` (the litellm-prefixed id used in the invisible
         marker) so the visible tag never shows a provider's litellm alias.
+
+        ``token``/``api_url`` pin the GitHub identity that reads and edits the
+        comments; in concurrent A/B mode each branch passes its own so marking
+        happens under that branch's identity. When unset the backend falls back to
+        the process ``GITHUB_TOKEN``/``GITHUB_API_URL`` (the sequential path).
         """
         ...
 
