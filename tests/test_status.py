@@ -113,21 +113,27 @@ def test_coderabbit_done_with_findings_via_walkthrough_marker():
     assert "inline" in s["detail"]
 
 
-def test_coderabbit_pending_via_walkthrough_header_only():
-    # issue #34: the walkthrough header names HEAD (range line matches) but there is no
-    # completion marker, no submitted review on HEAD, and no in-progress check-run or
-    # notice. Under a rapid-push skip CR can update this header and then never engage the
-    # HEAD, so the header alone is NOT evidence of an active scan -> pending (the
-    # consumer's unresponsive timeout governs), NOT a never-ending in_progress.
+def test_coderabbit_pending_via_walkthrough_range_line_only():
+    """issue #34: walkthrough range line covers HEAD, no completion marker/review/check.
+
+    The ``_CR_REVIEWING`` range line names HEAD but there is no terminal marker, no
+    submitted review on HEAD, and no in-progress check-run or notice. Under a rapid-push
+    skip CR can bump that range line to a new HEAD and then never engage it, so the range
+    line alone is not evidence of an active scan -> pending (the consumer's unresponsive
+    timeout governs), not a never-ending in_progress.
+    """
     s = coderabbit_state(HEAD, [_walk(HEAD)], [])
     assert s["state"] == "pending"
     assert s["head_reviewed"] == HEAD
-    assert "walkthrough header names HEAD" in s["detail"]
+    assert "walkthrough range line covers HEAD" in s["detail"]
 
 
 def test_coderabbit_in_progress_when_header_names_head_and_active_notice():
-    # issue #34: when CR both names HEAD in its header AND posts an explicit in-progress
-    # notice, that IS demonstrable engagement -> in_progress (not pending).
+    """issue #34: range line covering HEAD plus an explicit in-progress notice -> in_progress.
+
+    Demonstrable engagement (an active-scan notice) alongside the range line is enough to
+    report in_progress rather than pending.
+    """
     cs = [_walk(HEAD), _cr("🔬 review in progress — Currently processing new changes")]
     s = coderabbit_state(HEAD, cs, [])
     assert s["state"] == "in_progress"
@@ -135,8 +141,10 @@ def test_coderabbit_in_progress_when_header_names_head_and_active_notice():
 
 
 def test_coderabbit_in_progress_when_header_names_head_and_check_running():
-    # issue #34: a still-running CR check-run on HEAD is authoritative engagement, even
-    # when the walkthrough header alone would now report pending.
+    """issue #34: a still-running CR check-run on HEAD is authoritative engagement.
+
+    The check-run overrides the range-line-only pending classification.
+    """
     s = coderabbit_state(HEAD, [_walk(HEAD)], [], [_check("in_progress")])
     assert s["state"] == "in_progress"
 
@@ -181,28 +189,32 @@ def test_coderabbit_done_when_marker_in_review_body():
 
 
 def test_coderabbit_stale_marker_in_old_review_does_not_satisfy_head():
-    # Current HEAD is covered only by the up-front walkthrough (range line, no submitted
-    # review yet). An older review for a previous HEAD carries the terminal marker; that
-    # stale marker must NOT satisfy done for the new HEAD (CodeRabbit finding, round 1).
-    # With only the header naming HEAD (no in-progress signal), this is pending (#34), not
-    # done — the stale marker is correctly ignored.
+    """A stale terminal marker on an old review must not satisfy done for the new HEAD.
+
+    Current HEAD is covered only by the up-front walkthrough range line (no submitted
+    review yet); an older review for a previous HEAD carries the terminal marker. That
+    stale marker must NOT satisfy done for the new HEAD (CodeRabbit finding, round 1).
+    With only the range line covering HEAD and no in-progress signal, this is pending
+    (#34), not done. ``head_reviewed`` must be the current HEAD, not the older scan's sha.
+    """
     old = _cr_review("0000aaa", body=_review_body("0000aaa", posted=3))
     walk = _walk(HEAD)
     s = coderabbit_state(HEAD, [walk], [old])
     assert s["state"] == "pending"
-    # head_reviewed must be the current HEAD, not the older scan's sha matched first.
     assert s["head_reviewed"] == HEAD
 
 
 def test_coderabbit_rapid_push_skip_reports_pending_not_indefinite_in_progress():
-    # issue #34 acceptance: rapid-push skip. CR reviewed the PREVIOUS commit
-    # (CHANGES_REQUESTED), then its walkthrough header was bumped to the latest HEAD after
-    # ≥3 quick pushes, but CR never engaged that HEAD (no check-run, no review on HEAD, no
-    # terminal marker for HEAD). fuko must report pending — not a never-ending in_progress
-    # that burns the consumer's full per-bot timeout.
+    """issue #34 acceptance: rapid-push skip reports pending, not indefinite in_progress.
+
+    CR reviewed the previous commit (CHANGES_REQUESTED), then its walkthrough range line
+    was bumped to the latest HEAD after >=3 quick pushes, but CR never engaged that HEAD
+    (no check-run, no review on HEAD, no terminal marker for HEAD). fuko must report
+    pending, not a never-ending in_progress that burns the consumer's full per-bot timeout.
+    """
     prev = _cr_review("0000aaa", state="CHANGES_REQUESTED", body=_review_body("0000aaa", posted=2))
-    header_on_head = _walk(HEAD)  # header bumped to HEAD, no marker
-    s = coderabbit_state(HEAD, [header_on_head], [prev])
+    range_line_on_head = _walk(HEAD)
+    s = coderabbit_state(HEAD, [range_line_on_head], [prev])
     assert s["state"] == "pending"
     assert s["head_reviewed"] == HEAD
 

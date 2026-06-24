@@ -95,12 +95,13 @@ def coderabbit_state(
     — once CR has reviewed HEAD — its in-place summary) so a prior HEAD's stale marker
     can no longer report done early.
 
-    When only the walkthrough *header* names HEAD — no CR check-run, no submitted review
-    on HEAD, no terminal marker, and no explicit "review in progress" text — this is
-    **not** asserted as ``in_progress`` but reported as ``pending`` (issue #34). Under a
-    rapid-push skip CR can update its "Reviewing … commit X" header and then never
-    engage that HEAD, so the header alone is not evidence of an active scan; ``pending``
-    lets the consumer's own unresponsive timeout govern instead of an implied
+    When only the walkthrough *range line* covers HEAD — i.e. the ``_CR_REVIEWING``
+    "Reviewing … between … and <HEAD>" line names HEAD, with no CR check-run, no
+    submitted review on HEAD, no terminal marker, and no explicit "review in progress"
+    text — this is **not** asserted as ``in_progress`` but reported as ``pending``
+    (issue #34). Under a rapid-push skip CR can bump that range line to a new HEAD and
+    then never engage it, so the range line alone is not evidence of an active scan;
+    ``pending`` lets the consumer's own unresponsive timeout govern instead of an implied
     never-ending scan. ``in_progress`` is reserved for demonstrable engagement: a CR
     check-run that is still running, or an explicit in-progress notice in CR's body.
     """
@@ -173,7 +174,7 @@ def coderabbit_state(
             "coderabbit",
             "pending",
             head_sha,
-            "walkthrough header names HEAD but CR shows no completion marker, "
+            "walkthrough range line covers HEAD but CR shows no completion marker, "
             "submitted review, or in-progress check-run yet",
         )
 
