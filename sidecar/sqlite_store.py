@@ -161,10 +161,15 @@ class SqliteVecStore:
 
     def _existing_keys(self, repo: str, items: list[IngestItem]) -> set[tuple[str, str]]:
         candidates = {(it.text, it.source) for it in items}
+        texts = list({it.text for it in items})
+        if not texts:
+            return set()
 
         def fn(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+            placeholders = ",".join("?" * len(texts))
             return conn.execute(
-                "SELECT text, source FROM learnings WHERE repo = ?", (repo,)
+                f"SELECT text, source FROM learnings WHERE repo = ? AND text IN ({placeholders})",
+                (repo, *texts),
             ).fetchall()
 
         return {(text, source) for text, source in self._read(fn) if (text, source) in candidates}
