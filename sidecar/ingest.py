@@ -24,19 +24,47 @@ def _parse_dt(value: str | None) -> datetime | None:
         return None
 
 
+def _existing_keys(repo: str, items: list[IngestItem]) -> set[tuple[str, str]]:
+    candidates = {(it.text, it.source) for it in items}
+    texts = list({it.text for it in items})
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT text, source FROM learnings WHERE repo = %s AND text = ANY(%s)",
+            (repo, texts),
+        ).fetchall()
+    return {(text, source) for text, source in rows if (text, source) in candidates}
+
+
 def ingest(repo: str, items: list[IngestItem]) -> tuple[int, int]:
     """Embed and insert learnings for ``repo``, skipping exact duplicates.
+
+    Duplicates of the ``(repo, text, source)`` key are filtered out *before*
+    embedding, so re-sweeping an already-ingested backlog costs no embed calls;
+    only genuinely new learnings reach the (potentially slow) embedder. The
+    ``ON CONFLICT`` insert remains as a backstop for races.
 
     Returns:
         A ``(inserted, skipped)`` tuple.
     """
     if not items:
         return 0, 0
-    embeddings = get_embedder().embed([it.text for it in items])
-    inserted = 0
+    existing = _existing_keys(repo, items)
+    to_embed: list[IngestItem] = []
+    seen: set[tuple[str, str]] = set()
     skipped = 0
+    for item in items:
+        key = (item.text, item.source)
+        if key in existing or key in seen:
+            skipped += 1
+            continue
+        seen.add(key)
+        to_embed.append(item)
+    if not to_embed:
+        return 0, skipped
+    embeddings = get_embedder().embed([it.text for it in to_embed])
+    inserted = 0
     with db() as conn:
-        for item, emb in zip(items, embeddings, strict=True):
+        for item, emb in zip(to_embed, embeddings, strict=True):
             cur = conn.execute(
                 _INSERT_SQL,
                 (

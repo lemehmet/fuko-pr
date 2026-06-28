@@ -33,6 +33,8 @@ from .retrieve import _build_query
 
 _MAX_RETRIES = 5
 
+_VAR_BATCH = 500
+
 
 def _pack(vec: list[float]) -> bytes:
     """Pack a vector as little-endian float32 (sqlite-vec's portable wire format)."""
@@ -159,15 +161,56 @@ class SqliteVecStore:
                 continue
         raise PreconditionFailed("knowledge store write lost too many races")
 
+    def _existing_keys(self, repo: str, items: list[IngestItem]) -> set[tuple[str, str]]:
+        candidates = {(it.text, it.source) for it in items}
+        texts = list({it.text for it in items})
+        if not texts:
+            return set()
+
+        def fn(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+            rows: list[tuple[str, str]] = []
+            for i in range(0, len(texts), _VAR_BATCH):
+                batch = texts[i : i + _VAR_BATCH]
+                placeholders = ",".join("?" * len(batch))
+                rows.extend(
+                    conn.execute(
+                        f"SELECT text, source FROM learnings "
+                        f"WHERE repo = ? AND text IN ({placeholders})",
+                        (repo, *batch),
+                    ).fetchall()
+                )
+            return rows
+
+        return {(text, source) for text, source in self._read(fn) if (text, source) in candidates}
+
     def ingest(self, repo: str, items: list[IngestItem]) -> tuple[int, int]:
-        """Embed and insert learnings, skipping exact duplicates."""
+        """Embed and insert learnings, skipping exact duplicates.
+
+        Duplicates of the ``(repo, text, source)`` key are filtered out *before*
+        embedding, so re-sweeping an already-ingested backlog costs no embed
+        calls; only genuinely new learnings reach the (potentially slow)
+        embedder. The ``INSERT OR IGNORE`` remains as a backstop for races.
+        """
         if not items:
             return 0, 0
-        embeddings = get_embedder().embed([it.text for it in items])
+        existing = self._existing_keys(repo, items)
+        to_embed: list[IngestItem] = []
+        seen: set[tuple[str, str]] = set()
+        skipped = 0
+        for item in items:
+            key = (item.text, item.source)
+            if key in existing or key in seen:
+                skipped += 1
+                continue
+            seen.add(key)
+            to_embed.append(item)
+        if not to_embed:
+            return 0, skipped
+        embeddings = get_embedder().embed([it.text for it in to_embed])
 
         def fn(conn: sqlite3.Connection) -> tuple[int, int]:
-            inserted = skipped = 0
-            for item, emb in zip(items, embeddings, strict=True):
+            inserted = inner_skipped = 0
+            for item, emb in zip(to_embed, embeddings, strict=True):
                 lid = uuid.uuid4().hex
                 cur = conn.execute(
                     "INSERT OR IGNORE INTO learnings"
@@ -187,7 +230,7 @@ class SqliteVecStore:
                     ),
                 )
                 if cur.rowcount != 1:
-                    skipped += 1
+                    inner_skipped += 1
                     continue
                 vec_cur = conn.execute(
                     "INSERT INTO vec_learnings(repo, lid, embedding) VALUES (?, ?, ?)",
@@ -197,9 +240,10 @@ class SqliteVecStore:
                     "UPDATE learnings SET vec_rowid = ? WHERE lid = ?", (vec_cur.lastrowid, lid)
                 )
                 inserted += 1
-            return inserted, skipped
+            return inserted, inner_skipped
 
-        return self._mutate(fn)
+        inserted, inner_skipped = self._mutate(fn)
+        return inserted, skipped + inner_skipped
 
     def query(
         self,
