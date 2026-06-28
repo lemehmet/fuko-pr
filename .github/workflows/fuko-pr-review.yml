@@ -6,11 +6,12 @@
 # so a PR is reviewed by the very runner it is changing. That is what lets a PR
 # that adds a feature (e.g. `[[review.compare]]` A/B) be exercised by that feature.
 #
-# Runner: ubuntu-latest (GitHub-hosted). It has Docker for PR-Agent's image and
-# can reach the public z.ai / Ollama Cloud APIs. NOTE: a LAN knowledge sidecar
-# (FUKO_URL) is NOT reachable from GitHub-hosted runners — the review degrades to
-# KB-less there (it still runs, just without injected learnings). Register a
-# self-hosted homelab runner (as shuanda/mepro have) to use the sidecar.
+# Runner: the self-hosted homelab fleet (label `fuko-pr`, 3 runners), same as
+# shuanda/mepro. It has Docker for PR-Agent's image, reaches the public z.ai /
+# Ollama Cloud APIs, AND reaches the LAN knowledge sidecar (FUKO_URL) so the
+# review injects learnings from the KB. On GitHub-hosted runners FUKO_URL would
+# resolve to an unreachable host and the review would degrade to KB-less — still
+# runs, just without injected learnings.
 #
 # Posts as the "Fuko PR Review" GitHub App when configured (repo VARIABLE
 # FUKO_APP_ID + secret FUKO_APP_PRIVATE_KEY, App installed); otherwise
@@ -30,7 +31,7 @@ jobs:
   review:
     # Skip drafts, and never run fork-PR head code with this repo's secrets.
     if: ${{ github.event.pull_request.draft == false && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, fuko-pr] # self-hosted homelab fleet; reaches the LAN sidecar (FUKO_URL) for KB injection
     # A/B runs two models sequentially; keep this above fuko-pr's per-tool budget
     # so the graceful per-tool timeout + docker kill fire before GitHub cancels.
     timeout-minutes: 40

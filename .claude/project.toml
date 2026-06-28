@@ -21,7 +21,12 @@ url = "https://github.com/lemehmet/fuko-pr"
 # so all of those sections must be present even if a reviewer is observe-only.
 [bots]
 gate_reviewers = ["coderabbit", "copilot"]
-triage_logins = ["coderabbitai", "copilot", "fuko-pr-review"]
+# Substring-matched (case-insensitive) against comment author logins. "fuko-"
+# matches every fuko reviewer App instance (fuko-dorian[bot], fuko-gray[bot], …)
+# so a GitHub-App rename or a second instance can't silently drop fuko findings
+# from the §10 reply audit — the finding-detection path (fuko signals) is
+# format-based and already login-independent.
+triage_logins = ["coderabbitai", "copilot", "fuko-"]
 
 [bots.copilot]
 login = "copilot-pull-request-reviewer[bot]"
@@ -33,7 +38,10 @@ unresponsive_timeout_ms = 1500000  # 25 min (longer: CR can recover via resume)
 resume_command = "@coderabbitai resume"
 
 [bots.fuko_pr]
-login = "fuko-pr-review[bot]"
+# Primary fuko reviewer instance. The §10 reply audit matches via triage_logins'
+# "fuko-" substring (covers all instances); this scalar is only bound to
+# $FUKO_PR_LOGIN for display, so the exact instance named here is not critical.
+login = "fuko-dorian[bot]"
 gated = false   # observe-only: triaged + replied, but not a round-gate participant
 
 [ci]
