@@ -67,7 +67,7 @@ file — no paid APIs, no server.
    [review]
    backend = "pr-agent"
    # PR-Agent runs from its Docker image (it is not pip-installable):
-   image = "codiumai/pr-agent:latest"   # or your pinned ghcr.io/OWNER/pr-agent:0.36.1
+   image = "codiumai/pr-agent:latest"   # or your pinned ghcr.io/OWNER/pr-agent:0.38.0
 
    [review.model]
    provider = "ollama"                  # zai-coding | anthropic | openai | ollama
