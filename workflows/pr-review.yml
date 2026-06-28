@@ -9,6 +9,12 @@
 # FUKO_APP_ID + secret FUKO_APP_PRIVATE_KEY, App installed on the repo); otherwise
 # github-actions[bot]. Secrets: FUKO_URL, FUKO_TOKEN (optional), plus the model
 # provider's key (e.g. ZAI_KEY or ANTHROPIC_KEY) matching your .fuko.toml.
+#
+# Concurrent A/B (optional): to have two `[[review.compare]]` branches post under
+# separate identities, register a SECOND App and set VARIABLE FUKO_APP_ID_B +
+# secret FUKO_APP_PRIVATE_KEY_B; give each compare branch a `token_env`
+# (FUKO_GITHUB_TOKEN_A / FUKO_GITHUB_TOKEN_B). Leave FUKO_APP_ID_B unset for the
+# default single-identity behavior.
 
 name: fuko-pr review
 
@@ -51,6 +57,20 @@ jobs:
           permission-pull-requests: write
           permission-issues: write
 
+      # Optional second identity for concurrent A/B (see header). No-op unless
+      # FUKO_APP_ID_B is set, so the default single-App setup is unaffected.
+      - name: Mint second app token (concurrent A/B)
+        id: app-token-b
+        if: ${{ vars.FUKO_APP_ID_B != '' }}
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.FUKO_APP_ID_B }}
+          private-key: ${{ secrets.FUKO_APP_PRIVATE_KEY_B }}
+          permission-contents: read
+          permission-pull-requests: write
+          permission-issues: write
+
       # Checkout so `.fuko.toml` (the reviewer/model/store config) is available.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -69,10 +89,16 @@ jobs:
       - name: Review
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          # Per-branch identities for concurrent A/B (referenced by token_env in
+          # .fuko.toml). FUKO_GITHUB_TOKEN_B is empty unless a second App is set,
+          # in which case the run stays sequential under the base token.
+          FUKO_GITHUB_TOKEN_A: ${{ steps.app-token.outputs.token || github.token }}
+          FUKO_GITHUB_TOKEN_B: ${{ steps.app-token-b.outputs.token }}
           # Knowledge base: point at a running sidecar, or omit to use a local store.
           FUKO_URL: ${{ secrets.FUKO_URL }}
           FUKO_TOKEN: ${{ secrets.FUKO_TOKEN }}
           # Model provider key(s) — supply whichever your .fuko.toml selects.
           ZAI_KEY: ${{ secrets.ZAI_KEY }}
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
           ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY }}
         run: fuko review --pr-url "${{ github.event.pull_request.html_url }}"
