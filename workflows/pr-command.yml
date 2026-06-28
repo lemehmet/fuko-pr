@@ -87,6 +87,9 @@ jobs:
         with:
           app-id: ${{ vars.FUKO_APP_ID }}
           private-key: ${{ secrets.FUKO_APP_PRIVATE_KEY }}
+          permission-contents: read
+          permission-pull-requests: write
+          permission-issues: write
 
       - name: PR-Agent (run the comment command)
         uses: the-pr-agent/pr-agent@bd09b6cf89c6d6f3d16b159fa7603fa0e7768cf2 # v0.38.0
