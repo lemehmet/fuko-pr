@@ -83,13 +83,13 @@ jobs:
         id: app-token
         if: ${{ vars.FUKO_APP_ID != '' }}
         continue-on-error: true # degrade to github-actions[bot] rather than failing the run
-        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ vars.FUKO_APP_ID }}
           private-key: ${{ secrets.FUKO_APP_PRIVATE_KEY }}
 
       - name: PR-Agent (run the comment command)
-        uses: the-pr-agent/pr-agent@e639d10a4df023b90668ec35796c2457c5f5db8d # v0.36.1
+        uses: the-pr-agent/pr-agent@bd09b6cf89c6d6f3d16b159fa7603fa0e7768cf2 # v0.38.0
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           # PR-Agent loads settings via dynaconf (envvar_prefix=False), so nested
