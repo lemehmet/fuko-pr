@@ -51,6 +51,9 @@ jobs:
         with:
           app-id: ${{ vars.FUKO_APP_ID }}
           private-key: ${{ secrets.FUKO_APP_PRIVATE_KEY }}
+          permission-contents: read
+          permission-pull-requests: write
+          permission-issues: write
 
       # Bring the PR's code + .fuko.toml into the workspace; the runner is then
       # built from this checkout (dogfood), not a pinned release.

@@ -79,6 +79,9 @@ jobs:
         with:
           app-id: ${{ vars.FUKO_APP_ID }}
           private-key: ${{ secrets.FUKO_APP_PRIVATE_KEY }}
+          permission-contents: read
+          permission-pull-requests: write
+          permission-issues: write
 
       - name: Handle /remember and /forget
         env:
