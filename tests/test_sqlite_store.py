@@ -124,6 +124,27 @@ def test_ingest_empty(store):
     assert store.ingest("o/r", []) == (0, 0)
 
 
+def test_reingest_skips_embedding_known_threads(store, monkeypatch):
+    items = [
+        IngestItem(text="auth login flow", source="resolved_thread"),
+        IngestItem(text="db migration notes", source="resolved_thread"),
+    ]
+    assert store.ingest("o/r", items) == (2, 0)
+
+    embedded: list[list[str]] = []
+
+    class _CountingEmbedder(_FakeEmbedder):
+        def embed(self, texts):
+            embedded.append(list(texts))
+            return super().embed(texts)
+
+    monkeypatch.setattr(ss, "get_embedder", lambda: _CountingEmbedder())
+
+    new = IngestItem(text="ui spacing rule", source="resolved_thread")
+    assert store.ingest("o/r", items + [new]) == (1, 2)
+    assert embedded == [["ui spacing rule"]]
+
+
 def test_query_empty_when_no_context(store):
     store.ingest("o/r", [IngestItem(text="auth", source="docs")])
     assert store.query("o/r", [], pr_body=None, query_text=None) == []
