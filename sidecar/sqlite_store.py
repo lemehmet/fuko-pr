@@ -33,6 +33,8 @@ from .retrieve import _build_query
 
 _MAX_RETRIES = 5
 
+_VAR_BATCH = 500
+
 
 def _pack(vec: list[float]) -> bytes:
     """Pack a vector as little-endian float32 (sqlite-vec's portable wire format)."""
@@ -166,11 +168,18 @@ class SqliteVecStore:
             return set()
 
         def fn(conn: sqlite3.Connection) -> list[tuple[str, str]]:
-            placeholders = ",".join("?" * len(texts))
-            return conn.execute(
-                f"SELECT text, source FROM learnings WHERE repo = ? AND text IN ({placeholders})",
-                (repo, *texts),
-            ).fetchall()
+            rows: list[tuple[str, str]] = []
+            for i in range(0, len(texts), _VAR_BATCH):
+                batch = texts[i : i + _VAR_BATCH]
+                placeholders = ",".join("?" * len(batch))
+                rows.extend(
+                    conn.execute(
+                        f"SELECT text, source FROM learnings "
+                        f"WHERE repo = ? AND text IN ({placeholders})",
+                        (repo, *batch),
+                    ).fetchall()
+                )
+            return rows
 
         return {(text, source) for text, source in self._read(fn) if (text, source) in candidates}
 
