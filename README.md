@@ -66,8 +66,10 @@ file — no paid APIs, no server.
    ```toml
    [review]
    backend = "pr-agent"
-   # PR-Agent runs from its Docker image (it is not pip-installable):
-   image = "codiumai/pr-agent:latest"   # or your pinned ghcr.io/OWNER/pr-agent:0.38.0
+   # PR-Agent runs from its Docker image (it is not pip-installable). The public
+   # codiumai image lags (stops at 0.34), so prefer the pinned GHCR image this
+   # repo builds (see "Deploying as a GitHub Action" below):
+   image = "ghcr.io/OWNER/pr-agent:0.38.0"   # pin the matching @sha256 digest from your build
 
    [review.model]
    provider = "ollama"                  # zai-coding | anthropic | openai | ollama
