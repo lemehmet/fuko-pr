@@ -56,25 +56,29 @@ name = "glm-5.2"
 # max_context = 976000           # ~1M window too (a touch under z.ai); both hold any PR
 
 # A/B comparison: list two or more models and `fuko review` reviews the PR once
-# per model (sequentially), each branch posting its own fresh summary under a
+# per model, each branch posting its own fresh summary under a
 # "🤖 fuko A/B — model <id>" header so you can compare them side by side. The
 # `describe` tool is auto-disabled in this mode (a PR has one description). Use a
 # shared Postgres knowledge base if several reviewers will WRITE to it — the
 # server-free sqlite-vec store is single-writer (see docs/deployment.md).
 #
+# Concurrent mode (per-branch identities): give EVERY branch a `token_env` whose
+# env var resolves to a distinct GitHub actor (e.g. two GitHub Apps), and the
+# branches run concurrently — each posts and edits its own comments under its own
+# token (distinct throttle buckets, author separation). If any branch lacks a
+# distinct token the whole run falls back to sequential under the base token. Wire
+# the tokens in the workflow (one `create-github-app-token` step per App).
+#
 # [[review.compare]]
 # provider = "anthropic"         # key from ANTHROPIC_KEY
 # name = "claude-sonnet-4-6"
-#
-# [[review.compare]]
-# provider = "ollama"            # local model, no key
-# name = "qwen2.5-coder"
-# token_env = "FUKO_GITHUB_TOKEN_B"   # reserved for the planned concurrent mode; ignored today
+# token_env = "FUKO_GITHUB_TOKEN_A"   # this branch posts under the App in FUKO_GITHUB_TOKEN_A
 #
 # [[review.compare]]
 # provider = "ollama-cloud"      # hosted model via Ollama Cloud, key from OLLAMA_API_KEY
 # name = "glm-5.2:cloud"
 # max_context = 976000
+# token_env = "FUKO_GITHUB_TOKEN_B"   # distinct actor from A => the two run concurrently
 
 [knowledge]
 store = "postgres"              # postgres | sqlite-vec

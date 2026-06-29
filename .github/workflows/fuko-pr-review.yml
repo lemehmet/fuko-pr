@@ -13,9 +13,12 @@
 # resolve to an unreachable host and the review would degrade to KB-less — still
 # runs, just without injected learnings.
 #
-# Posts as the "Fuko PR Review" GitHub App when configured (repo VARIABLE
-# FUKO_APP_ID + secret FUKO_APP_PRIVATE_KEY, App installed); otherwise
-# github-actions[bot]. Observe-only — posts reviews, gates nothing.
+# Concurrent A/B under two App identities: branch a (GLM-5.2) posts as fuko-dorian,
+# branch b (kimi-k2.7) as fuko-gray. Each App = a repo VARIABLE (App ID) + secret
+# (private key): FUKO_DORIAN_APP_ID/FUKO_DORIAN_APP_PRIVATE_KEY and
+# FUKO_GRAY_APP_ID/FUKO_GRAY_APP_PRIVATE_KEY. With only one App the A/B runs
+# sequentially under it; with none it posts as github-actions[bot]. Observe-only —
+# posts reviews, gates nothing.
 
 name: fuko-pr review
 
@@ -40,18 +43,33 @@ jobs:
       pull-requests: write
       issues: write
     steps:
-      # Post as the "Fuko PR Review" GitHub App when configured: set repo VARIABLE
-      # FUKO_APP_ID + secret FUKO_APP_PRIVATE_KEY and install the App on the repo.
-      # (App ID is a variable, not a secret — the `secrets` context is not allowed
-      # in step `if:` conditions, but `vars` is.) Falls back to github-actions[bot].
-      - name: Mint Fuko PR Review app token
-        id: app-token
-        if: ${{ vars.FUKO_APP_ID != '' }}
-        continue-on-error: true # if minting fails (App uninstalled, etc.), fall back to github-actions[bot] rather than failing the PR check
+      # Two App identities for concurrent A/B: branch a (GLM-5.2) posts as
+      # fuko-dorian, branch b (kimi-k2.7) as fuko-gray, so the runner reviews under
+      # per-branch tokens (distinct throttle buckets + author separation). Each App
+      # is configured by a repo VARIABLE (App ID) + secret (private key); App IDs are
+      # variables because the `secrets` context is not allowed in step `if:`.
+      # If the gray App is absent the runner degrades to a sequential single-token
+      # A/B; if both are absent it falls back to github-actions[bot].
+      - name: Mint fuko-dorian app token
+        id: app-token-dorian
+        if: ${{ vars.FUKO_DORIAN_APP_ID != '' }}
+        continue-on-error: true # minting failure (App uninstalled, etc.) falls back rather than failing the PR check
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ vars.FUKO_APP_ID }}
-          private-key: ${{ secrets.FUKO_APP_PRIVATE_KEY }}
+          app-id: ${{ vars.FUKO_DORIAN_APP_ID }}
+          private-key: ${{ secrets.FUKO_DORIAN_APP_PRIVATE_KEY }}
+          permission-contents: read
+          permission-pull-requests: write
+          permission-issues: write
+
+      - name: Mint fuko-gray app token
+        id: app-token-gray
+        if: ${{ vars.FUKO_GRAY_APP_ID != '' }}
+        continue-on-error: true # absent/failed gray App degrades to sequential single-token A/B
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.FUKO_GRAY_APP_ID }}
+          private-key: ${{ secrets.FUKO_GRAY_APP_PRIVATE_KEY }}
           permission-contents: read
           permission-pull-requests: write
           permission-issues: write
@@ -70,10 +88,20 @@ jobs:
 
       - name: Review
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-          # Knowledge base: the LAN fuko sidecar when reachable (self-hosted
-          # runner). On ubuntu-latest these resolve to an unreachable host and the
-          # runner degrades to KB-less — harmless, just no injected learnings.
+          # Base identity for PR reads + the sequential fallback: fuko-dorian when
+          # its App is minted, else github-actions[bot] (the github.token fallback).
+          GITHUB_TOKEN: ${{ steps.app-token-dorian.outputs.token || github.token }}
+          # Per-branch identities for concurrent A/B — referenced by token_env in
+          # .fuko.toml. Each is the App token or EMPTY (no github.token fallback):
+          # an unminted App must leave its var empty so _resolve_branch_identities
+          # falls back to sequential rather than racing fuko-gray against
+          # github-actions[bot]. Concurrency activates only when both resolve to
+          # distinct actors; otherwise the run is sequential under GITHUB_TOKEN.
+          FUKO_GITHUB_TOKEN_DORIAN: ${{ steps.app-token-dorian.outputs.token }}
+          FUKO_GITHUB_TOKEN_GRAY: ${{ steps.app-token-gray.outputs.token }}
+          # Knowledge base: the LAN fuko sidecar reached from the self-hosted
+          # runner. If unreachable the review degrades to KB-less — harmless, just
+          # no injected learnings.
           FUKO_URL: ${{ secrets.FUKO_URL }}
           FUKO_TOKEN: ${{ secrets.FUKO_TOKEN }}
           # Reviewer model keys for the .fuko.toml A/B pool: GLM-5.2 via z.ai

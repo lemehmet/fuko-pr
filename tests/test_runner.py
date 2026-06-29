@@ -921,6 +921,57 @@ def test_resolve_actor_on_http_error_is_none(monkeypatch):
     assert runner._resolve_actor("tok", runner._DEFAULT_API) is None
 
 
+_INTEGRATION_403 = {"message": "Resource not accessible by integration"}
+
+
+def test_resolve_actor_app_token_403_returns_token_surrogate(monkeypatch):
+    # GitHub App installation tokens 403 with the integration message on GET /user;
+    # identity falls back to a per-token surrogate so two apps resolve distinct.
+    monkeypatch.setattr(
+        runner.httpx,
+        "get",
+        lambda url, headers=None, timeout=None: _Resp(_INTEGRATION_403, status=403),
+    )
+    a = runner._resolve_actor("ghs_dorian", runner._DEFAULT_API)
+    b = runner._resolve_actor("ghs_gray", runner._DEFAULT_API)
+    assert a and b and a.startswith("bot:") and a != b
+    # Same token reused -> same identity (no false concurrency).
+    assert runner._resolve_actor("ghs_dorian", runner._DEFAULT_API) == a
+
+
+def test_resolve_actor_non_integration_403_is_none(monkeypatch):
+    # A 403 that is NOT the integration message (rate limit, SSO, under-scoped PAT)
+    # must return None so the run falls back to sequential, not fabricate an identity.
+    monkeypatch.setattr(
+        runner.httpx,
+        "get",
+        lambda url, headers=None, timeout=None: _Resp(
+            {"message": "API rate limit exceeded"}, status=403
+        ),
+    )
+    assert runner._resolve_actor("tok", runner._DEFAULT_API) is None
+
+
+def test_resolve_branch_identities_activates_for_two_app_tokens(monkeypatch):
+    # End-to-end: two app installation tokens (both integration-403 on /user) must
+    # enable concurrent mode via the surrogate, not collapse to the sequential path.
+    monkeypatch.setenv("TOK_A", "ghs_dorian")
+    monkeypatch.setenv("TOK_B", "ghs_gray")
+    monkeypatch.setattr(
+        runner.httpx,
+        "get",
+        lambda url, headers=None, timeout=None: _Resp(_INTEGRATION_403, status=403),
+    )
+    compare = [
+        CompareModel(provider="zai-coding", name="glm-5.2", token_env="TOK_A"),
+        CompareModel(provider="ollama-cloud", name="kimi", token_env="TOK_B"),
+    ]
+    assert runner._resolve_branch_identities(compare, runner._DEFAULT_API) == [
+        "ghs_dorian",
+        "ghs_gray",
+    ]
+
+
 def test_resolve_branch_identities_activates_on_distinct_tokens(monkeypatch):
     monkeypatch.setenv("TOK_A", "tok-a")
     monkeypatch.setenv("TOK_B", "tok-b")

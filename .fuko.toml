@@ -12,8 +12,10 @@ max_context = 1000000
 provider = "zai-coding"
 name = "glm-5.2"
 max_context = 1000000
+token_env = "FUKO_GITHUB_TOKEN_DORIAN"
 
 [[review.compare]]
 provider = "ollama-cloud"
-name = "minimax-m3:cloud"
-max_context = 976000
+name = "kimi-k2.7-code:cloud"
+max_context = 256000
+token_env = "FUKO_GITHUB_TOKEN_GRAY"
