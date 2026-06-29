@@ -88,7 +88,8 @@ jobs:
 
       - name: Review
         env:
-          # Base identity (PR reads + the sequential fallback): fuko-dorian.
+          # Base identity for PR reads + the sequential fallback: fuko-dorian when
+          # its App is minted, else github-actions[bot] (the github.token fallback).
           GITHUB_TOKEN: ${{ steps.app-token-dorian.outputs.token || github.token }}
           # Per-branch identities for concurrent A/B — referenced by token_env in
           # .fuko.toml. Each is the App token or EMPTY (no github.token fallback):
