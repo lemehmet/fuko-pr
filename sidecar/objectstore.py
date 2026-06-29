@@ -48,8 +48,13 @@ class FileObjectStore:
             raise PreconditionFailed("object already exists")
         if token is not None and not exists:
             raise PreconditionFailed("object deleted since load")
-        if token is not None and _content_token(self._path.read_bytes()) != token:
-            raise PreconditionFailed("object changed since load")
+        if token is not None:
+            try:
+                current = self._path.read_bytes()
+            except FileNotFoundError as exc:
+                raise PreconditionFailed("object deleted since load") from exc
+            if _content_token(current) != token:
+                raise PreconditionFailed("object changed since load")
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_bytes(data)
         return _content_token(data)

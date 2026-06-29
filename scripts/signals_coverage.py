@@ -49,7 +49,7 @@ def _token() -> str:
 def _is_bot(login: str) -> bool:
     """Return whether ``login`` is one of the reviewer bots fuko normalizes."""
     low = login.lower()
-    return any(b in low for b in _BOT_MARKERS)
+    return low.endswith("[bot]") and any(b in low for b in _BOT_MARKERS)
 
 
 def _skip_reason(comment: dict) -> str:
