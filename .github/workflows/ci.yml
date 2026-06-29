@@ -42,7 +42,8 @@ jobs:
           --health-timeout 5s
           --health-retries 20
       ollama:
-        image: ollama/ollama:latest
+        # Pinned by digest for reproducible CI (tag is the human-readable hint).
+        image: ollama/ollama:0.30.11@sha256:c484b703176aa19dfc0a54cbfb60ab8094b38faa04283fb77eba1d33319e5eca
         ports:
           - 11434
     env:
@@ -71,5 +72,5 @@ jobs:
             sleep 1
           done
           curl -sf "${OLLAMA_URL}/api/tags" >/dev/null || { echo "::error::Ollama service did not become ready in 60s"; exit 1; }
-          curl -fsS "${OLLAMA_URL}/api/pull" -d '{"name":"bge-m3"}'
+          curl -fsS "${OLLAMA_URL}/api/pull" -H "Content-Type: application/json" -d '{"name":"bge-m3"}'
       - run: pytest -q
