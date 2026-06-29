@@ -91,10 +91,12 @@ jobs:
           # Base identity (PR reads + the sequential fallback): fuko-dorian.
           GITHUB_TOKEN: ${{ steps.app-token-dorian.outputs.token || github.token }}
           # Per-branch identities for concurrent A/B — referenced by token_env in
-          # .fuko.toml. When both resolve to distinct actors the runner reviews
-          # concurrently, each branch posting under its own App. An empty gray
-          # token makes the runner fall back to a sequential single-token A/B.
-          FUKO_GITHUB_TOKEN_DORIAN: ${{ steps.app-token-dorian.outputs.token || github.token }}
+          # .fuko.toml. Each is the App token or EMPTY (no github.token fallback):
+          # an unminted App must leave its var empty so _resolve_branch_identities
+          # falls back to sequential rather than racing fuko-gray against
+          # github-actions[bot]. Concurrency activates only when both resolve to
+          # distinct actors; otherwise the run is sequential under GITHUB_TOKEN.
+          FUKO_GITHUB_TOKEN_DORIAN: ${{ steps.app-token-dorian.outputs.token }}
           FUKO_GITHUB_TOKEN_GRAY: ${{ steps.app-token-gray.outputs.token }}
           # Knowledge base: the LAN fuko sidecar reached from the self-hosted
           # runner. If unreachable the review degrades to KB-less — harmless, just

@@ -90,9 +90,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           # Per-branch identities for concurrent A/B (referenced by token_env in
-          # .fuko.toml). FUKO_GITHUB_TOKEN_B is empty unless a second App is set,
-          # in which case the run stays sequential under the base token.
-          FUKO_GITHUB_TOKEN_A: ${{ steps.app-token.outputs.token || github.token }}
+          # .fuko.toml). Each is the App token or EMPTY (no github.token fallback):
+          # an empty var makes the run fall back to sequential under the base token,
+          # so an unminted App can't race github-actions[bot] against the other App.
+          # When both resolve to distinct actors the branches run concurrently.
+          FUKO_GITHUB_TOKEN_A: ${{ steps.app-token.outputs.token }}
           FUKO_GITHUB_TOKEN_B: ${{ steps.app-token-b.outputs.token }}
           # Knowledge base: point at a running sidecar, or omit to use a local store.
           FUKO_URL: ${{ secrets.FUKO_URL }}
