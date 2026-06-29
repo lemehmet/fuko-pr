@@ -70,5 +70,6 @@ jobs:
             curl -sf "${OLLAMA_URL}/api/tags" >/dev/null && break
             sleep 1
           done
+          curl -sf "${OLLAMA_URL}/api/tags" >/dev/null || { echo "::error::Ollama service did not become ready in 60s"; exit 1; }
           curl -fsS "${OLLAMA_URL}/api/pull" -d '{"name":"bge-m3"}'
       - run: pytest -q
