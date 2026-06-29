@@ -35,7 +35,7 @@ from sidecar.normalizers import (
     is_pragent_comment,
 )
 
-_BOT_MARKERS = ("coderabbit", "copilot", "fuko-pr-review")
+_BOT_MARKERS = ("coderabbit", "copilot", "fuko-")
 
 
 def _token() -> str:
