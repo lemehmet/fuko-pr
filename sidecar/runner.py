@@ -14,6 +14,7 @@ just without injected knowledge -- matching the original workflow's behavior.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import sys
@@ -207,18 +208,28 @@ def _github_env(token: str) -> dict[str, str]:
 
 
 def _resolve_actor(token: str, api_url: str) -> str | None:
-    """Return the GitHub actor id (``"<id>"``) a token authenticates as, or ``None``.
+    """Return the GitHub actor identity a token authenticates as, or ``None``.
 
     Calls ``GET /user`` and returns the numeric account id as a string -- the
     stable identity two tokens share when they belong to the same user/bot, even
-    if the tokens themselves differ. Any failure (network, auth, unexpected
-    payload) returns ``None`` so callers can fall back rather than guess.
+    if the tokens themselves differ.
+
+    A **GitHub App installation token** cannot call ``GET /user`` (GitHub answers
+    ``403`` "Resource not accessible by integration"), yet it authors comments as
+    the app's own distinct ``<slug>[bot]`` user. Returning ``None`` there would
+    wrongly collapse two different apps to "unresolvable" and disable concurrent
+    A/B. So on a ``403`` we return a per-token surrogate: distinct app tokens get
+    distinct identities (enabling concurrency) while the same token reused stays a
+    single identity. Any other failure (network, auth, unexpected payload) returns
+    ``None`` so callers fall back to the sequential path rather than guess.
     """
     if not token:
         return None
     base = api_url.rstrip("/")
     try:
         resp = httpx.get(f"{base}/user", headers=_gh_headers(token), timeout=30.0)
+        if resp.status_code == 403:
+            return "bot:" + hashlib.sha256(token.encode()).hexdigest()[:16]
         resp.raise_for_status()
         actor_id = resp.json().get("id")
     except (httpx.HTTPError, ValueError):
