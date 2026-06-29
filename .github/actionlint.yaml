@@ -1,0 +1,5 @@
+# Custom self-hosted runner labels, so actionlint does not flag `runs-on` entries
+# that target the fuko-pr homelab fleet (see runner-setup.md).
+self-hosted-runner:
+  labels:
+    - fuko-pr
