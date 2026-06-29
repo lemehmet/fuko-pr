@@ -214,14 +214,18 @@ def _resolve_actor(token: str, api_url: str) -> str | None:
     stable identity two tokens share when they belong to the same user/bot, even
     if the tokens themselves differ.
 
-    A **GitHub App installation token** cannot call ``GET /user`` (GitHub answers
-    ``403`` "Resource not accessible by integration"), yet it authors comments as
-    the app's own distinct ``<slug>[bot]`` user. Returning ``None`` there would
-    wrongly collapse two different apps to "unresolvable" and disable concurrent
-    A/B. So on a ``403`` we return a per-token surrogate: distinct app tokens get
-    distinct identities (enabling concurrency) while the same token reused stays a
-    single identity. Any other failure (network, auth, unexpected payload) returns
-    ``None`` so callers fall back to the sequential path rather than guess.
+    A **GitHub App installation token** cannot call ``GET /user`` -- GitHub answers
+    ``403`` with the specific message "Resource not accessible by integration" --
+    yet it authors comments as the app's own distinct ``<slug>[bot]`` user.
+    Returning ``None`` there would wrongly collapse two different apps to
+    "unresolvable" and disable concurrent A/B. So on *that* 403 we return a
+    per-token surrogate: distinct app tokens get distinct identities (enabling
+    concurrency) while the same token reused stays a single identity. The match is
+    narrowed to that exact integration message because a bare ``403`` also covers
+    rate limits, SSO/org restrictions, and under-scoped PATs -- which are real
+    failures that must fall back to ``None`` (sequential) rather than fabricate a
+    distinct identity for what may be one actor. Any other failure (network, auth,
+    unexpected payload) likewise returns ``None``.
     """
     if not token:
         return None
@@ -229,7 +233,13 @@ def _resolve_actor(token: str, api_url: str) -> str | None:
     try:
         resp = httpx.get(f"{base}/user", headers=_gh_headers(token), timeout=30.0)
         if resp.status_code == 403:
-            return "bot:" + hashlib.sha256(token.encode()).hexdigest()[:16]
+            try:
+                message = (resp.json() or {}).get("message", "") or ""
+            except ValueError:
+                message = ""
+            if "not accessible by integration" in message.lower():
+                return "bot:" + hashlib.sha256(token.encode()).hexdigest()[:16]
+            return None
         resp.raise_for_status()
         actor_id = resp.json().get("id")
     except (httpx.HTTPError, ValueError):
