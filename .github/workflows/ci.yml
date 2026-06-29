@@ -7,7 +7,9 @@ on:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    # Fork guard: never run untrusted fork-PR code on the persistent homelab fleet.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: [self-hosted, Linux, X64, fuko-pr] # self-hosted homelab fleet (3 runners)
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
@@ -19,7 +21,12 @@ jobs:
       - run: ruff format --check .
 
   test:
-    runs-on: ubuntu-latest
+    # Fork guard: never run untrusted fork-PR code on the persistent homelab fleet.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: [self-hosted, Linux, X64, fuko-pr] # self-hosted homelab fleet (3 runners)
+    # Both services run as ephemeral containers (Docker is on the fleet) with
+    # Actions-assigned host ports, so nothing is installed on the persistent host
+    # and concurrent jobs can't collide on a fixed 5432/11434.
     services:
       pg:
         image: pgvector/pgvector:pg16
@@ -28,15 +35,18 @@ jobs:
           POSTGRES_PASSWORD: secret
           POSTGRES_DB: fuko
         ports:
-          - 5432:5432
+          - 5432
         options: >-
           --health-cmd "pg_isready -U fuko"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+      ollama:
+        # Pinned by digest for reproducible CI (tag is the human-readable hint).
+        image: ollama/ollama:0.30.11@sha256:c484b703176aa19dfc0a54cbfb60ab8094b38faa04283fb77eba1d33319e5eca
+        ports:
+          - 11434
     env:
-      FUKO_DATABASE_URL: postgresql://fuko:secret@localhost:5432/fuko
-      FUKO_EMBED_BASE_URL: http://127.0.0.1:11434/v1
       FUKO_EMBED_MODEL: bge-m3
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -45,14 +55,22 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -e ".[dev,sqlite]"
-      - name: Start Ollama
+      - name: Resolve service endpoints
+        env:
+          PG_PORT: ${{ job.services.pg.ports['5432'] }}
+          OLLAMA_PORT: ${{ job.services.ollama.ports['11434'] }}
         run: |
-          curl -fsSL https://ollama.com/install.sh | sh
-          nohup ollama serve > /tmp/ollama.log 2>&1 &
-          for i in $(seq 1 30); do
-            curl -sf http://127.0.0.1:11434/api/tags >/dev/null && break
+          {
+            echo "FUKO_DATABASE_URL=postgresql://fuko:secret@localhost:${PG_PORT}/fuko"
+            echo "FUKO_EMBED_BASE_URL=http://localhost:${OLLAMA_PORT}/v1"
+            echo "OLLAMA_URL=http://localhost:${OLLAMA_PORT}"
+          } >> "$GITHUB_ENV"
+      - name: Pull bge-m3 into the Ollama service
+        run: |
+          for i in $(seq 1 60); do
+            curl -sf "${OLLAMA_URL}/api/tags" >/dev/null && break
             sleep 1
           done
-          curl -sf http://127.0.0.1:11434/api/tags
-      - run: ollama pull bge-m3
+          curl -sf "${OLLAMA_URL}/api/tags" >/dev/null || { echo "::error::Ollama service did not become ready in 60s"; exit 1; }
+          curl -fsS "${OLLAMA_URL}/api/pull" -H "Content-Type: application/json" -d '{"name":"bge-m3"}'
       - run: pytest -q

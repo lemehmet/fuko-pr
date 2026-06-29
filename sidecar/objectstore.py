@@ -4,12 +4,14 @@ Narrow interface: ``load()`` returns the file's bytes plus a concurrency token,
 and ``save(data, token)`` writes them back only if the object is unchanged since
 that token -- optimistic concurrency for the download -> mutate -> upload loop.
 S3/R2 use the object ETag with conditional ``PutObject``; the local ``file``
-backend uses the file's mtime. ``boto3`` is a lazy, optional dependency
-(``pip install fuko-pr[sqlite]``).
+backend uses a content hash (mtime collides for sub-tick writes on fast disks,
+breaking the optimistic-concurrency check). ``boto3`` is a lazy, optional
+dependency (``pip install fuko-pr[sqlite]``).
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -20,18 +22,24 @@ class PreconditionFailed(RuntimeError):
     """Raised when a conditional save loses a race (the object changed meanwhile)."""
 
 
+def _content_token(data: bytes) -> str:
+    """Return a content-derived concurrency token (an ETag-like digest)."""
+    return hashlib.sha256(data).hexdigest()
+
+
 class FileObjectStore:
-    """Local-file backend (no server); the token is the file's mtime in ns."""
+    """Local-file backend (no server); the token is a content hash of the file."""
 
     def __init__(self, path: str) -> None:
         """Store the local file path that holds the knowledge db."""
         self._path = Path(path)
 
     def load(self) -> tuple[bytes | None, str | None]:
-        """Return the file's bytes and an mtime token, or ``(None, None)`` if absent."""
+        """Return the file's bytes and a content token, or ``(None, None)`` if absent."""
         if not self._path.exists():
             return None, None
-        return self._path.read_bytes(), str(self._path.stat().st_mtime_ns)
+        data = self._path.read_bytes()
+        return data, _content_token(data)
 
     def save(self, data: bytes, token: str | None) -> str:
         """Write ``data`` if the file is unchanged since ``token`` (else raise)."""
@@ -40,11 +48,16 @@ class FileObjectStore:
             raise PreconditionFailed("object already exists")
         if token is not None and not exists:
             raise PreconditionFailed("object deleted since load")
-        if token is not None and str(self._path.stat().st_mtime_ns) != token:
-            raise PreconditionFailed("object changed since load")
+        if token is not None:
+            try:
+                current = self._path.read_bytes()
+            except FileNotFoundError as exc:
+                raise PreconditionFailed("object deleted since load") from exc
+            if _content_token(current) != token:
+                raise PreconditionFailed("object changed since load")
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_bytes(data)
-        return str(self._path.stat().st_mtime_ns)
+        return _content_token(data)
 
 
 def _error_code(exc: Exception) -> str:
