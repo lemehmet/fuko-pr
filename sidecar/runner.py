@@ -234,11 +234,12 @@ def _resolve_actor(token: str, api_url: str) -> str | None:
         resp = httpx.get(f"{base}/user", headers=_gh_headers(token), timeout=30.0)
         if resp.status_code == 403:
             try:
-                message = (resp.json() or {}).get("message", "") or ""
+                payload = resp.json()
             except ValueError:
-                message = ""
+                payload = None
+            message = payload.get("message", "") if isinstance(payload, dict) else ""
             if "not accessible by integration" in message.lower():
-                return "bot:" + hashlib.sha256(token.encode()).hexdigest()[:16]
+                return "bot:" + hashlib.sha256(token.encode()).hexdigest()
             return None
         resp.raise_for_status()
         actor_id = resp.json().get("id")
