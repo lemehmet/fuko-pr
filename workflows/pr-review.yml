@@ -43,8 +43,8 @@ jobs:
     steps:
       # Post as the "Fuko PR Review" GitHub App when configured: set repo VARIABLE
       # FUKO_APP_ID + secret FUKO_APP_PRIVATE_KEY and install the App on the repo.
-      # (App ID is a variable, not a secret — the `secrets` context is not allowed
-      # in step `if:` conditions, but `vars` is.) Falls back to github-actions[bot].
+      # (App IDs aren't secret material; keeping them in `vars` makes the mint
+      # gates plain data-presence checks.) Falls back to github-actions[bot].
       - name: Mint Fuko PR Review app token
         id: app-token
         if: ${{ vars.FUKO_APP_ID != '' }}
@@ -75,17 +75,18 @@ jobs:
       # the job status (the step still reports success), the token output comes
       # out empty, and the runner then silently degrades — App B missing means
       # sequential A/B under App A, App A missing means github-actions[bot].
-      # `outcome` is the pre-continue-on-error result, so it sees the failure.
+      # `outcome` is the pre-continue-on-error result, so it sees the failure;
+      # a skipped mint (App intentionally unconfigured) stays silent.
       - name: Surface App token mint failures
-        if: ${{ (vars.FUKO_APP_ID != '' && steps.app-token.outcome != 'success') || (vars.FUKO_APP_ID_B != '' && steps.app-token-b.outcome != 'success') }}
+        if: ${{ steps.app-token.outcome == 'failure' || steps.app-token-b.outcome == 'failure' }}
         env:
           A_OUTCOME: ${{ steps.app-token.outcome }}
           B_OUTCOME: ${{ steps.app-token-b.outcome }}
         run: |
-          if [ "$A_OUTCOME" != "success" ]; then
+          if [ "$A_OUTCOME" = "failure" ]; then
             echo "::warning title=Fuko App token mint failed::check vars.FUKO_APP_ID / secrets.FUKO_APP_PRIVATE_KEY and the App installation; the review will post as github-actions[bot]"
           fi
-          if [ "$B_OUTCOME" != "success" ]; then
+          if [ "$B_OUTCOME" = "failure" ]; then
             echo "::warning title=Second Fuko App token mint failed::check vars.FUKO_APP_ID_B / secrets.FUKO_APP_PRIVATE_KEY_B and the App installation; the A/B falls back to sequential under the base identity"
           fi
 
@@ -106,7 +107,9 @@ jobs:
 
       - name: Review
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          # Base identity for PR reads + the sequential fallback: whichever App
+          # token minted (A preferred), else github-actions[bot].
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || steps.app-token-b.outputs.token || github.token }}
           # Per-branch identities for concurrent A/B (referenced by token_env in
           # .fuko.toml). Each is the App token or EMPTY (no github.token fallback):
           # an empty var makes the run fall back to sequential under the base token,

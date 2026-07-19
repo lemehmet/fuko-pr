@@ -49,8 +49,9 @@ jobs:
       # Two App identities for concurrent A/B: branch a (GLM-5.2) posts as
       # fuko-dorian, branch b (kimi-k2.7) as fuko-gray, so the runner reviews under
       # per-branch tokens (distinct throttle buckets + author separation). Each App
-      # is configured by a repo VARIABLE (App ID) + secret (private key); App IDs are
-      # variables because the `secrets` context is not allowed in step `if:`.
+      # is configured by a repo VARIABLE (App ID) + secret (private key); App IDs
+      # aren't secret material, and keeping them in `vars` makes the mint gates
+      # below plain data-presence checks.
       # If the gray App is absent the runner degrades to a sequential single-token
       # A/B; if both are absent it falls back to github-actions[bot].
       - name: Mint fuko-dorian app token
@@ -81,18 +82,19 @@ jobs:
       # the job status (the step still reports success), the token output comes
       # out empty, and the runner then silently degrades — gray missing means
       # sequential A/B under dorian, dorian missing means github-actions[bot].
-      # `outcome` is the pre-continue-on-error result, so it sees the failure.
+      # `outcome` is the pre-continue-on-error result, so it sees the failure;
+      # a skipped mint (App intentionally unconfigured) stays silent.
       # (Found on mepro#1455: a bad gray PEM 401'd and nothing flagged it.)
       - name: Surface App token mint failures
-        if: ${{ (vars.FUKO_DORIAN_APP_ID != '' && steps.app-token-dorian.outcome != 'success') || (vars.FUKO_GRAY_APP_ID != '' && steps.app-token-gray.outcome != 'success') }}
+        if: ${{ steps.app-token-dorian.outcome == 'failure' || steps.app-token-gray.outcome == 'failure' }}
         env:
           DORIAN_OUTCOME: ${{ steps.app-token-dorian.outcome }}
           GRAY_OUTCOME: ${{ steps.app-token-gray.outcome }}
         run: |
-          if [ "$DORIAN_OUTCOME" != "success" ]; then
+          if [ "$DORIAN_OUTCOME" = "failure" ]; then
             echo "::warning title=fuko-dorian App token mint failed::check vars.FUKO_DORIAN_APP_ID / secrets.FUKO_DORIAN_APP_PRIVATE_KEY and the App installation; the review will post as github-actions[bot]"
           fi
-          if [ "$GRAY_OUTCOME" != "success" ]; then
+          if [ "$GRAY_OUTCOME" = "failure" ]; then
             echo "::warning title=fuko-gray App token mint failed::check vars.FUKO_GRAY_APP_ID / secrets.FUKO_GRAY_APP_PRIVATE_KEY and the App installation; the A/B falls back to sequential under the base identity"
           fi
 
@@ -110,9 +112,11 @@ jobs:
 
       - name: Review
         env:
-          # Base identity for PR reads + the sequential fallback: fuko-dorian when
-          # its App is minted, else github-actions[bot] (the github.token fallback).
-          GITHUB_TOKEN: ${{ steps.app-token-dorian.outputs.token || github.token }}
+          # Base identity for PR reads + the sequential fallback: whichever App
+          # token minted (dorian preferred), else github-actions[bot] — so a
+          # single configured App drives the sequential A/B under its own
+          # identity regardless of which one it is.
+          GITHUB_TOKEN: ${{ steps.app-token-dorian.outputs.token || steps.app-token-gray.outputs.token || github.token }}
           # Per-branch identities for concurrent A/B — referenced by token_env in
           # .fuko.toml. Each is the App token or EMPTY (no github.token fallback):
           # an unminted App must leave its var empty so _resolve_branch_identities
