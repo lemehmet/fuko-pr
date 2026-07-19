@@ -35,9 +35,12 @@ jobs:
     # Skip drafts, and never run fork-PR head code with this repo's secrets.
     if: ${{ github.event.pull_request.draft == false && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, Linux, X64, fuko-pr] # self-hosted homelab fleet; reaches the LAN sidecar (FUKO_URL) for KB injection
-    # A/B runs two models sequentially; keep this above fuko-pr's per-tool budget
-    # so the graceful per-tool timeout + docker kill fire before GitHub cancels.
-    timeout-minutes: 40
+    # Keep this ABOVE fuko-pr's worst-case budget so the graceful per-tool
+    # timeout + docker kill fire before GitHub cancels the job mid-tool: the
+    # sequential-fallback A/B is 2 branches * 2 tools * 600s = 40m + ~5m setup
+    # ≈ 45m (the concurrent path is ~2 * 600s + setup ≈ 23m). Found on
+    # mepro#1455, where every reviewer flagged the zero-headroom 40m cap.
+    timeout-minutes: 50
     permissions:
       contents: read # reads PR data + posts comments only; no commits/pushes
       pull-requests: write
