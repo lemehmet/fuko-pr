@@ -77,6 +77,25 @@ jobs:
           permission-pull-requests: write
           permission-issues: write
 
+      # Make a failed mint LOUD: continue-on-error above hides the failure from
+      # the job status (the step still reports success), the token output comes
+      # out empty, and the runner then silently degrades — gray missing means
+      # sequential A/B under dorian, dorian missing means github-actions[bot].
+      # `outcome` is the pre-continue-on-error result, so it sees the failure.
+      # (Found on mepro#1455: a bad gray PEM 401'd and nothing flagged it.)
+      - name: Surface App token mint failures
+        if: ${{ (vars.FUKO_DORIAN_APP_ID != '' && steps.app-token-dorian.outcome != 'success') || (vars.FUKO_GRAY_APP_ID != '' && steps.app-token-gray.outcome != 'success') }}
+        env:
+          DORIAN_OUTCOME: ${{ steps.app-token-dorian.outcome }}
+          GRAY_OUTCOME: ${{ steps.app-token-gray.outcome }}
+        run: |
+          if [ "$DORIAN_OUTCOME" != "success" ]; then
+            echo "::warning title=fuko-dorian App token mint failed::check vars.FUKO_DORIAN_APP_ID / secrets.FUKO_DORIAN_APP_PRIVATE_KEY and the App installation; the review will post as github-actions[bot]"
+          fi
+          if [ "$GRAY_OUTCOME" != "success" ]; then
+            echo "::warning title=fuko-gray App token mint failed::check vars.FUKO_GRAY_APP_ID / secrets.FUKO_GRAY_APP_PRIVATE_KEY and the App installation; the A/B falls back to sequential under the base identity"
+          fi
+
       # Bring the PR's code + .fuko.toml into the workspace; the runner is then
       # built from this checkout (dogfood), not a pinned release.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

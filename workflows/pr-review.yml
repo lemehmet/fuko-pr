@@ -71,6 +71,24 @@ jobs:
           permission-pull-requests: write
           permission-issues: write
 
+      # Make a failed mint LOUD: continue-on-error above hides the failure from
+      # the job status (the step still reports success), the token output comes
+      # out empty, and the runner then silently degrades — App B missing means
+      # sequential A/B under App A, App A missing means github-actions[bot].
+      # `outcome` is the pre-continue-on-error result, so it sees the failure.
+      - name: Surface App token mint failures
+        if: ${{ (vars.FUKO_APP_ID != '' && steps.app-token.outcome != 'success') || (vars.FUKO_APP_ID_B != '' && steps.app-token-b.outcome != 'success') }}
+        env:
+          A_OUTCOME: ${{ steps.app-token.outcome }}
+          B_OUTCOME: ${{ steps.app-token-b.outcome }}
+        run: |
+          if [ "$A_OUTCOME" != "success" ]; then
+            echo "::warning title=Fuko App token mint failed::check vars.FUKO_APP_ID / secrets.FUKO_APP_PRIVATE_KEY and the App installation; the review will post as github-actions[bot]"
+          fi
+          if [ "$B_OUTCOME" != "success" ]; then
+            echo "::warning title=Second Fuko App token mint failed::check vars.FUKO_APP_ID_B / secrets.FUKO_APP_PRIVATE_KEY_B and the App installation; the A/B falls back to sequential under the base identity"
+          fi
+
       # Checkout so `.fuko.toml` (the reviewer/model/store config) is available.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
