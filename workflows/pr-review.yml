@@ -84,7 +84,7 @@ jobs:
           B_OUTCOME: ${{ steps.app-token-b.outcome }}
         run: |
           if [ "$A_OUTCOME" = "failure" ]; then
-            echo "::warning title=Fuko App token mint failed::check vars.FUKO_APP_ID / secrets.FUKO_APP_PRIVATE_KEY and the App installation; the review will post as github-actions[bot]"
+            echo "::warning title=Fuko App token mint failed::check vars.FUKO_APP_ID / secrets.FUKO_APP_PRIVATE_KEY and the App installation; the base identity falls back to App B, then github-actions[bot]"
           fi
           if [ "$B_OUTCOME" = "failure" ]; then
             echo "::warning title=Second Fuko App token mint failed::check vars.FUKO_APP_ID_B / secrets.FUKO_APP_PRIVATE_KEY_B and the App installation; the A/B falls back to sequential under the base identity"

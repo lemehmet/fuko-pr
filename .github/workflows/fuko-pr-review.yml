@@ -92,7 +92,7 @@ jobs:
           GRAY_OUTCOME: ${{ steps.app-token-gray.outcome }}
         run: |
           if [ "$DORIAN_OUTCOME" = "failure" ]; then
-            echo "::warning title=fuko-dorian App token mint failed::check vars.FUKO_DORIAN_APP_ID / secrets.FUKO_DORIAN_APP_PRIVATE_KEY and the App installation; the review will post as github-actions[bot]"
+            echo "::warning title=fuko-dorian App token mint failed::check vars.FUKO_DORIAN_APP_ID / secrets.FUKO_DORIAN_APP_PRIVATE_KEY and the App installation; the base identity falls back to fuko-gray, then github-actions[bot]"
           fi
           if [ "$GRAY_OUTCOME" = "failure" ]; then
             echo "::warning title=fuko-gray App token mint failed::check vars.FUKO_GRAY_APP_ID / secrets.FUKO_GRAY_APP_PRIVATE_KEY and the App installation; the A/B falls back to sequential under the base identity"
