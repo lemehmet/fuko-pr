@@ -76,8 +76,8 @@ name = "glm-5.2"
 #
 # [[review.compare]]
 # provider = "openrouter"        # any OpenRouter model, key from OPENROUTER_KEY
-# name = "moonshotai/kimi-k2.7-code"   # OpenRouter ids are vendor/model; append
-# max_context = 262144                 # :nitro to route by throughput
+# name = "deepseek/deepseek-v4-pro"    # vendor/model id; append :nitro to route by throughput
+# max_context = 1048576
 #
 # [[review.compare]]
 # provider = "ollama-cloud"      # hosted model via Ollama Cloud, key from OLLAMA_API_KEY

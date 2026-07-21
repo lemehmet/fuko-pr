@@ -14,7 +14,7 @@ A Linux x64 host with:
 
 - Docker + Docker Compose v2
 - ~3 GB free for the Ollama `bge-m3` model
-- Outbound access to `api.z.ai` (GLM-5.2 chat) and to GitHub
+- Outbound access to `api.z.ai` (GLM-5.2 chat), `openrouter.ai` (compare branch b), and to GitHub
 - A GitHub self-hosted runner agent registered to the repo or org
 
 ## 1. Register the GitHub runner
@@ -114,5 +114,6 @@ is `IF NOT EXISTS`) — see [`AGENTS.md`](./AGENTS.md).
   actually ran on this runner (labels matched).
 - **Embedding 400 / model not found** — `ollama pull bge-m3` not run, or
   `FUKO_EMBED_MODEL`/`FUKO_EMBED_BASE_URL` mismatch.
-- **PR-Agent model error** — `ZAI_KEY` missing/invalid, or `config.model` /
-  `OPENAI.API_BASE` changed in the review workflow.
+- **PR-Agent model error** — `ZAI_KEY` or `OPENROUTER_KEY` missing/invalid,
+  `openrouter.ai` unreachable, or `config.model` / `OPENAI.API_BASE` changed in
+  the review workflow.
