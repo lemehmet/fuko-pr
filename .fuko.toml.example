@@ -16,7 +16,7 @@ tools = ["review", "improve"]   # PR-Agent tools to run
 [review.model]
 # Pick a provider preset + model. Switching providers is just these two lines
 # plus the matching key secret.
-# Known presets: zai-coding, ollama, ollama-cloud, anthropic, openai.
+# Known presets: zai-coding, ollama, ollama-cloud, openrouter, anthropic, openai.
 provider = "zai-coding"         # key from env ZAI_KEY
 name = "glm-5.2"
 # provider = "anthropic"        # key from env ANTHROPIC_KEY
