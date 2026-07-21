@@ -135,7 +135,6 @@ jobs:
           # branch b). Separate keys = separate throttle buckets.
           ZAI_KEY: ${{ secrets.ZAI_KEY }}
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
-          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
           ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY }}
           # Pass the PR URL through the environment rather than expanding
           # ${{ github.event... }} directly in run: (avoids shell injection).
