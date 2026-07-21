@@ -16,6 +16,6 @@ token_env = "FUKO_GITHUB_TOKEN_DORIAN"
 
 [[review.compare]]
 provider = "openrouter"
-name = "moonshotai/kimi-k2.7-code"
-max_context = 262144
+name = "deepseek/deepseek-v4-pro"
+max_context = 1048576
 token_env = "FUKO_GITHUB_TOKEN_GRAY"
