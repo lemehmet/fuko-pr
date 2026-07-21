@@ -81,6 +81,7 @@ Actions**:
 | `FUKO_URL`   | `http://localhost:8000`                            |
 | `FUKO_TOKEN` | the `FUKO_AUTH_TOKEN` generated above              |
 | `ZAI_KEY`    | your z.ai API key (for GLM-5.2 chat)               |
+| `OPENROUTER_KEY` | your OpenRouter API key (compare branch b)     |
 
 `GITHUB_TOKEN` is provided automatically.
 

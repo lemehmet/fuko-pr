@@ -75,6 +75,11 @@ name = "glm-5.2"
 # token_env = "FUKO_GITHUB_TOKEN_A"   # this branch posts under the App in FUKO_GITHUB_TOKEN_A
 #
 # [[review.compare]]
+# provider = "openrouter"        # any OpenRouter model, key from OPENROUTER_KEY
+# name = "moonshotai/kimi-k2.7-code"   # OpenRouter ids are vendor/model; append
+# max_context = 262144                 # :nitro to route by throughput
+#
+# [[review.compare]]
 # provider = "ollama-cloud"      # hosted model via Ollama Cloud, key from OLLAMA_API_KEY
 # name = "glm-5.2:cloud"
 # max_context = 976000

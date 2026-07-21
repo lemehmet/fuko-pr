@@ -163,6 +163,7 @@ Initial presets (the ones we actually use):
 | `zai-coding`   | `openai/`      | `https://api.z.ai/api/coding/paas/v4`     | `ZAI_KEY`       | custom_model_max_tokens 1000000, max_model_tokens 512000, ai_timeout 300 |
 | `ollama`       | `ollama/`      | `http://localhost:11434`                  | —               | —                                |
 | `ollama-cloud` | `openai/`      | `https://ollama.com/v1`                   | `OLLAMA_API_KEY`| custom_model_max_tokens 976000, max_model_tokens 512000, ai_timeout 300 |
+| `openrouter`   | `openai/`      | `https://openrouter.ai/api/v1`            | `OPENROUTER_KEY`| custom_model_max_tokens 1048576, max_model_tokens 512000, ai_timeout 300 |
 | `openai`       | `openai/`      | (SDK default)                             | `OPENAI_KEY`    | —                                |
 | `anthropic`    | `anthropic/`   | (SDK default)                             | `ANTHROPIC_KEY` | —                                |
 

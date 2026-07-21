@@ -131,9 +131,10 @@ jobs:
           FUKO_URL: ${{ secrets.FUKO_URL }}
           FUKO_TOKEN: ${{ secrets.FUKO_TOKEN }}
           # Reviewer model keys for the .fuko.toml A/B pool: GLM-5.2 via z.ai
-          # (zai-coding, branch a) and a model via Ollama Cloud (ollama-cloud,
+          # (zai-coding, branch a) and a model via OpenRouter (openrouter,
           # branch b). Separate keys = separate throttle buckets.
           ZAI_KEY: ${{ secrets.ZAI_KEY }}
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
           ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY }}
           # Pass the PR URL through the environment rather than expanding

@@ -15,7 +15,7 @@ max_context = 1000000
 token_env = "FUKO_GITHUB_TOKEN_DORIAN"
 
 [[review.compare]]
-provider = "ollama-cloud"
-name = "kimi-k2.7-code:cloud"
-max_context = 256000
+provider = "openrouter"
+name = "moonshotai/kimi-k2.7-code"
+max_context = 262144
 token_env = "FUKO_GITHUB_TOKEN_GRAY"

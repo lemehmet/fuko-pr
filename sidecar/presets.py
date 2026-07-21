@@ -43,6 +43,16 @@ PRESETS: dict[str, ProviderPreset] = {
             "ai_timeout": 300,
         },
     ),
+    "openrouter": ProviderPreset(
+        litellm_prefix="openai/",
+        base_url="https://openrouter.ai/api/v1",
+        key_env="OPENROUTER_KEY",
+        quirks={
+            "custom_model_max_tokens": 1048576,
+            "max_model_tokens": 512000,
+            "ai_timeout": 300,
+        },
+    ),
     "openai": ProviderPreset(
         litellm_prefix="openai/",
         key_env="OPENAI_KEY",
