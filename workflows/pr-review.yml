@@ -122,6 +122,7 @@ jobs:
           FUKO_TOKEN: ${{ secrets.FUKO_TOKEN }}
           # Model provider key(s) — supply whichever your .fuko.toml selects.
           ZAI_KEY: ${{ secrets.ZAI_KEY }}
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
           ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY }}
         run: fuko review --pr-url "${{ github.event.pull_request.html_url }}"

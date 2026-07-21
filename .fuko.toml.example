@@ -16,7 +16,7 @@ tools = ["review", "improve"]   # PR-Agent tools to run
 [review.model]
 # Pick a provider preset + model. Switching providers is just these two lines
 # plus the matching key secret.
-# Known presets: zai-coding, ollama, ollama-cloud, anthropic, openai.
+# Known presets: zai-coding, ollama, ollama-cloud, openrouter, anthropic, openai.
 provider = "zai-coding"         # key from env ZAI_KEY
 name = "glm-5.2"
 # provider = "anthropic"        # key from env ANTHROPIC_KEY
@@ -73,6 +73,11 @@ name = "glm-5.2"
 # provider = "anthropic"         # key from ANTHROPIC_KEY
 # name = "claude-sonnet-4-6"
 # token_env = "FUKO_GITHUB_TOKEN_A"   # this branch posts under the App in FUKO_GITHUB_TOKEN_A
+#
+# [[review.compare]]
+# provider = "openrouter"        # any OpenRouter model, key from OPENROUTER_KEY
+# name = "deepseek/deepseek-v4-pro"    # vendor/model id; append :nitro to route by throughput
+# max_context = 1048576
 #
 # [[review.compare]]
 # provider = "ollama-cloud"      # hosted model via Ollama Cloud, key from OLLAMA_API_KEY
