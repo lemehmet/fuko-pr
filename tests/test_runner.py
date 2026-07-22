@@ -714,7 +714,9 @@ def test_review_compare_is_green_when_any_branch_posts(
 def test_review_compare_fails_when_describe_is_only_tool(monkeypatch, tmp_path):
     cfg = tmp_path / ".fuko.toml"
     cfg.write_text(
-        '[review]\ntools = ["describe"]\n[[review.compare]]\nprovider = "anthropic"\nname = "a"\n',
+        '[review]\ntools = ["describe"]\n'
+        '[[review.compare]]\nprovider = "anthropic"\nname = "a"\n'
+        '[[review.compare]]\nprovider = "ollama"\nname = "b"\n',
         encoding="utf-8",
     )
     monkeypatch.setenv("ANTHROPIC_KEY", "k")
@@ -737,77 +739,7 @@ def test_review_compare_fails_when_describe_is_only_tool(monkeypatch, tmp_path):
     assert "describe" in result.detail
 
 
-def test_warn_compare_overrides_names_ignored_failover_pool(capsys):
-    from sidecar.fukoconfig import ModelConfig, ReviewConfig
-
-    review = ReviewConfig(
-        compare=[CompareModel(provider="anthropic", name="a")],
-        providers=[
-            ModelConfig(provider="anthropic", name="a"),
-            ModelConfig(provider="ollama", name="b"),
-        ],
-    )
-    runner._warn_compare_overrides(review)
-    err = capsys.readouterr().err
-    assert "A/B compare mode active" in err
-    assert "2-provider failover pool" in err
-    assert "[[review.providers]]" in err
-
-
-def test_warn_compare_overrides_warns_on_inert_single_model(capsys):
-    from sidecar.fukoconfig import ModelConfig, ReviewConfig
-
-    review = ReviewConfig(
-        compare=[CompareModel(provider="anthropic", name="a")],
-        model=ModelConfig(provider="ollama", name="custom"),
-    )
-    runner._warn_compare_overrides(review)
-    err = capsys.readouterr().err
-    assert "A/B compare mode active" in err
-    assert "[review.model]" in err
-
-
-def test_warn_compare_overrides_warns_on_explicitly_set_default_model(capsys):
-    """An explicitly-configured ``[review.model]`` must warn even when its values
-    equal the defaults — the gate is *explicit configuration*, not *non-default
-    values* (a value comparison stays silent on an explicit-default model and
-    misses the override). Detected via Pydantic's ``model_fields_set``."""
-    from sidecar.fukoconfig import ModelConfig, ReviewConfig
-
-    review = ReviewConfig(
-        compare=[CompareModel(provider="anthropic", name="a")],
-        model=ModelConfig(),
-    )
-    assert review.model == ModelConfig()
-    runner._warn_compare_overrides(review)
-    err = capsys.readouterr().err
-    assert "A/B compare mode active" in err
-    assert "[review.model]" in err
-
-
-def test_warn_compare_overrides_silent_with_only_compare(capsys):
-    from sidecar.fukoconfig import ReviewConfig
-
-    review = ReviewConfig(compare=[CompareModel(provider="anthropic", name="a")])
-    runner._warn_compare_overrides(review)
-    assert capsys.readouterr().err == ""
-
-
-def test_warn_compare_overrides_silent_when_compare_unset(capsys):
-    """The helper is a no-op without ``[[review.compare]]`` even when a pool or
-    explicit model is configured — it must not warn for non-compare reviews if
-    ever called outside the guarded ``review()`` dispatch."""
-    from sidecar.fukoconfig import ModelConfig, ReviewConfig
-
-    review = ReviewConfig(
-        providers=[ModelConfig(provider="anthropic", name="a")],
-        model=ModelConfig(provider="ollama", name="custom"),
-    )
-    runner._warn_compare_overrides(review)
-    assert capsys.readouterr().err == ""
-
-
-def test_warn_compare_overrides_prefers_pool_warning_over_model(capsys):
+def test_warn_legacy_config_nudges_migration_for_each_section(capsys):
     from sidecar.fukoconfig import ModelConfig, ReviewConfig
 
     review = ReviewConfig(
@@ -815,30 +747,82 @@ def test_warn_compare_overrides_prefers_pool_warning_over_model(capsys):
         providers=[ModelConfig(provider="ollama", name="b")],
         model=ModelConfig(provider="ollama", name="custom"),
     )
-    runner._warn_compare_overrides(review)
+    runner._warn_legacy_config(review)
     err = capsys.readouterr().err
-    assert "failover pool" in err
-    assert "[review.model] is ignored" not in err
+    assert "deprecated" in err
+    assert "[[review.compare]]" in err
+    assert "[[review.providers]]" in err
+    assert "[review.model]" in err
+    assert "[[review.models]]" in err
 
 
-def test_review_warns_when_compare_overrides_providers(monkeypatch, tmp_path, capsys):
+def test_warn_legacy_config_counts_explicitly_set_default_model(capsys):
+    """An explicitly-written ``[review.model]`` must warn even when its values
+    equal the defaults — the gate is *explicit configuration*, not *non-default
+    values*. Detected via Pydantic's ``model_fields_set``."""
+    from sidecar.fukoconfig import ModelConfig, ReviewConfig
+
+    review = ReviewConfig(model=ModelConfig())
+    assert review.model == ModelConfig()
+    runner._warn_legacy_config(review)
+    err = capsys.readouterr().err
+    assert "deprecated" in err
+    assert "[review.model]" in err
+
+
+def test_warn_legacy_config_says_legacy_ignored_when_models_set(capsys):
+    from sidecar.fukoconfig import ModelConfig, ReviewConfig, ReviewModel
+
+    review = ReviewConfig(
+        models=[ReviewModel(provider="zai-coding", name="glm-5.2")],
+        providers=[ModelConfig(provider="ollama", name="b")],
+    )
+    runner._warn_legacy_config(review)
+    err = capsys.readouterr().err
+    assert "ignored" in err
+    assert "[[review.providers]]" in err
+
+
+def test_warn_legacy_config_silent_with_only_unified_models(capsys):
+    from sidecar.fukoconfig import ReviewConfig, ReviewModel
+
+    review = ReviewConfig(models=[ReviewModel(provider="zai-coding", name="glm-5.2")])
+    runner._warn_legacy_config(review)
+    assert capsys.readouterr().err == ""
+
+
+def test_warn_legacy_config_silent_on_bare_defaults(capsys):
+    from sidecar.fukoconfig import ReviewConfig
+
+    runner._warn_legacy_config(ReviewConfig())
+    assert capsys.readouterr().err == ""
+
+
+def test_review_single_compare_entry_degrades_to_solo(monkeypatch, tmp_path):
+    """One active model is a solo review, even when written as a legacy
+    ``[[review.compare]]`` entry: no branch header, persistent comments, and
+    ``describe`` stays available."""
     cfg = tmp_path / ".fuko.toml"
     cfg.write_text(
-        '[[review.providers]]\nprovider = "anthropic"\nname = "a"\n'
-        '[[review.providers]]\nprovider = "ollama"\nname = "b"\n'
-        '[[review.compare]]\nprovider = "anthropic"\nname = "a"\n'
-        '[[review.compare]]\nprovider = "ollama"\nname = "b"\n',
+        '[review]\ntools = ["review", "describe"]\n'
+        '[[review.compare]]\nprovider = "anthropic"\nname = "a"\n',
         encoding="utf-8",
     )
     monkeypatch.setenv("ANTHROPIC_KEY", "k")
     _stub_compare_io(monkeypatch)
-    monkeypatch.setattr(runner, "_post_branch_header", lambda *a: None)
+
+    def boom(*a, **k):
+        raise AssertionError("solo review must not post an A/B branch header")
+
+    monkeypatch.setattr(runner, "_post_branch_header", boom)
+    calls = []
 
     class FakeBackend:
         def build_env(self, preset, model, knowledge, tools):
             return {}
 
         def invoke(self, pr, env, tools):
+            calls.append({"tools": list(tools), "env": env})
             return InvokeResult(returncode=0)
 
         def normalize_output(self, pr, model="", *, compare_label=None, **_kw):
@@ -847,9 +831,60 @@ def test_review_warns_when_compare_overrides_providers(monkeypatch, tmp_path, ca
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
     result = runner.review("https://github.com/o/r/pull/7", str(cfg))
     assert result.returncode == 0
-    err = capsys.readouterr().err
-    assert "A/B compare mode active" in err
-    assert "2-provider failover pool" in err
+    assert calls[0]["tools"] == ["review", "describe"]
+    assert "PR_REVIEWER__PERSISTENT_COMMENT" not in calls[0]["env"]
+
+
+def test_review_unified_models_run_compare_with_backup_failover(monkeypatch, tmp_path, capsys):
+    """Two actives from ``[[review.models]]`` A/B as usual, and a branch whose
+    primary throttles falls back to the shared backup instead of losing the
+    round — the backup runs under the throttled branch's slot."""
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text(
+        "[[review.models]]\n"
+        'provider = "anthropic"\nname = "a"\n'
+        "[[review.models]]\n"
+        'provider = "ollama"\nname = "b"\n'
+        "[[review.models]]\n"
+        'provider = "openrouter"\nname = "fallback"\nrole = "backup"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ANTHROPIC_KEY", "k")
+    monkeypatch.setenv("OPENROUTER_KEY", "k")
+    _stub_compare_io(monkeypatch)
+    monkeypatch.setattr(runner, "_post_branch_header", lambda *a: None)
+    monkeypatch.setattr(runner, "_cb_trip", lambda *a: None)
+
+    seen = []
+
+    class FakeBackend:
+        def build_env(self, preset, model, knowledge, tools):
+            return {}
+
+        def invoke(self, pr, env, tools):
+            seen.append(None)
+            if len(seen) == 1:
+                return InvokeResult(returncode=1, detail="429 rate limit", throttled=True)
+            return InvokeResult(returncode=0)
+
+        def normalize_output(self, pr, model="", *, compare_label=None, **_kw):
+            return []
+
+    backend = FakeBackend()
+    models_used = []
+    original_build_env = backend.build_env
+
+    def recording_build_env(preset, model, knowledge, tools):
+        models_used.append(f"{model.provider}/{model.name}")
+        return original_build_env(preset, model, knowledge, tools)
+
+    backend.build_env = recording_build_env
+    monkeypatch.setattr(runner, "get_backend", lambda name, config=None: backend)
+
+    result = runner.review("https://github.com/o/r/pull/7", str(cfg))
+    assert result.returncode == 0
+    assert models_used == ["anthropic/a", "openrouter/fallback", "ollama/b"]
+    assert capsys.readouterr().err.count("A/B branch") == 2
 
 
 def test_post_branch_header_skips_without_token(monkeypatch):

@@ -66,9 +66,12 @@ stdlib-first rule — and matches PR-Agent's own config convention.
 backend = "pr-agent"              # which driver
 tools = ["review", "improve"]     # backend tools to run
 
-[review.model]
+[[review.models]]
 provider = "zai-coding"           # a preset NAME (see presets)
 name = "glm-5.2"
+# role = "active" (default) | "backup". Every active entry reviews each PR
+# (2+ actives = A/B, one branch per active); backups are shared failover
+# targets when an active's provider throttles. Entry order = priority.
 
 [knowledge]
 store = "postgres"                # postgres | sqlite-vec
@@ -89,7 +92,7 @@ base_url = "http://localhost:11434/v1"
 Switching the review model is a two-line edit plus a key:
 
 ```toml
-[review.model]
+[[review.models]]
 provider = "ollama"
 name = "qwen2.5-coder:32b"
 ```

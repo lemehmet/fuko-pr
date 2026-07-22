@@ -10,11 +10,12 @@
 # github-actions[bot]. Secrets: FUKO_URL, FUKO_TOKEN (optional), plus the model
 # provider's key (e.g. ZAI_KEY or ANTHROPIC_KEY) matching your .fuko.toml.
 #
-# Concurrent A/B (optional): to have two `[[review.compare]]` branches post under
-# separate identities, register a SECOND App and set VARIABLE FUKO_APP_ID_B +
-# secret FUKO_APP_PRIVATE_KEY_B; give each compare branch a `token_env`
+# Concurrent A/B (optional): to have two active `[[review.models]]` entries post
+# under separate identities, register a SECOND App and set VARIABLE FUKO_APP_ID_B +
+# secret FUKO_APP_PRIVATE_KEY_B; give each active entry a `token_env`
 # (FUKO_GITHUB_TOKEN_A / FUKO_GITHUB_TOKEN_B). Leave FUKO_APP_ID_B unset for the
-# default single-identity behavior.
+# default single-identity behavior. Entries with role = "backup" need no App of
+# their own — a promoted backup posts under the branch it rescued.
 
 name: fuko-pr review
 

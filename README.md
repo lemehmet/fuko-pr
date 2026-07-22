@@ -71,10 +71,13 @@ file — no paid APIs, no server.
    # repo builds (see "Deploying as a GitHub Action" below):
    image = "ghcr.io/OWNER/pr-agent:0.38.0"   # pin the matching @sha256 digest from your build
 
-   [review.model]
-   provider = "ollama"                  # zai-coding | anthropic | openai | ollama
+   [[review.models]]
+   provider = "ollama"                  # zai-coding | openrouter | anthropic | openai | ollama
    name = "qwen2.5-coder:32b"
    base_url = "http://host.docker.internal:11434"  # reach host Ollama from the container
+   # Add more entries to scale up: every active entry (the default role) reviews
+   # each PR — two or more actives run as an A/B comparison — while entries with
+   # role = "backup" are shared failover targets used when a provider throttles.
 
    [knowledge]
    store = "sqlite-vec"
@@ -99,7 +102,9 @@ file — no paid APIs, no server.
 
 Switching the review model later is two lines in `.fuko.toml` plus the matching
 key secret — e.g. `provider = "anthropic"`, `name = "claude-sonnet-4-6"`,
-`ANTHROPIC_KEY=…`. No other changes.
+`ANTHROPIC_KEY=…`. No other changes. (The pre-unification `[review.model]`,
+`[[review.providers]]`, and `[[review.compare]]` sections still parse — they map
+onto `[[review.models]]` with a deprecation nudge on stderr.)
 
 ## Deploying as a GitHub Action
 

@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from sidecar.fukoconfig import FukoConfig, ModelConfig, ReviewConfig, load_config
+from sidecar.fukoconfig import FukoConfig, ModelConfig, ReviewConfig, ReviewModel, load_config
 
 
 def test_non_positive_max_model_tokens_is_rejected():
@@ -34,6 +34,42 @@ def test_failover_strategy_and_positive_cooldown_accepted():
 
 def test_compare_defaults_to_empty():
     assert ReviewConfig().compare == []
+
+
+def test_models_defaults_to_empty():
+    assert ReviewConfig().models == []
+
+
+def test_models_roles_parse_from_toml(tmp_path):
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text(
+        "[[review.models]]\n"
+        'provider = "zai-coding"\n'
+        'name = "glm-5.2"\n'
+        'token_env = "FUKO_GITHUB_TOKEN_DORIAN"\n'
+        "[[review.models]]\n"
+        'provider = "openrouter"\n'
+        'name = "deepseek/deepseek-v4-pro"\n'
+        'role = "backup"\n',
+        encoding="utf-8",
+    )
+    loaded = load_config(cfg)
+    assert [(m.provider, m.role) for m in loaded.review.models] == [
+        ("zai-coding", "active"),
+        ("openrouter", "backup"),
+    ]
+    assert loaded.review.models[0].token_env == "FUKO_GITHUB_TOKEN_DORIAN"
+    assert loaded.review.models[1].token_env is None
+
+
+def test_models_unknown_role_is_rejected():
+    with pytest.raises(ValidationError):
+        ReviewModel(provider="ollama", name="x", role="standby")
+
+
+def test_models_all_backup_is_rejected():
+    with pytest.raises(ValidationError):
+        ReviewConfig(models=[ReviewModel(provider="ollama", name="x", role="backup")])
 
 
 def test_compare_entries_parse_with_token_env(tmp_path):

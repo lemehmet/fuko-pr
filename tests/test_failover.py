@@ -3,7 +3,7 @@
 from sidecar import circuit_breaker, runner
 from sidecar.backends import pragent
 from sidecar.backends.base import InvokeResult, PRRef
-from sidecar.fukoconfig import FukoConfig, ModelConfig, ReviewConfig
+from sidecar.fukoconfig import FukoConfig, ModelConfig, ReviewConfig, ReviewModel
 
 
 class _FakeBackend:
@@ -120,6 +120,50 @@ def test_review_demotes_provider_that_cannot_hold_the_job(monkeypatch):
 
     assert result.returncode == 0
     assert [m.provider for m in backend.models] == ["anthropic"]
+
+
+def test_unified_single_active_fails_over_to_backup(monkeypatch):
+    cfg = FukoConfig(
+        review=ReviewConfig(
+            models=[
+                ReviewModel(provider="zai-coding", name="glm-5.2"),
+                ReviewModel(provider="anthropic", name="claude-sonnet-4-6", role="backup"),
+            ],
+            cooldown_seconds=120,
+        )
+    )
+    backend = _FakeBackend(
+        [
+            InvokeResult(returncode=1, detail="429 rate limit", throttled=True),
+            InvokeResult(returncode=0),
+        ]
+    )
+    trips = _wire(monkeypatch, cfg, backend)
+
+    result = runner.review("https://github.com/o/r/pull/1")
+
+    assert result.returncode == 0
+    assert [m.provider for m in backend.models] == ["zai-coding", "anthropic"]
+    assert trips == [("zai-coding", 120)]
+    assert backend.normalized == "anthropic/claude-sonnet-4-6"
+
+
+def test_unified_backup_never_leads_when_active_is_healthy(monkeypatch):
+    cfg = FukoConfig(
+        review=ReviewConfig(
+            models=[
+                ReviewModel(provider="zai-coding", name="glm-5.2"),
+                ReviewModel(provider="anthropic", name="claude-sonnet-4-6", role="backup"),
+            ]
+        )
+    )
+    backend = _FakeBackend([InvokeResult(returncode=0)])
+    _wire(monkeypatch, cfg, backend)
+
+    result = runner.review("https://github.com/o/r/pull/1")
+
+    assert result.returncode == 0
+    assert [m.provider for m in backend.models] == ["zai-coding"]
 
 
 def test_legacy_single_model_still_runs(monkeypatch):

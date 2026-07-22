@@ -10,17 +10,40 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from .fukoconfig import ModelConfig, ReviewConfig
+from .fukoconfig import ModelConfig, ReviewConfig, ReviewModel
 
 
-def resolve_pool(review: ReviewConfig) -> list[ModelConfig]:
-    """Return the effective provider pool.
+def resolve_models(review: ReviewConfig) -> list[ReviewModel]:
+    """Return the unified model list, mapping deprecated sections when needed.
 
-    Uses ``[[review.providers]]`` when present, otherwise the single
-    ``[review.model]`` as a one-entry pool -- so the legacy single-model config
-    keeps working unchanged.
+    ``[[review.models]]`` is the canonical surface and wins when non-empty. The
+    deprecated sections map onto it losslessly: ``[[review.compare]]`` becomes
+    all-active entries, ``[[review.providers]]`` becomes its first entry active
+    with the rest as backups (config order preserved, so failover priority is
+    unchanged), and the single ``[review.model]`` becomes one active entry.
+    Precedence among the deprecated sections matches the old dispatch:
+    ``compare`` over ``providers`` over ``model``.
     """
-    return list(review.providers) if review.providers else [review.model]
+    if review.models:
+        return list(review.models)
+    if review.compare:
+        return [ReviewModel(**m.model_dump()) for m in review.compare]
+    if review.providers:
+        return [
+            ReviewModel(**m.model_dump(), role="active" if index == 0 else "backup")
+            for index, m in enumerate(review.providers)
+        ]
+    return [ReviewModel(**review.model.model_dump())]
+
+
+def partition_roles(
+    models: Iterable[ReviewModel],
+) -> tuple[list[ReviewModel], list[ReviewModel]]:
+    """Split ``models`` into ``(actives, backups)``, preserving config order."""
+    materialized = list(models)
+    actives = [m for m in materialized if m.role == "active"]
+    backups = [m for m in materialized if m.role == "backup"]
+    return actives, backups
 
 
 def order_pool(

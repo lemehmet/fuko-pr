@@ -27,14 +27,14 @@ from .backends import get_backend
 from .backends.base import InvokeResult, PRRef
 from .fukoconfig import (
     DEFAULT_CONFIG_PATH,
-    CompareModel,
     FukoConfig,
     KnowledgeConfig,
     ModelConfig,
     ReviewConfig,
+    ReviewModel,
     load_config,
 )
-from .pool import order_pool, resolve_pool
+from .pool import order_pool, partition_roles, resolve_models
 from .presets import get_preset
 from .sizing import required_context
 from .stores import get_store
@@ -450,11 +450,11 @@ def _run_pool(
     return result
 
 
-def _resolve_branch_identities(compare: list[CompareModel], api_url: str) -> list[str] | None:
+def _resolve_branch_identities(actives: list[ReviewModel], api_url: str) -> list[str] | None:
     """Return one distinct-identity GitHub token per branch, or ``None`` (sequential).
 
     Concurrent A/B mode is all-or-nothing and needs no config flag: it activates
-    *iff* every compare entry names a ``token_env`` whose env var resolves to a
+    *iff* every active entry names a ``token_env`` whose env var resolves to a
     non-empty value **and** the tokens resolve to distinct GitHub *actors*. If any
     branch lacks ``token_env``, its env var is unset/empty, an actor lookup fails,
     or two branches resolve to the same actor, the whole run falls back to the
@@ -467,7 +467,7 @@ def _resolve_branch_identities(compare: list[CompareModel], api_url: str) -> lis
     """
     tokens: list[str] = []
     actors: list[str] = []
-    for entry in compare:
+    for entry in actives:
         if not entry.token_env:
             return None
         value = os.environ.get(entry.token_env, "")
@@ -488,7 +488,8 @@ def _run_compare_branch(
     pr: PRRef,
     knowledge: str,
     review: ReviewConfig,
-    entry: CompareModel,
+    entry: ReviewModel,
+    backups: list[ReviewModel],
     cooled: set[str],
     required: int | None,
     tools: list[str],
@@ -499,9 +500,11 @@ def _run_compare_branch(
 
     Posts the branch's model-labelled header, then its fresh summary + inline
     suggestions, marking and editing only under ``token`` so GitHub's permissions
-    stop this branch touching another branch's comments. Returns ``(label, result)``.
-    Any exception is captured as a failed result so one branch's failure can never
-    abort or corrupt a sibling running concurrently.
+    stop this branch touching another branch's comments. The branch's pool is its
+    active entry followed by the shared ``backups``, so a throttled primary fails
+    over instead of losing the round. Returns ``(label, result)``. Any exception
+    is captured as a failed result so one branch's failure can never abort or
+    corrupt a sibling running concurrently.
     """
     label = f"{entry.provider}/{entry.name}"
     try:
@@ -512,7 +515,7 @@ def _run_compare_branch(
             knowledge,
             _github_env(token),
             review,
-            [entry],
+            [entry, *backups],
             cooled,
             required,
             tools=tools,
@@ -533,12 +536,14 @@ def _review_compare(
     knowledge: str,
     gh_env: dict[str, str],
     review: ReviewConfig,
+    actives: list[ReviewModel],
+    backups: list[ReviewModel],
     token: str,
     api_url: str,
     cooled: set[str],
     required: int | None,
 ) -> InvokeResult:
-    """Review ``pr`` once per ``review.compare`` entry for an A/B model comparison.
+    """Review ``pr`` once per active model for an A/B comparison.
 
     Two execution modes, auto-selected by :func:`_resolve_branch_identities`:
 
@@ -550,6 +555,11 @@ def _review_compare(
       one after another under the shared token exactly as before, marker injection
       staying idempotent so a later branch never relabels an earlier one's
       suggestions.
+
+    Each branch's pool is its own active entry followed by the shared ``backups``,
+    so a throttled primary fails over instead of losing the round. Two branches
+    whose primaries both throttle may converge on the same backup model; their
+    posts stay separable by identity (concurrent) or model label (sequential).
 
     ``describe`` is dropped in both modes because a PR has one description the
     branches would otherwise overwrite. The overall result is green when any branch
@@ -567,14 +577,14 @@ def _review_compare(
             detail="A/B compare disables 'describe'; configure at least one non-describe tool",
         )
 
-    identities = _resolve_branch_identities(review.compare, api_url)
+    identities = _resolve_branch_identities(actives, api_url)
     if identities is not None:
         print(
-            f"fuko: A/B compare mode — running {len(review.compare)} branches concurrently "
+            f"fuko: A/B compare mode — running {len(actives)} branches concurrently "
             "under per-branch identities",
             file=sys.stderr,
         )
-        with ThreadPoolExecutor(max_workers=len(review.compare)) as pool:
+        with ThreadPoolExecutor(max_workers=len(actives)) as pool:
             futures = [
                 pool.submit(
                     _run_compare_branch,
@@ -583,20 +593,21 @@ def _review_compare(
                     knowledge,
                     review,
                     entry,
+                    backups,
                     cooled,
                     required,
                     tools,
                     api_url,
                     branch_token,
                 )
-                for entry, branch_token in zip(review.compare, identities)
+                for entry, branch_token in zip(actives, identities)
             ]
             outcomes = [f.result() for f in futures]
     else:
         outcomes = []
-        for index, entry in enumerate(review.compare):
+        for index, entry in enumerate(actives):
             label = f"{entry.provider}/{entry.name}"
-            print(f"fuko: A/B branch {index + 1}/{len(review.compare)}: {label}", file=sys.stderr)
+            print(f"fuko: A/B branch {index + 1}/{len(actives)}: {label}", file=sys.stderr)
             _post_branch_header(pr, token, api_url, label)
             result = _run_pool(
                 backend,
@@ -604,7 +615,7 @@ def _review_compare(
                 knowledge,
                 gh_env,
                 review,
-                [entry],
+                [entry, *backups],
                 cooled,
                 required,
                 tools=tools,
@@ -620,31 +631,36 @@ def _review_compare(
     return InvokeResult(returncode=rc, detail=detail)
 
 
-def _warn_compare_overrides(review: ReviewConfig) -> None:
-    """Warn when A/B compare silently sidelines a configured failover pool or model.
+def _warn_legacy_config(review: ReviewConfig) -> None:
+    """Warn when deprecated model sections are in play, or silently overridden.
 
-    ``[[review.compare]]`` wins by strict precedence over ``[[review.providers]]``
-    and ``[review.model]`` (each branch is a single model; A/B deliberately does no
-    failover). That override is intended, but should not be silent: a user who has a
-    working failover pool and later adds compare entries would otherwise lose
-    failover with no signal. Emits a one-line stderr warning naming what is ignored.
-
-    No-op unless ``[[review.compare]]`` is actually set, so the helper stays
-    self-consistent if called outside the guarded ``review()`` dispatch.
+    ``[[review.models]]`` is the canonical surface. When it is set alongside any
+    deprecated section (``[[review.compare]]``, ``[[review.providers]]``, or an
+    explicitly written ``[review.model]``), the deprecated sections are ignored
+    -- say so, or the user gets a silent surprise. When only deprecated sections
+    are set they keep working through :func:`sidecar.pool.resolve_models`, but
+    each run nudges toward migrating. Silent when nothing deprecated was written
+    (the implicit default model is not a migration candidate).
     """
-    if not review.compare:
-        return
+    legacy = []
+    if review.compare:
+        legacy.append("[[review.compare]]")
     if review.providers:
+        legacy.append("[[review.providers]]")
+    if "model" in review.model_fields_set:
+        legacy.append("[review.model]")
+    if not legacy:
+        return
+    joined = ", ".join(legacy)
+    if review.models:
         print(
-            f"fuko: A/B compare mode active — the {len(review.providers)}-provider "
-            "failover pool ([[review.providers]]) is ignored (compare runs each "
-            "branch as a single model with no failover)",
+            f"fuko: [[review.models]] is set — deprecated {joined} ignored",
             file=sys.stderr,
         )
-    elif "model" in review.model_fields_set:
+    else:
         print(
-            "fuko: A/B compare mode active — the single [review.model] is ignored "
-            "(compare reviews only the listed [[review.compare]] models)",
+            f"fuko: {joined} deprecated — migrate to [[review.models]] entries "
+            'with role = "active" | "backup"',
             file=sys.stderr,
         )
 
@@ -652,10 +668,11 @@ def _warn_compare_overrides(review: ReviewConfig) -> None:
 def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
     """Run a full review for ``pr_url`` through the configured backend.
 
-    With a single model (or a ``[[review.providers]]`` pool) the PR is reviewed
-    once, failing over across the pool on throttling. When ``[[review.compare]]``
-    is set, the PR is instead A/B'd once per listed model (see
-    :func:`_review_compare`).
+    The unified ``[[review.models]]`` list drives the run: with one active entry
+    the PR is reviewed once, failing over across the backups on throttling; with
+    several actives the PR is A/B'd once per active, each branch sharing the same
+    backups (see :func:`_review_compare`). Deprecated sections are mapped onto
+    the unified list by :func:`sidecar.pool.resolve_models`.
     """
     cfg: FukoConfig = load_config(config_path)
     pr = parse_pr_url(pr_url)
@@ -669,11 +686,24 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
     cooled = _cb_cooldowns()
     required = _estimate_required_context(pr, token, api_url, knowledge)
 
-    if cfg.review.compare:
-        _warn_compare_overrides(cfg.review)
+    _warn_legacy_config(cfg.review)
+    actives, backups = partition_roles(resolve_models(cfg.review))
+
+    if len(actives) > 1:
         return _review_compare(
-            backend, pr, knowledge, gh_env, cfg.review, token, api_url, cooled, required
+            backend,
+            pr,
+            knowledge,
+            gh_env,
+            cfg.review,
+            actives,
+            backups,
+            token,
+            api_url,
+            cooled,
+            required,
         )
 
-    pool = resolve_pool(cfg.review)
-    return _run_pool(backend, pr, knowledge, gh_env, cfg.review, pool, cooled, required)
+    return _run_pool(
+        backend, pr, knowledge, gh_env, cfg.review, [*actives, *backups], cooled, required
+    )

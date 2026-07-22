@@ -13,77 +13,64 @@ tools = ["review", "improve"]   # PR-Agent tools to run
 # host Ollama on Linux: docker_extra_args = ["--add-host", "host.docker.internal:host-gateway"]
 # docker_extra_args = []
 
-[review.model]
-# Pick a provider preset + model. Switching providers is just these two lines
-# plus the matching key secret.
+# One unified [[review.models]] list drives everything. Each entry is a model on
+# a provider preset, plus a role:
+#
+#   role = "active" (default) — reviews EVERY PR. One active is a plain solo
+#   review; two or more actives A/B the PR, each branch posting its own fresh
+#   summary under a "🤖 fuko A/B — model <id>" header. `describe` is
+#   auto-disabled in A/B mode (a PR has one description).
+#
+#   role = "backup" — never starts a review. A shared failover target every
+#   active falls back to when its provider throttles (429/quota/overload/
+#   timeout). A throttle trips the provider's breaker (the cooldown is global
+#   per provider and shared across repos, since the API key is shared;
+#   persisted in the sidecar's Postgres); a non-throttle error fails fast.
+#   Entry order = failover priority.
+#
 # Known presets: zai-coding, ollama, ollama-cloud, openrouter, anthropic, openai.
-provider = "zai-coding"         # key from env ZAI_KEY
-name = "glm-5.2"
-# provider = "anthropic"        # key from env ANTHROPIC_KEY
-# name = "claude-sonnet-4-6"
-# provider = "ollama"           # local, no key. PR-Agent runs in a container, so
-# name = "qwen2.5-coder:32b"    # point base_url at the host, not localhost:
-# base_url = "http://host.docker.internal:11434"
-
-# Throttle resilience: instead of one [review.model], list an ordered POOL of
-# providers. Config order is priority — the first eligible provider is pinned for
-# the whole review, and a throttle (429/quota/overload/timeout) trips its breaker
-# and fails the job over to the next one. A non-throttle error fails fast. The
-# breaker cooldown is shared across repos (global per provider, since the API key
-# is shared), persisted in the sidecar's Postgres. When [[review.providers]] is
-# set it takes precedence over [review.model].
-# strategy = "failover"          # only strategy for now (round-robin/weighted later)
-# cooldown_seconds = 300         # how long a throttled provider stays skipped
+#
+# Concurrent A/B (per-branch identities): give EVERY active a `token_env` whose
+# env var resolves to a distinct GitHub actor (e.g. two GitHub Apps), and the
+# branches run concurrently — each posts and edits its own comments under its
+# own token (distinct throttle buckets, author separation). If any active lacks
+# a distinct token the whole run falls back to sequential under the base token.
+# Wire the tokens in the workflow (one `create-github-app-token` step per App).
 #
 # A provider whose max_context can't hold the job (diff + knowledge estimate) is
-# demoted to last resort. Running the SAME model on two providers (different keys/
-# endpoints, so separate throttle buckets) is the simplest real failover.
+# demoted to last resort. max_model_tokens overrides PR-Agent's per-review token
+# budget — the cap it applies BEFORE the model's window (it defaults to 32000
+# and would otherwise prune big diffs); the GLM presets default it to 512000.
 #
-# max_model_tokens overrides PR-Agent's per-review token budget — the cap it
-# applies BEFORE the model's window (it defaults to 32000 and would otherwise
-# prune big diffs). The GLM presets default this to 512000; set it lower here to
-# rein in cost/latency on a repo.
-#
-# [[review.providers]]
-# provider = "zai-coding"        # GLM-5.2 via z.ai, key from env ZAI_KEY (priority)
-# name = "glm-5.2"
-# max_context = 1000000
-# max_model_tokens = 256000      # optional: cap below the preset's 512000 default
-#
-# [[review.providers]]
-# provider = "ollama-cloud"      # same model via Ollama Cloud, key from OLLAMA_API_KEY
-# name = "glm-5.2:cloud"
-# max_context = 976000           # ~1M window too (a touch under z.ai); both hold any PR
+# cooldown_seconds = 300         # how long a throttled provider stays skipped
 
-# A/B comparison: list two or more models and `fuko review` reviews the PR once
-# per model, each branch posting its own fresh summary under a
-# "🤖 fuko A/B — model <id>" header so you can compare them side by side. The
-# `describe` tool is auto-disabled in this mode (a PR has one description). Use a
-# shared Postgres knowledge base if several reviewers will WRITE to it — the
-# server-free sqlite-vec store is single-writer (see docs/deployment.md).
-#
-# Concurrent mode (per-branch identities): give EVERY branch a `token_env` whose
-# env var resolves to a distinct GitHub actor (e.g. two GitHub Apps), and the
-# branches run concurrently — each posts and edits its own comments under its own
-# token (distinct throttle buckets, author separation). If any branch lacks a
-# distinct token the whole run falls back to sequential under the base token. Wire
-# the tokens in the workflow (one `create-github-app-token` step per App).
-#
-# [[review.compare]]
-# provider = "anthropic"         # key from ANTHROPIC_KEY
-# name = "claude-sonnet-4-6"
-# token_env = "FUKO_GITHUB_TOKEN_A"   # this branch posts under the App in FUKO_GITHUB_TOKEN_A
-#
-# [[review.compare]]
-# provider = "openrouter"        # any OpenRouter model, key from OPENROUTER_KEY
-# name = "deepseek/deepseek-v4-pro"    # vendor/model id; append :nitro to route by throughput
+[[review.models]]
+provider = "zai-coding"         # key from env ZAI_KEY
+name = "glm-5.2"
+max_context = 1000000
+# token_env = "FUKO_GITHUB_TOKEN_A"   # post under the App minted into this env var
+# max_model_tokens = 256000     # optional: cap below the preset's 512000 default
+
+# [[review.models]]
+# provider = "openrouter"       # any OpenRouter model, key from OPENROUTER_KEY
+# name = "deepseek/deepseek-v4-pro"   # vendor/model id; append :nitro to route by throughput
 # max_context = 1048576
-#
-# [[review.compare]]
-# provider = "ollama-cloud"      # hosted model via Ollama Cloud, key from OLLAMA_API_KEY
+# token_env = "FUKO_GITHUB_TOKEN_B"   # distinct actor from A => the two run concurrently
+
+# [[review.models]]
+# provider = "ollama-cloud"     # same model via Ollama Cloud, key from OLLAMA_API_KEY
 # name = "glm-5.2:cloud"
 # max_context = 976000
-# token_env = "FUKO_GITHUB_TOKEN_B"   # distinct actor from A => the two run concurrently
+# role = "backup"               # runs only when an active's provider throttles
+#
+# Running the SAME model on two providers (different keys/endpoints, so separate
+# throttle buckets) is the simplest real failover. Use a shared Postgres
+# knowledge base if several reviewers will WRITE to it — the server-free
+# sqlite-vec store is single-writer (see docs/deployment.md).
+#
+# Deprecated but still parsed, mapped onto [[review.models]] with a stderr
+# nudge: [review.model] (one active), [[review.providers]] (first entry active,
+# rest backups), [[review.compare]] (all active).
 
 [knowledge]
 store = "postgres"              # postgres | sqlite-vec
