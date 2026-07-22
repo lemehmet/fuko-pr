@@ -7,6 +7,11 @@ previously hand-tuned in the GitHub workflow: the coding-vs-paas endpoint,
 ``CONFIG__CUSTOM_MODEL_MAX_TOKENS`` for models absent from PR-Agent's table, and
 the raised ``CONFIG__AI_TIMEOUT`` for slow reasoning models.
 
+Output relays live: each tool's merged stdout/stderr streams line-by-line into
+the runner's stderr as it is produced (``CONFIG__VERBOSITY_LEVEL=1`` +
+``PYTHONUNBUFFERED=1`` make PR-Agent chatty and prompt), so CI logs show
+progress in real time while still being scanned for throttle signatures.
+
 PR-Agent is invoked via its Docker image rather than pip: the package's pinned
 dependencies are mutually unsatisfiable (e.g. ``google-cloud-storage==2.10.0``
 vs ``google-cloud-aiplatform==1.154.0`` needing ``>=3.10.0``), so the official
@@ -29,19 +34,6 @@ from ..presets import ProviderPreset
 from ..throttle import is_throttle
 from .base import InvokeResult, PRRef
 from ..signals import ReviewSignal, extract_markers, with_marker, with_visible_label
-
-
-def _echo(stdout: str | None, stderr: str | None) -> None:
-    """Re-emit a captured tool's output so CI logs still show PR-Agent's run.
-
-    Output is captured (not inherited) so it can be scanned for a throttle
-    signature; echoing keeps the logs intact at the cost of buffering until each
-    tool finishes.
-    """
-    if stdout:
-        print(stdout, end="", file=sys.stdout)
-    if stderr:
-        print(stderr, end="", file=sys.stderr)
 
 
 _TOOL_FLAGS = {
@@ -91,8 +83,10 @@ class PrAgentBackend:
         env: dict[str, str] = {
             "CONFIG__MODEL": model_id,
             "CONFIG__FALLBACK_MODELS": f'["{model_id}"]',
+            "CONFIG__VERBOSITY_LEVEL": "1",
             "PR_CODE_SUGGESTIONS__COMMITABLE_CODE_SUGGESTIONS": "true",
             "PR_REVIEWER__REQUIRE_TICKET_ANALYSIS_REVIEW": "false",
+            "PYTHONUNBUFFERED": "1",
         }
 
         base_url = model.base_url or preset.base_url
@@ -134,8 +128,12 @@ class PrAgentBackend:
         named tool (``review``, ``improve``, ...); no GitHub event payload is
         required, so the runner works from any CI or a laptop.
 
-        Output is captured and re-echoed so it can be scanned for a throttle
-        signature. A throttle (or timeout) on a required tool returns early with
+        Output streams LIVE: stdout+stderr are merged and relayed line by line
+        to this process's stderr as the tool produces them, so a CI log shows
+        PR-Agent's progress in real time instead of one buffered dump when the
+        tool exits (the old ``subprocess.run`` capture). The relayed lines are
+        also accumulated and scanned for a throttle signature on a non-zero
+        exit. A throttle (or timeout) on a required tool returns early with
         ``throttled=True`` so the runner fails over to the next provider without
         running the remaining tools; the same on an optional tool is a non-fatal
         skip.
@@ -161,25 +159,12 @@ class PrAgentBackend:
         for index, tool in enumerate(tools):
             name = f"fuko-pragent-{os.getpid()}-{threading.get_ident()}-{index}"
             optional = tool in self.optional_tools
-            try:
-                proc = subprocess.run(
-                    [*docker_base, "--name", name, self.image, "--pr_url", pr.url, tool],
-                    env=full_env,
-                    check=False,
-                    timeout=self.tool_timeout,
-                    capture_output=True,
-                    text=True,
-                )
-            except subprocess.TimeoutExpired as exc:
-                # Reap the container so a hung tool can't outlive the killed
-                # subprocess on a persistent self-hosted runner.
-                _echo(exc.stdout, exc.stderr)
-                subprocess.run(
-                    ["docker", "kill", name],
-                    check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
+            code, blob, timed_out = self._stream_tool(
+                [*docker_base, "--name", name, self.image, "--pr_url", pr.url, tool],
+                full_env,
+                name,
+            )
+            if timed_out:
                 what = f"{tool} timed out after {self.tool_timeout}s (container killed)"
                 if not optional:
                     return InvokeResult(
@@ -188,19 +173,100 @@ class PrAgentBackend:
                 _record(tool, 124, what)
                 continue
 
-            _echo(proc.stdout, proc.stderr)
-            if proc.returncode != 0:
-                blob = (proc.stdout or "") + "\n" + (proc.stderr or "")
-                throttled = is_throttle(proc.returncode, blob)
+            if code != 0:
+                throttled = is_throttle(code, blob)
                 if throttled and not optional:
                     return InvokeResult(
-                        returncode=proc.returncode,
-                        detail="; ".join([*details, f"{tool} throttled (exit {proc.returncode})"]),
+                        returncode=code,
+                        detail="; ".join([*details, f"{tool} throttled (exit {code})"]),
                         throttled=True,
                     )
                 suffix = " (throttled)" if throttled else ""
-                _record(tool, proc.returncode, f"{tool} exited {proc.returncode}{suffix}")
+                _record(tool, code, f"{tool} exited {code}{suffix}")
         return InvokeResult(returncode=rc, detail="; ".join(details))
+
+    def _stream_tool(
+        self, cmd: list[str], full_env: dict[str, str], container: str
+    ) -> tuple[int, str, bool]:
+        """Run one docker command, relaying its merged output live.
+
+        Returns ``(returncode, captured_output, timed_out)``. stdout and stderr
+        are merged (one pipe preserves interleaving order) and each line is
+        printed to this process's stderr with an immediate flush -- on a GitHub
+        runner that is what makes the review branch's progress visible while it
+        runs. A reader thread drains the pipe so a chatty tool can never fill
+        the pipe buffer and deadlock against ``wait()``. On the normal path the
+        reader is joined WITHOUT a timeout: the exited child was the pipe's
+        only writer, so EOF is guaranteed and the join is what guarantees
+        ``captured`` is complete before the throttle scan reads it (a timed
+        join could truncate the blob and miss a throttle signature). On
+        timeout the container is reaped (a hung tool must not outlive the
+        killed subprocess on a persistent self-hosted runner); if the docker
+        client itself won't exit after the kill (unresponsive daemon) it is
+        killed directly so it can't leak, the reader join IS bounded (a stuck
+        writer may never EOF), and the possibly-partial capture is acceptable
+        because a timeout already reports ``throttled=True`` unconditionally.
+        The docker kill itself is bounded too -- it is reached precisely when
+        the daemon may be unresponsive. On every path the pipe is explicitly
+        closed before returning (one leaked fd per tool adds up on a
+        persistent runner), which also unblocks a reader stuck mid-read.
+        """
+        captured: list[str] = []
+        proc = subprocess.Popen(
+            cmd,
+            env=full_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+
+        def _relay() -> None:
+            for line in proc.stdout:
+                print(line, end="", file=sys.stderr, flush=True)
+                captured.append(line)
+
+        reader = threading.Thread(target=_relay, daemon=True)
+        reader.start()
+        timed_out = False
+        try:
+            code = proc.wait(timeout=self.tool_timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            code = 124
+            try:
+                subprocess.run(
+                    ["docker", "kill", container],
+                    check=False,
+                    timeout=30,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except subprocess.TimeoutExpired:
+                pass
+            try:
+                proc.wait(timeout=10)
+            except Exception:
+                proc.kill()
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
+            reader.join(timeout=10)
+        else:
+            reader.join()
+
+        if reader.is_alive():
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
+            reader.join(timeout=2)
+        try:
+            proc.stdout.close()
+        except Exception:
+            pass
+        return code, "".join(captured), timed_out
 
     def normalize_output(
         self,

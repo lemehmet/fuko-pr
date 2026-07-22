@@ -69,6 +69,15 @@ def test_build_env_lemonade_lan_host(monkeypatch):
     assert env["CONFIG__AI_TIMEOUT"] == "540"
 
 
+def test_build_env_enables_live_verbosity():
+    from sidecar.fukoconfig import ModelConfig
+    from sidecar.presets import get_preset
+
+    env = PrAgentBackend().build_env(get_preset("ollama"), ModelConfig(), "", ["review"])
+    assert env["CONFIG__VERBOSITY_LEVEL"] == "1"
+    assert env["PYTHONUNBUFFERED"] == "1"
+
+
 def test_build_env_max_model_tokens_override_beats_preset(monkeypatch):
     monkeypatch.setenv("ZAI_KEY", "k")
     env = PrAgentBackend().build_env(

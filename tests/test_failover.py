@@ -179,24 +179,26 @@ def test_legacy_single_model_still_runs(monkeypatch):
 
 
 def test_invoke_detects_throttle_and_stops_early(monkeypatch):
-    ran = []
+    from tests.fakes import popen_factory
 
-    class _Proc:
-        returncode = 1
-        stdout = ""
-        stderr = "litellm.RateLimitError: 429 Too Many Requests"
-
-    def fake_run(cmd, env=None, check=False, timeout=None, **kw):
-        ran.append(cmd[-1])
-        return _Proc()
-
-    monkeypatch.setattr(pragent.subprocess, "run", fake_run)
+    calls = []
+    monkeypatch.setattr(
+        pragent.subprocess,
+        "Popen",
+        popen_factory(
+            recorder=calls,
+            behavior=lambda tool: {
+                "rc": 1,
+                "output": "litellm.RateLimitError: 429 Too Many Requests\n",
+            },
+        ),
+    )
     pr = PRRef(repo="o/r", number=1, url="https://github.com/o/r/pull/1")
     result = pragent.PrAgentBackend().invoke(pr, {}, ["review", "improve"])
 
     assert result.throttled is True
     assert result.returncode == 1
-    assert ran == ["review"]
+    assert [c[0][-1] for c in calls] == ["review"]
 
 
 def test_circuit_breaker_no_ops_without_database(monkeypatch):
