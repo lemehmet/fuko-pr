@@ -27,8 +27,11 @@ DEGRADED_STATES: frozenset[str] = frozenset({"rate_limited", "paused", "unavaila
 _CR_LOGIN = "coderabbitai[bot]"
 _COPILOT_LOGINS = {"copilot", "copilot-pull-request-reviewer[bot]"}
 _COPILOT_QUOTA = re.compile(
-    r"quota|premium request|monthly limit|out of credits|wasn't able to review|"
-    r"unable to review",
+    r"wasn't able to review"
+    r"|quota (?:limit|exceeded|exhausted|reached)"
+    r"|exceeded your .{0,30}?(?:quota|premium requests?|monthly limit)"
+    r"|monthly limit of premium requests"
+    r"|out of (?:premium )?(?:credits|requests)",
     re.I,
 )
 

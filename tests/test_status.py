@@ -360,6 +360,20 @@ def test_copilot_review_on_head_beats_stale_quota_notice():
     assert copilot_state(HEAD, reviews)["state"] == "done"
 
 
+def test_copilot_incidental_quota_words_stay_pending():
+    reviews = [
+        {
+            "user": {"login": "Copilot"},
+            "commit_id": "old111",
+            "state": "COMMENTED",
+            "body": (
+                "This change adjusts the API quota handling and is unable to review binary files."
+            ),
+        }
+    ]
+    assert copilot_state(HEAD, reviews)["state"] == "pending"
+
+
 def test_copilot_non_quota_bodies_stay_pending():
     reviews = [
         {

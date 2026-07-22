@@ -311,8 +311,8 @@ def _rh_states(repo: str) -> list[dict]:
     else from the local Postgres. Any failure yields an empty list -- escalation
     is an optimization, so a read error must never block a review.
     """
-    fuko_url, fuko_token = _cb_endpoint()
     try:
+        fuko_url, fuko_token = _cb_endpoint()
         if fuko_url:
             headers = {"Authorization": "Bearer " + fuko_token} if fuko_token else {}
             resp = httpx.get(
