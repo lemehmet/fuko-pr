@@ -206,6 +206,10 @@ class PrAgentBackend:
         killed directly so it can't leak, the reader join IS bounded (a stuck
         writer may never EOF), and the possibly-partial capture is acceptable
         because a timeout already reports ``throttled=True`` unconditionally.
+        The docker kill itself is bounded too -- it is reached precisely when
+        the daemon may be unresponsive. On every path the pipe is explicitly
+        closed before returning (one leaked fd per tool adds up on a
+        persistent runner), which also unblocks a reader stuck mid-read.
         """
         captured: list[str] = []
         proc = subprocess.Popen(
@@ -218,21 +222,28 @@ class PrAgentBackend:
         )
 
         def _relay() -> None:
-            for line in proc.stdout or []:
+            for line in proc.stdout:
                 print(line, end="", file=sys.stderr, flush=True)
                 captured.append(line)
 
         reader = threading.Thread(target=_relay, daemon=True)
         reader.start()
+        timed_out = False
         try:
             code = proc.wait(timeout=self.tool_timeout)
         except subprocess.TimeoutExpired:
-            subprocess.run(
-                ["docker", "kill", container],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            timed_out = True
+            code = 124
+            try:
+                subprocess.run(
+                    ["docker", "kill", container],
+                    check=False,
+                    timeout=30,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except subprocess.TimeoutExpired:
+                pass
             try:
                 proc.wait(timeout=10)
             except Exception:
@@ -242,9 +253,20 @@ class PrAgentBackend:
                 except Exception:
                     pass
             reader.join(timeout=10)
-            return 124, "".join(captured), True
-        reader.join()
-        return code, "".join(captured), False
+        else:
+            reader.join()
+
+        if reader.is_alive():
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
+            reader.join(timeout=2)
+        try:
+            proc.stdout.close()
+        except Exception:
+            pass
+        return code, "".join(captured), timed_out
 
     def normalize_output(
         self,
