@@ -59,6 +59,98 @@ def record(
         )
 
 
+def slot_summary(repo: str | None = None, days: int = 30) -> list[dict]:
+    """Aggregate runs per SLOT over the last ``days`` (empty when disabled).
+
+    The slot view shows lane health independent of which model currently
+    occupies it (slots are model-agnostic by design); rows without a slot
+    (solo configs, rescued-by-backup rows keep their branch slot) are skipped.
+    """
+    if not _enabled():
+        return []
+    from .db import db
+
+    where = "WHERE slot IS NOT NULL AND started_at > now() - make_interval(days => %s)"
+    params: list = [min(max(1, days), 3650)]
+    if repo:
+        where += " AND repo = %s"
+        params.append(repo)
+
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT slot, count(*), "
+            "count(*) FILTER (WHERE outcome = 'ok'), "
+            "count(*) FILTER (WHERE outcome != 'ok'), "
+            "avg(duration_s), coalesce(sum(findings), 0) "
+            f"FROM review_runs {where} "
+            "GROUP BY slot ORDER BY slot",
+            params,
+        ).fetchall()
+    return [
+        {
+            "slot": slot,
+            "runs": runs,
+            "ok": ok,
+            "not_ok": not_ok,
+            "avg_duration_s": round(float(avg_duration), 1) if avg_duration is not None else None,
+            "findings": int(findings),
+        }
+        for slot, runs, ok, not_ok, avg_duration, findings in rows
+    ]
+
+
+def recent_runs(repo: str | None = None, limit: int = 50) -> list[dict]:
+    """Return the newest run rows, bounded (empty when disabled).
+
+    ``limit`` is clamped to [1, 200] so the viewer can never issue an
+    unbounded read as ``review_runs`` grows.
+    """
+    if not _enabled():
+        return []
+    from .db import db
+
+    where = ""
+    params: list = []
+    if repo:
+        where = "WHERE repo = %s"
+        params.append(repo)
+    params.append(min(max(1, limit), 200))
+
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT repo, pr, provider, model, slot, started_at, duration_s, "
+            "attempts, outcome, findings "
+            f"FROM review_runs {where} ORDER BY started_at DESC LIMIT %s",
+            params,
+        ).fetchall()
+    return [
+        {
+            "repo": repo_,
+            "pr": pr,
+            "provider": provider,
+            "model": model,
+            "slot": slot,
+            "started_at": started_at.isoformat(),
+            "duration_s": float(duration_s),
+            "attempts": attempts,
+            "outcome": outcome,
+            "findings": findings,
+        }
+        for (
+            repo_,
+            pr,
+            provider,
+            model,
+            slot,
+            started_at,
+            duration_s,
+            attempts,
+            outcome,
+            findings,
+        ) in rows
+    ]
+
+
 def summary(repo: str | None = None, days: int = 30) -> list[dict]:
     """Aggregate runs per provider+model over the last ``days`` (empty when disabled).
 

@@ -44,6 +44,34 @@ def observe(repo: str, reviewer: str, state: str, pr: int | None = None, detail:
         )
 
 
+def all_states() -> list[dict]:
+    """Return the last observed state rows for every repo (empty when disabled).
+
+    The viewer's system-health section wants the whole fleet at a glance;
+    :func:`states` stays the per-repo read the runner uses.
+    """
+    if not _enabled():
+        return []
+    from .db import db
+
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT repo, reviewer, state, observed_at, pr, detail "
+            "FROM reviewer_health ORDER BY repo, reviewer"
+        ).fetchall()
+    return [
+        {
+            "repo": repo,
+            "reviewer": reviewer,
+            "state": state,
+            "observed_at": observed_at.isoformat(),
+            "pr": pr,
+            "detail": detail,
+        }
+        for repo, reviewer, state, observed_at, pr, detail in rows
+    ]
+
+
 def states(repo: str) -> list[dict]:
     """Return the last observed state rows for ``repo`` (empty when disabled).
 
