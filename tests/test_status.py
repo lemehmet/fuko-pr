@@ -319,3 +319,54 @@ def test_reviewer_states_threads_check_runs():
     )
     cr = next(r for r in rows if r["backend"] == "coderabbit")
     assert cr["state"] == "in_progress"
+
+
+def test_copilot_quota_notice_in_review_body_is_unavailable():
+    reviews = [
+        {
+            "user": {"login": "Copilot"},
+            "commit_id": "old111",
+            "state": "COMMENTED",
+            "body": "Copilot wasn't able to review this pull request because of a quota limit.",
+        }
+    ]
+    s = copilot_state(HEAD, reviews)
+    assert s["state"] == "unavailable"
+    assert s["head_reviewed"] == "old111"
+
+
+def test_copilot_quota_notice_in_issue_comment_is_unavailable():
+    comments = [
+        {
+            "user": {"login": "copilot-pull-request-reviewer[bot]"},
+            "body": "You have exceeded your monthly limit of premium requests.",
+        }
+    ]
+    s = copilot_state(HEAD, [], comments)
+    assert s["state"] == "unavailable"
+    assert s["head_reviewed"] is None
+
+
+def test_copilot_review_on_head_beats_stale_quota_notice():
+    reviews = [
+        {
+            "user": {"login": "Copilot"},
+            "commit_id": "old111",
+            "body": "quota exceeded",
+            "state": "COMMENTED",
+        },
+        {"user": {"login": "Copilot"}, "commit_id": HEAD, "state": "COMMENTED"},
+    ]
+    assert copilot_state(HEAD, reviews)["state"] == "done"
+
+
+def test_copilot_non_quota_bodies_stay_pending():
+    reviews = [
+        {
+            "user": {"login": "Copilot"},
+            "commit_id": "old111",
+            "state": "COMMENTED",
+            "body": "Here are my review comments on the changes.",
+        }
+    ]
+    assert copilot_state(HEAD, reviews)["state"] == "pending"

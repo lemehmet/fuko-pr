@@ -36,6 +36,7 @@ from .fukoconfig import (
 )
 from .pool import order_pool, partition_roles, resolve_models
 from .presets import get_preset
+from .status import escalation_needed
 from .sizing import required_context
 from .stores import get_store
 
@@ -301,6 +302,93 @@ def _cb_trip(provider: str, cooldown_seconds: int, reason: str) -> None:
             trip(provider, cooldown_seconds, reason)
     except Exception as e:
         print(f"fuko: circuit-breaker trip failed (continuing): {e}", file=sys.stderr)
+
+
+def _rh_states(repo: str) -> list[dict]:
+    """Last observed reviewer-health rows for ``repo`` (best-effort).
+
+    Reads the shared state from the sidecar over HTTP when ``FUKO_URL`` is set,
+    else from the local Postgres. Any failure yields an empty list -- escalation
+    is an optimization, so a read error must never block a review.
+    """
+    fuko_url, fuko_token = _cb_endpoint()
+    try:
+        if fuko_url:
+            headers = {"Authorization": "Bearer " + fuko_token} if fuko_token else {}
+            resp = httpx.get(
+                fuko_url.rstrip("/") + "/rh/state",
+                params={"repo": repo},
+                headers=headers,
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            data = resp.json().get("reviewers") if isinstance(resp.json(), dict) else None
+            return data if isinstance(data, list) else []
+        from .reviewer_health import states
+
+        return states(repo)
+    except Exception as e:
+        print(f"fuko: reviewer-health read failed, no escalation this round: {e}", file=sys.stderr)
+        return []
+
+
+def _observe_reviewer_health(pr: PRRef, token: str, api_url: str) -> None:
+    """Record what each external reviewer did on this PR's HEAD (best-effort).
+
+    Called at the end of a review run so the NEXT round can escalate on what
+    this one saw (next-round escalation). Fetches the PR artifacts fresh --
+    CodeRabbit/Copilot typically post while fuko's own review runs -- and
+    persists via the sidecar or the local Postgres. Every failure is swallowed:
+    an observation must never fail the review that produced it.
+    """
+    from .status import reviewer_states
+
+    try:
+        head = fetch_pr_head(pr, token, api_url)
+        issue_comments = fetch_issue_comments(pr, token, api_url)
+        reviews = fetch_reviews(pr, token, api_url)
+        try:
+            check_runs = fetch_check_runs(pr, head, token, api_url)
+        except httpx.HTTPError:
+            check_runs = None
+        rows = reviewer_states(head, issue_comments, reviews, check_runs)
+    except Exception as e:
+        print(f"fuko: reviewer-health observation skipped: {e}", file=sys.stderr)
+        return
+
+    fuko_url, fuko_token = _cb_endpoint()
+    try:
+        if fuko_url:
+            headers = {"Content-Type": "application/json"}
+            if fuko_token:
+                headers["Authorization"] = "Bearer " + fuko_token
+            resp = httpx.post(
+                fuko_url.rstrip("/") + "/rh/observe",
+                json={
+                    "repo": pr.repo,
+                    "pr": pr.number,
+                    "observations": [
+                        {
+                            "reviewer": r["backend"],
+                            "state": r["state"],
+                            "detail": (r.get("detail") or "")[:500],
+                        }
+                        for r in rows
+                    ],
+                },
+                headers=headers,
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+        else:
+            from .reviewer_health import observe
+
+            for r in rows:
+                observe(pr.repo, r["backend"], r["state"], pr.number, r.get("detail") or "")
+        summary = ", ".join(f"{r['backend']}={r['state']}" for r in rows)
+        print(f"fuko: reviewer health observed: {summary}", file=sys.stderr)
+    except Exception as e:
+        print(f"fuko: reviewer-health observation failed (continuing): {e}", file=sys.stderr)
 
 
 def _normalize(
@@ -673,6 +761,17 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
     several actives the PR is A/B'd once per active, each branch sharing the same
     backups (see :func:`_review_compare`). Deprecated sections are mapped onto
     the unified list by :func:`sidecar.pool.resolve_models`.
+
+    Next-round escalation: when the previous round observed an external reviewer
+    in a degraded state (:func:`sidecar.status.escalation_needed` over the
+    persisted :mod:`sidecar.reviewer_health` rows), every backup is promoted to
+    active for this round -- the PR is losing outside review coverage, so the
+    extra models run as their own branches instead of waiting for a throttle.
+    A promoted backup without a distinct ``token_env`` identity makes the round
+    run sequentially (the concurrency gate is all-or-nothing); escalated rounds
+    are expected to be rare enough that this is an acceptable trade. At the end
+    of every run the current reviewer states are observed and persisted for the
+    next round (:func:`_observe_reviewer_health`).
     """
     cfg: FukoConfig = load_config(config_path)
     pr = parse_pr_url(pr_url)
@@ -689,8 +788,17 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
     _warn_legacy_config(cfg.review)
     actives, backups = partition_roles(resolve_models(cfg.review))
 
+    if backups and escalation_needed(_rh_states(pr.repo)):
+        promoted = ", ".join(f"{m.provider}/{m.name}" for m in backups)
+        print(
+            "fuko: external reviewers degraded last round — promoting backup "
+            f"model(s) to active for this round: {promoted}",
+            file=sys.stderr,
+        )
+        actives, backups = [*actives, *backups], []
+
     if len(actives) > 1:
-        return _review_compare(
+        result = _review_compare(
             backend,
             pr,
             knowledge,
@@ -703,7 +811,10 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
             cooled,
             required,
         )
+    else:
+        result = _run_pool(
+            backend, pr, knowledge, gh_env, cfg.review, [*actives, *backups], cooled, required
+        )
 
-    return _run_pool(
-        backend, pr, knowledge, gh_env, cfg.review, [*actives, *backups], cooled, required
-    )
+    _observe_reviewer_health(pr, token, api_url)
+    return result
