@@ -40,6 +40,35 @@ def test_build_env_ollama_cloud(monkeypatch):
     assert env["CONFIG__AI_TIMEOUT"] == "300"
 
 
+def test_get_preset_lemonade():
+    p = get_preset("lemonade")
+    assert p.litellm_prefix == "openai/"
+    assert p.base_url == "http://localhost:8000/api/v1"
+    assert p.key_env == "LEMONADE_API_KEY"
+    assert p.quirks["custom_model_max_tokens"] == 262144
+    assert p.quirks["max_model_tokens"] == 131072
+    assert p.quirks["ai_timeout"] == 540
+
+
+def test_build_env_lemonade_lan_host(monkeypatch):
+    monkeypatch.setenv("LEMONADE_API_KEY", "lemonade")
+    env = PrAgentBackend().build_env(
+        get_preset("lemonade"),
+        ModelConfig(
+            provider="lemonade",
+            name="Qwen3-Coder-Next-GGUF",
+            base_url="https://lalo.example.dev/api/v1",
+        ),
+        knowledge="",
+        tools=["review"],
+    )
+    assert env["CONFIG__MODEL"] == "openai/Qwen3-Coder-Next-GGUF"
+    assert env["OPENAI__API_BASE"] == "https://lalo.example.dev/api/v1"
+    assert env["OPENAI__KEY"] == "lemonade"
+    assert env["CONFIG__MAX_MODEL_TOKENS"] == "131072"
+    assert env["CONFIG__AI_TIMEOUT"] == "540"
+
+
 def test_build_env_max_model_tokens_override_beats_preset(monkeypatch):
     monkeypatch.setenv("ZAI_KEY", "k")
     env = PrAgentBackend().build_env(
