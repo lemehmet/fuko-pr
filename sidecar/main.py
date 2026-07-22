@@ -181,4 +181,4 @@ def rh_observe_endpoint(req: models.ObserveHealthRequest) -> dict:
     """Batch-record the reviewer states the runner observed at the end of a round."""
     for obs in req.observations:
         reviewer_health.observe(req.repo, obs.reviewer, obs.state, req.pr, obs.detail or "")
-    return {"recorded": len(req.observations)}
+    return {"recorded": len(req.observations), "persisted": bool(settings.database_url)}

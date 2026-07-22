@@ -81,7 +81,7 @@ def test_rh_observe_endpoint(monkeypatch):
         },
     )
     assert resp.status_code == 200
-    assert resp.json() == {"recorded": 2}
+    assert resp.json() == {"recorded": 2, "persisted": False}
     assert seen == [
         ("o/r", "coderabbit", "done", 7, "scanned HEAD"),
         ("o/r", "copilot", "unavailable", 7, "quota"),

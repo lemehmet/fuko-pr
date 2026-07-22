@@ -322,7 +322,8 @@ def _rh_states(repo: str) -> list[dict]:
                 timeout=10.0,
             )
             resp.raise_for_status()
-            data = resp.json().get("reviewers") if isinstance(resp.json(), dict) else None
+            payload = resp.json()
+            data = payload.get("reviewers") if isinstance(payload, dict) else None
             return data if isinstance(data, list) else []
         from .reviewer_health import states
 
@@ -356,8 +357,8 @@ def _observe_reviewer_health(pr: PRRef, token: str, api_url: str) -> None:
         print(f"fuko: reviewer-health observation skipped: {e}", file=sys.stderr)
         return
 
-    fuko_url, fuko_token = _cb_endpoint()
     try:
+        fuko_url, fuko_token = _cb_endpoint()
         if fuko_url:
             headers = {"Content-Type": "application/json"}
             if fuko_token:

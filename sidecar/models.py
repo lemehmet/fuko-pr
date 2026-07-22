@@ -144,7 +144,17 @@ class ObserveHealthRequest(BaseModel):
     observations: list[ReviewerObservation] = Field(default_factory=list)
 
 
+class ReviewerHealthRow(BaseModel):
+    """One stored reviewer-health row, as returned by ``GET /rh/state``."""
+
+    reviewer: str
+    state: str
+    observed_at: str
+    pr: int | None = None
+    detail: str | None = None
+
+
 class ReviewerHealthResponse(BaseModel):
     """Body returned by ``GET /rh/state``: last observed state rows for a repo."""
 
-    reviewers: list[dict] = Field(default_factory=list)
+    reviewers: list[ReviewerHealthRow] = Field(default_factory=list)
