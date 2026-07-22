@@ -72,7 +72,7 @@ file — no paid APIs, no server.
    image = "ghcr.io/OWNER/pr-agent:0.38.0"   # pin the matching @sha256 digest from your build
 
    [[review.models]]
-   provider = "ollama"                  # zai-coding | openrouter | anthropic | openai | ollama
+   provider = "ollama"                  # zai-coding | openrouter | lemonade | anthropic | openai | ollama
    name = "qwen2.5-coder:32b"
    base_url = "http://host.docker.internal:11434"  # reach host Ollama from the container
    # Add more entries to scale up: every active entry (the default role) reviews

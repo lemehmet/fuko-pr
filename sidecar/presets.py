@@ -43,6 +43,16 @@ PRESETS: dict[str, ProviderPreset] = {
             "ai_timeout": 300,
         },
     ),
+    "lemonade": ProviderPreset(
+        litellm_prefix="openai/",
+        base_url="http://localhost:8000/api/v1",
+        key_env="LEMONADE_API_KEY",
+        quirks={
+            "custom_model_max_tokens": 262144,
+            "max_model_tokens": 131072,
+            "ai_timeout": 540,
+        },
+    ),
     "openrouter": ProviderPreset(
         litellm_prefix="openai/",
         base_url="https://openrouter.ai/api/v1",

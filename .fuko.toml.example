@@ -28,7 +28,10 @@ tools = ["review", "improve"]   # PR-Agent tools to run
 #   persisted in the sidecar's Postgres); a non-throttle error fails fast.
 #   Entry order = failover priority.
 #
-# Known presets: zai-coding, ollama, ollama-cloud, openrouter, anthropic, openai.
+# Known presets: zai-coding, ollama, ollama-cloud, lemonade, openrouter,
+# anthropic, openai. (lemonade = any Lemonade server, e.g. a LAN AMD box;
+# OpenAI-compatible, no real auth — set LEMONADE_API_KEY to any non-empty
+# value and point base_url at the host.)
 #
 # Concurrent A/B (per-branch identities): give EVERY active a `token_env` whose
 # env var resolves to a distinct GitHub actor (e.g. two GitHub Apps), and the
