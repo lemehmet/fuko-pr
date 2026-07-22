@@ -311,6 +311,7 @@ def _normalize(
     compare: bool = False,
     token: str | None = None,
     api_url: str | None = None,
+    actor: str | None = None,
 ) -> None:
     """Map the posted review into Review Signals for the winning provider's model.
 
@@ -330,7 +331,12 @@ def _normalize(
         model_id = preset.litellm_prefix + model.name
         compare_label = f"{model.provider}/{model.name}" if compare else None
         signals = backend.normalize_output(
-            pr, model=model_id, compare_label=compare_label, token=token, api_url=api_url
+            pr,
+            model=model_id,
+            compare_label=compare_label,
+            token=token,
+            api_url=api_url,
+            actor=actor,
         )
         print(f"fuko: normalized {len(signals)} review signals", file=sys.stderr)
     except NotImplementedError:
@@ -363,14 +369,20 @@ _FRESH_COMMENT_ENV = {
 }
 
 
-def _post_branch_header(pr: PRRef, token: str, api_url: str, label: str) -> None:
+def _post_branch_header(pr: PRRef, token: str, api_url: str, label: str) -> str | None:
     """Post a model-labelled header issue comment for one A/B branch (best-effort).
 
     It gives a human a visible anchor for which model produced the summary that
     follows; a failure here must never abort the branch, so it only logs.
+
+    Returns the posting identity's user id as reported by the create-comment
+    response -- the one identity probe that works for App installation tokens
+    (``GET /user`` 403s for them, #57) -- so marker injection can restrict
+    itself to this branch's own comments (#66). ``None`` when nothing was
+    posted or the id is unavailable.
     """
     if not token:
-        return
+        return None
     base = api_url.rstrip("/")
     body = f"🤖 **fuko A/B** — model `{label}`"
     try:
@@ -381,8 +393,11 @@ def _post_branch_header(pr: PRRef, token: str, api_url: str, label: str) -> None
             timeout=30.0,
         )
         resp.raise_for_status()
-    except httpx.HTTPError as e:
+        actor_id = ((resp.json() or {}).get("user") or {}).get("id")
+        return str(actor_id) if actor_id is not None else None
+    except (httpx.HTTPError, ValueError) as e:
         print(f"fuko: could not post A/B branch header for {label}: {e}", file=sys.stderr)
+        return None
 
 
 def _run_pool(
@@ -400,6 +415,7 @@ def _run_pool(
     compare: bool = False,
     token: str | None = None,
     api_url: str | None = None,
+    actor: str | None = None,
 ) -> InvokeResult:
     """Run one review over ``pool`` with failover, normalizing the winner's output.
 
@@ -437,7 +453,9 @@ def _run_pool(
         result = replace(backend.invoke(pr, env, tools), provider=model.provider)
         if not result.throttled:
             if result.returncode == 0:
-                _normalize(backend, pr, model, compare=compare, token=token, api_url=api_url)
+                _normalize(
+                    backend, pr, model, compare=compare, token=token, api_url=api_url, actor=actor
+                )
             return result
 
         _cb_trip(model.provider, review.cooldown_seconds, result.detail)
@@ -499,8 +517,9 @@ def _run_compare_branch(
     """Run one A/B branch end-to-end under its own ``token`` identity.
 
     Posts the branch's model-labelled header, then its fresh summary + inline
-    suggestions, marking and editing only under ``token`` so GitHub's permissions
-    stop this branch touching another branch's comments. The branch's pool is its
+    suggestions, with marker injection restricted to the ``actor`` identity the
+    header post revealed -- repo-write tokens CAN edit a sibling's comments
+    (#66), so authorship is filtered, not assumed. The branch's pool is its
     active entry followed by the shared ``backups``, so a throttled primary fails
     over instead of losing the round. Returns ``(label, result)``. Any exception
     is captured as a failed result so one branch's failure can never abort or
@@ -508,7 +527,7 @@ def _run_compare_branch(
     """
     label = f"{entry.provider}/{entry.name}"
     try:
-        _post_branch_header(pr, token, api_url, label)
+        actor = _post_branch_header(pr, token, api_url, label)
         result = _run_pool(
             backend,
             pr,
@@ -523,6 +542,7 @@ def _run_compare_branch(
             compare=True,
             token=token,
             api_url=api_url,
+            actor=actor,
         )
     except Exception as e:
         print(f"fuko: A/B branch {label} failed in isolation: {e}", file=sys.stderr)
@@ -608,7 +628,7 @@ def _review_compare(
         for index, entry in enumerate(actives):
             label = f"{entry.provider}/{entry.name}"
             print(f"fuko: A/B branch {index + 1}/{len(actives)}: {label}", file=sys.stderr)
-            _post_branch_header(pr, token, api_url, label)
+            actor = _post_branch_header(pr, token, api_url, label)
             result = _run_pool(
                 backend,
                 pr,
@@ -623,6 +643,7 @@ def _review_compare(
                 compare=True,
                 token=token,
                 api_url=api_url,
+                actor=actor,
             )
             outcomes.append((label, result))
 

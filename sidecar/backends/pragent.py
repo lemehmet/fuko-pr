@@ -210,6 +210,7 @@ class PrAgentBackend:
         compare_label: str | None = None,
         token: str | None = None,
         api_url: str | None = None,
+        actor: str | None = None,
     ) -> list[ReviewSignal]:
         """Read PR-Agent's inline comments, map them to Review Signals, and mark them.
 
@@ -224,11 +225,14 @@ class PrAgentBackend:
         the diff. The label is the configured ``provider/name`` (matching the branch
         header), distinct from the litellm-prefixed ``model`` in the marker.
 
-        ``token``/``api_url`` pin the GitHub identity that reads and edits comments.
-        They are required for concurrent A/B mode, where each branch must mark its
-        own suggestions under its own identity (so GitHub's permissions stop one
-        branch editing another's). When unset they fall back to the process
-        ``GITHUB_TOKEN``/``GITHUB_API_URL`` -- the sequential single-token path.
+        ``token``/``api_url`` pin the GitHub identity that reads and edits comments;
+        when unset they fall back to the process ``GITHUB_TOKEN``/``GITHUB_API_URL``.
+        ``actor`` is that identity's user id when the caller already knows it (the
+        branch header post reveals it, even for App installation tokens whose
+        ``GET /user`` 403s). It is what keeps marking author-scoped: a repo-write
+        token CAN edit a sibling branch's comments -- GitHub does not stop it
+        (#66) -- so in A/B mode marking is refused outright when no identity can
+        be resolved rather than risk relabeling another branch's output.
         """
         token = os.environ.get("GITHUB_TOKEN", "") if token is None else token
         if api_url is None:
@@ -248,7 +252,7 @@ class PrAgentBackend:
             return []
 
         pairs = pragent_signals(comments, model)
-        self._inject_markers(api, pr, headers, pairs, label=compare_label)
+        self._inject_markers(api, pr, headers, pairs, label=compare_label, actor=actor)
         return [p["signal"] for p in pairs]
 
     def _fetch_review_comments(self, api: str, pr: PRRef, headers: dict[str, str]) -> list[dict]:
@@ -275,10 +279,13 @@ class PrAgentBackend:
         """Return the GitHub actor id ``client``'s token authenticates as, or ``None``.
 
         Used to skip PATCHing comments this identity didn't author: in concurrent
-        A/B mode every branch sees the *whole* PR's comments, and PATCHing a
-        sibling branch's comment would only 403 while adding API traffic. Any
-        lookup failure returns ``None``, in which case the caller marks
-        best-effort across all comments (the prior behavior).
+        A/B mode every branch sees the *whole* PR's comments, and a repo-write
+        token WILL successfully edit a sibling's comment (#66) -- authorship is
+        not enforced by GitHub, so it must be filtered here. ``GET /user`` 403s
+        for App installation tokens (#57), so App-token callers should pass the
+        identity in from the branch-header post instead of relying on this probe.
+        Any lookup failure returns ``None``; the caller decides what that means
+        (fail-closed in A/B mode, legacy mark-all in solo mode).
         """
         try:
             resp = client.get(f"{api}/user")
@@ -295,6 +302,7 @@ class PrAgentBackend:
         headers: dict[str, str],
         pairs: list[dict],
         label: str | None = None,
+        actor: str | None = None,
     ) -> None:
         """Best-effort: append each signal's marker to its comment (skip on any error).
 
@@ -305,10 +313,15 @@ class PrAgentBackend:
         marker an earlier branch wrote on its own suggestions.
 
         Comments authored by a *different* GitHub identity are skipped before any
-        PATCH: in concurrent A/B mode this identity sees every branch's comments, and
-        editing a sibling's comment would only 403 while adding API traffic (and
-        secondary-rate-limit risk) as branch/suggestion count grows. If the identity
-        can't be resolved, it falls back to marking best-effort across all comments.
+        PATCH: in concurrent A/B mode this identity sees every branch's comments,
+        and a repo-write token successfully edits a sibling's comment -- GitHub
+        does not enforce authorship (#66: fuko-gray relabeled a fuko-basil
+        suggestion) -- so this filter is correctness-critical, not an optimization.
+        ``actor`` comes from the caller when known (branch-header post); otherwise
+        a ``GET /user`` probe is attempted. When no identity can be resolved in
+        A/B mode (``label`` set), marking is skipped entirely -- an unmarked
+        comment is recoverable, a cross-labeled one silently corrupts per-model
+        attribution. Solo mode keeps the legacy best-effort mark-all.
 
         When ``label`` is given (A/B compare mode), the comment is also prefixed with
         a compact visible model tag so the producing branch is legible on the diff;
@@ -317,7 +330,15 @@ class PrAgentBackend:
         if not pairs or "Authorization" not in headers:
             return
         with httpx.Client(timeout=30.0, headers=headers) as client:
-            actor = self._resolve_actor(api, client)
+            if actor is None:
+                actor = self._resolve_actor(api, client)
+            if actor is None and label is not None:
+                print(
+                    "fuko: A/B marking skipped — branch identity unresolved; marking "
+                    "could relabel a sibling branch's comments (#66)",
+                    file=sys.stderr,
+                )
+                return
             for pair in pairs:
                 comment, signal = pair["comment"], pair["signal"]
                 if actor is not None and str((comment.get("user") or {}).get("id")) != actor:
