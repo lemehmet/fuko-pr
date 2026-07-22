@@ -165,6 +165,32 @@ def test_invoke_times_out_and_kills_container(monkeypatch):
     assert killed and killed[0].startswith("fuko-pragent-")  # the container was reaped
 
 
+def test_invoke_kills_stuck_docker_client_after_timeout(monkeypatch):
+    """docker kill reaps the container; if the docker CLIENT still won't exit
+    (unresponsive daemon), it gets killed directly rather than leaking."""
+    from tests.fakes import FakePopen
+
+    from sidecar.fukoconfig import ReviewConfig
+
+    procs = []
+
+    def fake_popen(cmd, env=None, **kw):
+        proc = FakePopen(cmd, hang=2)
+        procs.append(proc)
+        return proc
+
+    class _Ok:
+        returncode = 0
+
+    monkeypatch.setattr(pragent.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(pragent.subprocess, "run", lambda cmd, **kw: _Ok())
+    pr = PRRef(repo="o/r", number=1, url="https://github.com/o/r/pull/1")
+    result = pragent.PrAgentBackend(ReviewConfig(tool_timeout=5)).invoke(pr, {}, ["review"])
+
+    assert result.returncode == 124
+    assert procs[0].killed is True
+
+
 def test_invoke_optional_tool_timeout_is_nonfatal(monkeypatch):
     from sidecar.fukoconfig import ReviewConfig
 

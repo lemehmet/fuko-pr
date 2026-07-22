@@ -195,10 +195,17 @@ class PrAgentBackend:
         printed to this process's stderr with an immediate flush -- on a GitHub
         runner that is what makes the review branch's progress visible while it
         runs. A reader thread drains the pipe so a chatty tool can never fill
-        the pipe buffer and deadlock against ``wait()``. On timeout the
-        container is reaped (a hung tool must not outlive the killed subprocess
-        on a persistent self-hosted runner) and the reader thread ends on the
-        pipe's EOF.
+        the pipe buffer and deadlock against ``wait()``. On the normal path the
+        reader is joined WITHOUT a timeout: the exited child was the pipe's
+        only writer, so EOF is guaranteed and the join is what guarantees
+        ``captured`` is complete before the throttle scan reads it (a timed
+        join could truncate the blob and miss a throttle signature). On
+        timeout the container is reaped (a hung tool must not outlive the
+        killed subprocess on a persistent self-hosted runner); if the docker
+        client itself won't exit after the kill (unresponsive daemon) it is
+        killed directly so it can't leak, the reader join IS bounded (a stuck
+        writer may never EOF), and the possibly-partial capture is acceptable
+        because a timeout already reports ``throttled=True`` unconditionally.
         """
         captured: list[str] = []
         proc = subprocess.Popen(
@@ -229,10 +236,14 @@ class PrAgentBackend:
             try:
                 proc.wait(timeout=10)
             except Exception:
-                pass
+                proc.kill()
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
             reader.join(timeout=10)
             return 124, "".join(captured), True
-        reader.join(timeout=10)
+        reader.join()
         return code, "".join(captured), False
 
     def normalize_output(

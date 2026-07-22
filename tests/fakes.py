@@ -16,14 +16,18 @@ class FakePopen:
         self.cmd = cmd
         self.env = env
         self.returncode = rc
-        self._hang = hang
+        self._hang = int(hang)
+        self.killed = False
         self.stdout = io.StringIO(output)
 
     def wait(self, timeout=None):
-        if self._hang:
-            self._hang = False
+        if self._hang > 0:
+            self._hang -= 1
             raise subprocess.TimeoutExpired(self.cmd, timeout)
         return self.returncode
+
+    def kill(self):
+        self.killed = True
 
 
 def popen_factory(recorder=None, behavior=None):
