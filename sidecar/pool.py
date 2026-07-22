@@ -40,8 +40,9 @@ def partition_roles(
     models: Iterable[ReviewModel],
 ) -> tuple[list[ReviewModel], list[ReviewModel]]:
     """Split ``models`` into ``(actives, backups)``, preserving config order."""
-    actives = [m for m in models if m.role == "active"]
-    backups = [m for m in models if m.role == "backup"]
+    materialized = list(models)
+    actives = [m for m in materialized if m.role == "active"]
+    backups = [m for m in materialized if m.role == "backup"]
     return actives, backups
 
 
