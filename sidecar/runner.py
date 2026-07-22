@@ -476,7 +476,9 @@ def _normalize(
     """Map the posted review into Review Signals for the winning provider's model.
 
     Returns the signal count, or ``None`` when the backend has no normalization
-    -- the count feeds the review-run metrics row (``findings``).
+    -- the count feeds the review-run metrics row (``findings``). Never raises:
+    the review is already posted by this point, so a normalization failure must
+    neither fail the branch nor drop its metrics row.
 
     In A/B ``compare`` mode the backend additionally tags each newly marked inline
     comment with a visible label so the producing branch is legible on the diff. That
@@ -507,6 +509,9 @@ def _normalize(
         print(f"fuko: normalized {len(signals)} review signals", file=sys.stderr)
         return len(signals)
     except NotImplementedError:
+        return None
+    except Exception as e:
+        print(f"fuko: normalization failed (review already posted): {e}", file=sys.stderr)
         return None
 
 
@@ -605,10 +610,11 @@ def _run_pool(
     """
     tools = review.tools if tools is None else tools
     ordered = order_pool(pool, cooled, required)
-    started = time.monotonic()
 
     result = InvokeResult(returncode=1, detail="no providers configured")
+    attempt_started = time.monotonic()
     for index, model in enumerate(ordered):
+        attempt_started = time.monotonic()
         preset = get_preset(model.provider)
         env = backend.build_env(preset, model, knowledge, tools)
         env.update(gh_env)
@@ -633,7 +639,7 @@ def _run_pool(
                 pr,
                 model,
                 slot=slot,
-                duration_s=time.monotonic() - started,
+                duration_s=time.monotonic() - attempt_started,
                 attempts=index + 1,
                 outcome="ok" if result.returncode == 0 else "failed",
                 findings=findings,
@@ -653,7 +659,7 @@ def _run_pool(
             pr,
             ordered[-1],
             slot=slot,
-            duration_s=time.monotonic() - started,
+            duration_s=time.monotonic() - attempt_started,
             attempts=len(ordered),
             outcome="throttled_out",
             findings=None,
