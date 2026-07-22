@@ -7,6 +7,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 
 from . import circuit_breaker
 from . import models
+from . import reviewer_health
 from . import threads as threads_mod
 from .config import settings
 from .fukoconfig import load_config
@@ -167,3 +168,17 @@ def cb_trip_endpoint(req: models.TripRequest) -> dict:
     """Open a provider's circuit breaker for a cooldown window (idempotent upsert)."""
     until = circuit_breaker.trip(req.provider, req.cooldown_seconds, req.reason or "")
     return {"provider": req.provider, "cooldown_until": until}
+
+
+@app.get("/rh/state", response_model=models.ReviewerHealthResponse, dependencies=[Depends(_auth)])
+def rh_state_endpoint(repo: str) -> dict:
+    """Return the last observed state of each external reviewer for ``repo``."""
+    return {"reviewers": reviewer_health.states(repo)}
+
+
+@app.post("/rh/observe", dependencies=[Depends(_auth)])
+def rh_observe_endpoint(req: models.ObserveHealthRequest) -> dict:
+    """Batch-record the reviewer states the runner observed at the end of a round."""
+    for obs in req.observations:
+        reviewer_health.observe(req.repo, obs.reviewer, obs.state, req.pr, obs.detail or "")
+    return {"recorded": len(req.observations), "persisted": bool(settings.database_url)}

@@ -17,12 +17,23 @@ counts as done there. Copilot's state is its latest review's `commit_id`.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Mapping
 from typing import Literal
 
-State = Literal["done", "pending", "in_progress", "rate_limited", "paused", "none"]
+State = Literal["done", "pending", "in_progress", "rate_limited", "paused", "unavailable", "none"]
+
+DEGRADED_STATES: frozenset[str] = frozenset({"rate_limited", "paused", "unavailable"})
 
 _CR_LOGIN = "coderabbitai[bot]"
 _COPILOT_LOGINS = {"copilot", "copilot-pull-request-reviewer[bot]"}
+_COPILOT_QUOTA = re.compile(
+    r"wasn't able to review"
+    r"|quota (?:limit|exceeded|exhausted|reached)"
+    r"|exceeded your .{0,30}?(?:quota|premium requests?|monthly limit)"
+    r"|monthly limit of premium requests"
+    r"|out of (?:premium )?(?:credits|requests)",
+    re.I,
+)
 
 _CR_IN_PROGRESS = re.compile(r"review in progress|Currently processing new changes", re.I)
 _CR_RATE_LIMIT = re.compile(r"Rate limit exceeded", re.I)
@@ -191,14 +202,38 @@ def coderabbit_state(
     )
 
 
-def copilot_state(head_sha: str, reviews: list[dict]) -> dict:
-    """Derive Copilot's state from its latest review's commit id (reliable for Copilot)."""
+def copilot_state(
+    head_sha: str, reviews: list[dict], issue_comments: list[dict] | None = None
+) -> dict:
+    """Derive Copilot's state from its latest review's commit id (reliable for Copilot).
+
+    Quota exhaustion (no auto top-up of premium requests) surfaces as a notice
+    in a Copilot-authored review body or issue comment rather than as a normal
+    review -- "wasn't able to review", "quota", "monthly limit" and similar.
+    When such a notice exists on this PR and no review covers HEAD, the state is
+    ``unavailable`` (a degraded state, see :data:`DEGRADED_STATES`). A review on
+    HEAD always wins over an older notice: credits were evidently topped up.
+    """
     cps = [r for r in reviews if (r.get("user") or {}).get("login", "").lower() in _COPILOT_LOGINS]
-    if not cps:
-        return _row("copilot", "none", None, "no Copilot review")
     on_head = [r for r in cps if r.get("commit_id") == head_sha]
     if on_head:
         return _row("copilot", "done", head_sha, f"review on HEAD ({on_head[-1].get('state')})")
+
+    copilot_bodies = [r.get("body", "") or "" for r in cps] + [
+        c.get("body", "") or ""
+        for c in issue_comments or []
+        if (c.get("user") or {}).get("login", "").lower() in _COPILOT_LOGINS
+    ]
+    if any(_COPILOT_QUOTA.search(b) for b in copilot_bodies):
+        return _row(
+            "copilot",
+            "unavailable",
+            cps[-1].get("commit_id") if cps else None,
+            "quota/unable-to-review notice on this PR and no review on HEAD",
+        )
+
+    if not cps:
+        return _row("copilot", "none", None, "no Copilot review")
     return _row(
         "copilot",
         "pending",
@@ -221,5 +256,23 @@ def reviewer_states(
     """
     return [
         coderabbit_state(head_sha, issue_comments, reviews, check_runs),
-        copilot_state(head_sha, reviews),
+        copilot_state(head_sha, reviews, issue_comments),
     ]
+
+
+def escalation_needed(rows: Iterable[Mapping]) -> bool:
+    """Decide whether the external-reviewer situation warrants model escalation.
+
+    THE single policy shared by every consumer (the runner's next-round backup
+    promotion today; anything reading ``fuko status`` can apply the same set),
+    so detection and policy can never drift apart across consumers: a reviewer
+    row in any :data:`DEGRADED_STATES` state -- explicitly throttled, paused, or
+    quota-exhausted -- means the PR is losing external review coverage and
+    fuko's backup models should join the round. ``pending``/``none`` are NOT
+    degraded: they are normal early-round states and a single snapshot cannot
+    distinguish "slow" from "silent-because-broke"; a staleness-aware policy
+    can tighten this once run metrics exist. Accepts both
+    :func:`reviewer_states` rows and :func:`sidecar.reviewer_health.states`
+    rows (only the ``state`` key is read).
+    """
+    return any((row.get("state") or "") in DEGRADED_STATES for row in rows)

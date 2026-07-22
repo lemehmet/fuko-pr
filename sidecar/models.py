@@ -126,3 +126,35 @@ class TripResponse(BaseModel):
 
     provider: str
     cooldown_until: str | None = None
+
+
+class ReviewerObservation(BaseModel):
+    """One reviewer's observed state, as reported by the runner after a review."""
+
+    reviewer: str
+    state: str
+    detail: str | None = None
+
+
+class ObserveHealthRequest(BaseModel):
+    """Body of ``POST /rh/observe``: batch-record reviewer states for one PR round."""
+
+    repo: str
+    pr: int | None = None
+    observations: list[ReviewerObservation] = Field(default_factory=list)
+
+
+class ReviewerHealthRow(BaseModel):
+    """One stored reviewer-health row, as returned by ``GET /rh/state``."""
+
+    reviewer: str
+    state: str
+    observed_at: str
+    pr: int | None = None
+    detail: str | None = None
+
+
+class ReviewerHealthResponse(BaseModel):
+    """Body returned by ``GET /rh/state``: last observed state rows for a repo."""
+
+    reviewers: list[ReviewerHealthRow] = Field(default_factory=list)
