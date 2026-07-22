@@ -63,6 +63,7 @@ def test_rh_state_endpoint(monkeypatch):
 
 
 def test_rh_observe_endpoint(monkeypatch):
+    monkeypatch.setattr(main.settings, "database_url", "")
     seen = []
     monkeypatch.setattr(
         reviewer_health,
@@ -86,6 +87,16 @@ def test_rh_observe_endpoint(monkeypatch):
         ("o/r", "coderabbit", "done", 7, "scanned HEAD"),
         ("o/r", "copilot", "unavailable", 7, "quota"),
     ]
+
+
+def test_rh_observe_endpoint_reports_persisted_with_database(monkeypatch):
+    monkeypatch.setattr(main.settings, "database_url", "postgresql://x/y")
+    monkeypatch.setattr(reviewer_health, "observe", lambda *a: None)
+    resp = _client(monkeypatch).post(
+        "/rh/observe",
+        json={"repo": "o/r", "pr": 7, "observations": [{"reviewer": "copilot", "state": "done"}]},
+    )
+    assert resp.json() == {"recorded": 1, "persisted": True}
 
 
 def test_rh_states_reads_sidecar_over_http(monkeypatch):

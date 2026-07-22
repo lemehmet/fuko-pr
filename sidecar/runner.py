@@ -350,7 +350,7 @@ def _observe_reviewer_health(pr: PRRef, token: str, api_url: str) -> None:
         reviews = fetch_reviews(pr, token, api_url)
         try:
             check_runs = fetch_check_runs(pr, head, token, api_url)
-        except httpx.HTTPError:
+        except Exception:
             check_runs = None
         rows = reviewer_states(head, issue_comments, reviews, check_runs)
     except Exception as e:
