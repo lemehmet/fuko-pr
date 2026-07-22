@@ -131,3 +131,11 @@ def test_view_with_unreachable_database_renders_notice(monkeypatch):
     resp = client.get("/metrics/view")
     assert resp.status_code == 200
     assert "Database unreachable" in resp.text
+
+
+def test_view_renders_dash_for_absent_pr(monkeypatch):
+    row = dict(_RECENT[0], pr=None)
+    _, client = _wire(monkeypatch, recent=[row])
+    resp = client.get("/metrics/view")
+    assert resp.status_code == 200
+    assert "/pull/" not in resp.text

@@ -36,6 +36,20 @@ def _outcome_cell(outcome: str) -> str:
     return f'<td class="{cls}">{escape(outcome)}</td>'
 
 
+def _pr_cell(repo: str, pr: object) -> str:
+    """Render the PR-link cell, degrading to a dash when ``pr`` is absent.
+
+    The schema requires ``pr`` today, but this function's never-raises pure
+    contract must not depend on a constraint two modules away.
+    """
+    if pr is None:
+        return '<td class="num">—</td>'
+    return (
+        f'<td class="num"><a href="https://github.com/{escape(repo)}/pull/{int(pr)}">'
+        f"#{int(pr)}</a></td>"
+    )
+
+
 def _num(value: object) -> str:
     return f'<td class="num">{escape(str(value if value is not None else "—"))}</td>'
 
@@ -157,8 +171,7 @@ def render_page(
             [
                 f'<tr><td class="muted">{escape(r["started_at"][:16])}</td>'
                 f"<td>{escape(r['repo'])}</td>"
-                f'<td class="num"><a href="https://github.com/{escape(r["repo"])}/pull/{int(r["pr"])}">'
-                f"#{int(r['pr'])}</a></td>"
+                f"{_pr_cell(r['repo'], r['pr'])}"
                 f"<td>{escape(r['slot'] or '—')}</td>"
                 f"<td>{escape(r['provider'])}/{escape(r['model'])}</td>"
                 f"{_outcome_cell(r['outcome'])}{_num(round(r['duration_s']))}"
