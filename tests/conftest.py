@@ -16,3 +16,4 @@ def _quiet_reviewer_health(monkeypatch):
     """
     monkeypatch.setattr(runner, "_rh_states", lambda repo: [])
     monkeypatch.setattr(runner, "_observe_reviewer_health", lambda pr, token, api_url: None)
+    monkeypatch.setattr(runner, "_record_run", lambda pr, model, **kw: None)

@@ -8,6 +8,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from . import circuit_breaker
 from . import models
 from . import reviewer_health
+from . import run_metrics
 from . import threads as threads_mod
 from .config import settings
 from .fukoconfig import load_config
@@ -174,6 +175,32 @@ def cb_trip_endpoint(req: models.TripRequest) -> dict:
 def rh_state_endpoint(repo: str) -> dict:
     """Return the last observed state of each external reviewer for ``repo``."""
     return {"reviewers": reviewer_health.states(repo)}
+
+
+@app.post("/metrics/run", dependencies=[Depends(_auth)])
+def metrics_run_endpoint(req: models.RunMetricRequest) -> dict:
+    """Record one review-run row reported by the runner at branch completion."""
+    run_metrics.record(
+        req.repo,
+        req.pr,
+        req.provider,
+        req.model,
+        slot=req.slot,
+        duration_s=req.duration_s,
+        attempts=req.attempts,
+        outcome=req.outcome,
+        findings=req.findings,
+        detail=req.detail or "",
+    )
+    return {"recorded": True, "persisted": bool(settings.database_url)}
+
+
+@app.get(
+    "/metrics/summary", response_model=models.RunSummaryResponse, dependencies=[Depends(_auth)]
+)
+def metrics_summary_endpoint(repo: str | None = None, days: int = 30) -> dict:
+    """Aggregate review runs per provider+model over the last ``days``."""
+    return {"summary": run_metrics.summary(repo=repo, days=days)}
 
 
 @app.post("/rh/observe", dependencies=[Depends(_auth)])

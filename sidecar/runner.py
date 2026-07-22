@@ -18,6 +18,7 @@ import hashlib
 import os
 import re
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
@@ -304,6 +305,76 @@ def _cb_trip(provider: str, cooldown_seconds: int, reason: str) -> None:
         print(f"fuko: circuit-breaker trip failed (continuing): {e}", file=sys.stderr)
 
 
+def _slot_of(model: ModelConfig) -> str | None:
+    """Derive the human slot name from a model's ``token_env`` (None when absent).
+
+    ``FUKO_GITHUB_TOKEN_DORIAN`` -> ``dorian``; an entry without a dedicated
+    identity (solo configs, backups) has no slot of its own.
+    """
+    token_env = getattr(model, "token_env", None) or ""
+    if not token_env.startswith("FUKO_GITHUB_TOKEN_"):
+        return None
+    return token_env.removeprefix("FUKO_GITHUB_TOKEN_").lower() or None
+
+
+def _record_run(
+    pr: PRRef,
+    model: ModelConfig,
+    *,
+    slot: str | None,
+    duration_s: float,
+    attempts: int,
+    outcome: str,
+    findings: int | None,
+    detail: str,
+) -> None:
+    """Persist one review-run metrics row (best-effort, never raises).
+
+    Reaches the sidecar over HTTP when ``FUKO_URL`` is set, else the local
+    Postgres module; both degrade to no-ops. Metrics are an observability
+    layer -- a failure here must never affect the review that produced them.
+    """
+    try:
+        fuko_url, fuko_token = _cb_endpoint()
+        payload = {
+            "repo": pr.repo,
+            "pr": pr.number,
+            "provider": model.provider,
+            "model": model.name,
+            "slot": slot,
+            "duration_s": round(duration_s, 1),
+            "attempts": attempts,
+            "outcome": outcome,
+            "findings": findings,
+            "detail": (detail or "")[:500],
+        }
+        if fuko_url:
+            headers = {"Content-Type": "application/json"}
+            if fuko_token:
+                headers["Authorization"] = "Bearer " + fuko_token
+            resp = httpx.post(
+                fuko_url.rstrip("/") + "/metrics/run", json=payload, headers=headers, timeout=10.0
+            )
+            resp.raise_for_status()
+        else:
+            from .run_metrics import record
+
+            record(
+                pr.repo,
+                pr.number,
+                model.provider,
+                model.name,
+                slot=slot,
+                duration_s=payload["duration_s"],
+                attempts=attempts,
+                outcome=outcome,
+                findings=findings,
+                detail=payload["detail"],
+            )
+    except Exception as e:
+        print(f"fuko: run-metrics record failed (continuing): {e}", file=sys.stderr)
+
+
 def _rh_states(repo: str) -> list[dict]:
     """Last observed reviewer-health rows for ``repo`` (best-effort).
 
@@ -401,8 +472,13 @@ def _normalize(
     token: str | None = None,
     api_url: str | None = None,
     actor: str | None = None,
-) -> None:
+) -> int | None:
     """Map the posted review into Review Signals for the winning provider's model.
+
+    Returns the signal count, or ``None`` when the backend has no normalization
+    -- the count feeds the review-run metrics row (``findings``). Never raises:
+    the review is already posted by this point, so a normalization failure must
+    neither fail the branch nor drop its metrics row.
 
     In A/B ``compare`` mode the backend additionally tags each newly marked inline
     comment with a visible label so the producing branch is legible on the diff. That
@@ -431,8 +507,12 @@ def _normalize(
             actor=actor,
         )
         print(f"fuko: normalized {len(signals)} review signals", file=sys.stderr)
+        return len(signals)
     except NotImplementedError:
-        pass
+        return None
+    except Exception as e:
+        print(f"fuko: normalization failed (review already posted): {e}", file=sys.stderr)
+        return None
 
 
 def _estimate_required_context(pr: PRRef, token: str, api_url: str, knowledge: str) -> int | None:
@@ -508,6 +588,7 @@ def _run_pool(
     token: str | None = None,
     api_url: str | None = None,
     actor: str | None = None,
+    slot: str | None = None,
 ) -> InvokeResult:
     """Run one review over ``pool`` with failover, normalizing the winner's output.
 
@@ -531,7 +612,9 @@ def _run_pool(
     ordered = order_pool(pool, cooled, required)
 
     result = InvokeResult(returncode=1, detail="no providers configured")
+    attempt_started = time.monotonic()
     for index, model in enumerate(ordered):
+        attempt_started = time.monotonic()
         preset = get_preset(model.provider)
         env = backend.build_env(preset, model, knowledge, tools)
         env.update(gh_env)
@@ -547,10 +630,21 @@ def _run_pool(
 
         result = replace(backend.invoke(pr, env, tools), provider=model.provider)
         if not result.throttled:
+            findings = None
             if result.returncode == 0:
-                _normalize(
+                findings = _normalize(
                     backend, pr, model, compare=compare, token=token, api_url=api_url, actor=actor
                 )
+            _record_run(
+                pr,
+                model,
+                slot=slot,
+                duration_s=time.monotonic() - attempt_started,
+                attempts=index + 1,
+                outcome="ok" if result.returncode == 0 else "failed",
+                findings=findings,
+                detail=result.detail or "",
+            )
             return result
 
         _cb_trip(model.provider, review.cooldown_seconds, result.detail)
@@ -560,6 +654,17 @@ def _run_pool(
         )
 
     print("fuko: provider pool exhausted; all attempts throttled", file=sys.stderr)
+    if ordered:
+        _record_run(
+            pr,
+            ordered[-1],
+            slot=slot,
+            duration_s=time.monotonic() - attempt_started,
+            attempts=len(ordered),
+            outcome="throttled_out",
+            findings=None,
+            detail=result.detail or "",
+        )
     return result
 
 
@@ -638,6 +743,7 @@ def _run_compare_branch(
             token=token,
             api_url=api_url,
             actor=actor,
+            slot=_slot_of(entry),
         )
     except Exception as e:
         print(f"fuko: A/B branch {label} failed in isolation: {e}", file=sys.stderr)
@@ -739,6 +845,7 @@ def _review_compare(
                 token=token,
                 api_url=api_url,
                 actor=actor,
+                slot=_slot_of(entry),
             )
             outcomes.append((label, result))
 
@@ -841,7 +948,15 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
         )
     else:
         result = _run_pool(
-            backend, pr, knowledge, gh_env, cfg.review, [*actives, *backups], cooled, required
+            backend,
+            pr,
+            knowledge,
+            gh_env,
+            cfg.review,
+            [*actives, *backups],
+            cooled,
+            required,
+            slot=_slot_of(actives[0]) if actives else None,
         )
 
     _observe_reviewer_health(pr, token, api_url)
