@@ -58,18 +58,10 @@ def test_github_env_empty_without_token():
 
 
 def test_invoke_runs_docker_per_tool(monkeypatch):
+    from tests.fakes import popen_factory
+
     calls = []
-
-    class _Proc:
-        returncode = 0
-        stdout = ""
-        stderr = ""
-
-    def fake_run(cmd, env=None, check=False, timeout=None, **kw):
-        calls.append((cmd, env))
-        return _Proc()
-
-    monkeypatch.setattr(pragent.subprocess, "run", fake_run)
+    monkeypatch.setattr(pragent.subprocess, "Popen", popen_factory(recorder=calls))
     pr = PRRef(repo="o/r", number=1, url="https://github.com/o/r/pull/1")
     result = pragent.PrAgentBackend().invoke(
         pr, {"CONFIG__MODEL": "x", "ANTHROPIC__KEY": "secret"}, ["review", "improve"]
@@ -87,6 +79,24 @@ def test_invoke_runs_docker_per_tool(monkeypatch):
     assert calls[0][1]["ANTHROPIC__KEY"] == "secret"
 
 
+def test_invoke_streams_output_live(monkeypatch, capsys):
+    """Tool output is relayed line by line (to stderr) rather than buffered
+    silently — the whole point of the Popen switch."""
+    from tests.fakes import popen_factory
+
+    monkeypatch.setattr(
+        pragent.subprocess,
+        "Popen",
+        popen_factory(behavior=lambda tool: {"rc": 0, "output": "line one\nline two\n"}),
+    )
+    pr = PRRef(repo="o/r", number=1, url="https://github.com/o/r/pull/1")
+    result = pragent.PrAgentBackend().invoke(pr, {}, ["review"])
+
+    assert result.returncode == 0
+    err = capsys.readouterr().err
+    assert "line one" in err and "line two" in err
+
+
 def test_invoke_uses_configured_image_and_extra_args(monkeypatch):
     from sidecar.fukoconfig import ReviewConfig
 
@@ -97,11 +107,11 @@ def test_invoke_uses_configured_image_and_extra_args(monkeypatch):
         stdout = ""
         stderr = ""
 
-    def fake_run(cmd, env=None, check=False, timeout=None, **kw):
+    def fake_popen(cmd, env=None, **kw):
         captured["cmd"] = cmd
-        return _Proc()
+        return __import__("tests.fakes", fromlist=["FakePopen"]).FakePopen(cmd)
 
-    monkeypatch.setattr(pragent.subprocess, "run", fake_run)
+    monkeypatch.setattr(pragent.subprocess, "Popen", fake_popen)
     backend = pragent.PrAgentBackend(
         ReviewConfig(image="ghcr.io/me/pr-agent:0.36.1", docker_extra_args=["--network", "host"])
     )
@@ -114,12 +124,13 @@ def test_invoke_uses_configured_image_and_extra_args(monkeypatch):
 
 
 def test_invoke_reports_failure(monkeypatch):
-    class _Proc:
-        returncode = 3
-        stdout = ""
-        stderr = "review failed: boom"
+    from tests.fakes import popen_factory
 
-    monkeypatch.setattr(pragent.subprocess, "run", lambda cmd, **kw: _Proc())
+    monkeypatch.setattr(
+        pragent.subprocess,
+        "Popen",
+        popen_factory(behavior=lambda tool: {"rc": 3, "output": "review failed: boom\n"}),
+    )
     pr = PRRef(repo="o/r", number=1, url="https://github.com/o/r/pull/1")
     result = pragent.PrAgentBackend().invoke(pr, {}, ["review"])
 
@@ -130,18 +141,22 @@ def test_invoke_reports_failure(monkeypatch):
 def test_invoke_times_out_and_kills_container(monkeypatch):
     from sidecar.fukoconfig import ReviewConfig
 
+    from tests.fakes import popen_factory
+
     killed = []
 
     class _Killed:
         returncode = 0
 
-    def fake_run(cmd, env=None, check=False, timeout=None, **kw):
+    def fake_kill(cmd, **kw):
         if cmd[:2] == ["docker", "kill"]:
             killed.append(cmd[2])
-            return _Killed()
-        raise pragent.subprocess.TimeoutExpired(cmd, timeout)
+        return _Killed()
 
-    monkeypatch.setattr(pragent.subprocess, "run", fake_run)
+    monkeypatch.setattr(pragent.subprocess, "run", fake_kill)
+    monkeypatch.setattr(
+        pragent.subprocess, "Popen", popen_factory(behavior=lambda tool: {"hang": True})
+    )
     pr = PRRef(repo="o/r", number=1, url="https://github.com/o/r/pull/1")
     result = pragent.PrAgentBackend(ReviewConfig(tool_timeout=5)).invoke(pr, {}, ["review"])
 
@@ -153,19 +168,17 @@ def test_invoke_times_out_and_kills_container(monkeypatch):
 def test_invoke_optional_tool_timeout_is_nonfatal(monkeypatch):
     from sidecar.fukoconfig import ReviewConfig
 
+    from tests.fakes import popen_factory
+
     class _Ok:
         returncode = 0
-        stdout = ""
-        stderr = ""
 
-    def fake_run(cmd, env=None, check=False, timeout=None, **kw):
-        if cmd[:2] == ["docker", "kill"]:
-            return _Ok()
-        if cmd[-1] == "review":  # the primary tool succeeds
-            return _Ok()
-        raise pragent.subprocess.TimeoutExpired(cmd, timeout)  # `improve` hangs
-
-    monkeypatch.setattr(pragent.subprocess, "run", fake_run)
+    monkeypatch.setattr(pragent.subprocess, "run", lambda cmd, **kw: _Ok())
+    monkeypatch.setattr(
+        pragent.subprocess,
+        "Popen",
+        popen_factory(behavior=lambda tool: {} if tool == "review" else {"hang": True}),
+    )
     pr = PRRef(repo="o/r", number=1, url="https://github.com/o/r/pull/1")
     cfg = ReviewConfig(tool_timeout=5, optional_tools=["improve"])
     result = pragent.PrAgentBackend(cfg).invoke(pr, {}, ["review", "improve"])
@@ -178,16 +191,13 @@ def test_invoke_optional_tool_timeout_is_nonfatal(monkeypatch):
 def test_invoke_optional_tool_nonzero_exit_is_nonfatal(monkeypatch):
     from sidecar.fukoconfig import ReviewConfig
 
-    class _Proc:
-        def __init__(self, rc):
-            self.returncode = rc
-            self.stdout = ""
-            self.stderr = ""
+    from tests.fakes import popen_factory
 
-    def fake_run(cmd, env=None, check=False, timeout=None, **kw):
-        return _Proc(0) if cmd[-1] == "review" else _Proc(5)  # improve exits non-zero
-
-    monkeypatch.setattr(pragent.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        pragent.subprocess,
+        "Popen",
+        popen_factory(behavior=lambda tool: {"rc": 0} if tool == "review" else {"rc": 5}),
+    )
     pr = PRRef(repo="o/r", number=1, url="https://github.com/o/r/pull/1")
     cfg = ReviewConfig(optional_tools=["improve"])
     result = pragent.PrAgentBackend(cfg).invoke(pr, {}, ["review", "improve"])
