@@ -70,7 +70,7 @@ def summary(repo: str | None = None, days: int = 30) -> list[dict]:
     from .db import db
 
     where = "WHERE started_at > now() - make_interval(days => %s)"
-    params: list = [max(1, days)]
+    params: list = [min(max(1, days), 3650)]
     if repo:
         where += " AND repo = %s"
         params.append(repo)

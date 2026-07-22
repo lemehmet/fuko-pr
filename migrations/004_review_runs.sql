@@ -29,3 +29,6 @@ CREATE INDEX IF NOT EXISTS review_runs_repo_started_idx
 
 CREATE INDEX IF NOT EXISTS review_runs_provider_model_idx
     ON review_runs (provider, model);
+
+CREATE INDEX IF NOT EXISTS review_runs_started_idx
+    ON review_runs (started_at);

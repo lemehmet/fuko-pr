@@ -75,6 +75,7 @@ def test_slot_of_derives_from_token_env():
     )
     assert runner._slot_of(ReviewModel(provider="p", name="m")) is None
     assert runner._slot_of(ModelConfig(provider="p", name="m")) is None
+    assert runner._slot_of(ReviewModel(provider="p", name="m", token_env="MY_CUSTOM_TOKEN")) is None
 
 
 def test_record_run_swallows_http_errors(monkeypatch, capsys):

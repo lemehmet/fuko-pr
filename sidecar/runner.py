@@ -312,7 +312,7 @@ def _slot_of(model: ModelConfig) -> str | None:
     identity (solo configs, backups) has no slot of its own.
     """
     token_env = getattr(model, "token_env", None) or ""
-    if not token_env:
+    if not token_env.startswith("FUKO_GITHUB_TOKEN_"):
         return None
     return token_env.removeprefix("FUKO_GITHUB_TOKEN_").lower() or None
 

@@ -168,8 +168,8 @@ class RunMetricRequest(BaseModel):
     provider: str
     model: str
     slot: str | None = None
-    duration_s: float = 0.0
-    attempts: int = 1
+    duration_s: float = Field(default=0.0, ge=0)
+    attempts: int = Field(default=1, ge=1)
     outcome: str = "ok"
     findings: int | None = None
     detail: str | None = None
