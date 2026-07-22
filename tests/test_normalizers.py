@@ -266,7 +266,7 @@ def test_normalize_output_returns_only_pragent_signals(monkeypatch):
     monkeypatch.setattr(
         PrAgentBackend,
         "_inject_markers",
-        lambda self, a, p, h, pairs, label=None: injected.append((pairs, label)),
+        lambda self, a, p, h, pairs, label=None, actor=None: injected.append((pairs, label)),
     )
     sigs = PrAgentBackend().normalize_output(PRRef("o/r", 8, "u"), model="anthropic/claude")
     assert [s.severity for s in sigs] == ["high"]
@@ -393,7 +393,7 @@ def test_normalize_output_passes_compare_label_through(monkeypatch):
     monkeypatch.setattr(
         PrAgentBackend,
         "_inject_markers",
-        lambda self, a, p, h, pairs, label=None: seen.append(label),
+        lambda self, a, p, h, pairs, label=None, actor=None: seen.append(label),
     )
     backend = PrAgentBackend()
     # No compare_label → no visible tag. A compare_label distinct from ``model``

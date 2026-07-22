@@ -48,8 +48,9 @@ class CompareModel(ModelConfig):
     ``token_env`` names the GitHub token this branch posts and edits comments
     under. When *every* compare entry sets a ``token_env`` whose env var resolves
     to a distinct token, the branches run concurrently, each under its own bot
-    identity so comments are separable by author and one branch cannot edit
-    another's. If any branch lacks ``token_env``, its env var is unset, or two
+    identity so comments are separable by author (marker injection additionally
+    filters to the branch's own comments -- a repo-write token could technically
+    edit a sibling's). If any branch lacks ``token_env``, its env var is unset, or two
     branches resolve to the same identity, the whole run falls back to the
     sequential single-token path under the shared ``GITHUB_TOKEN``.
     """

@@ -1085,7 +1085,9 @@ def test_review_compare_runs_concurrently_under_per_branch_identity(monkeypatch,
         def invoke(self, pr, env, tools):
             return InvokeResult(returncode=0)
 
-        def normalize_output(self, pr, model="", *, compare_label=None, token=None, api_url=None):
+        def normalize_output(
+            self, pr, model="", *, compare_label=None, token=None, api_url=None, actor=None
+        ):
             seen.append({"model": model, "token": token, "label": compare_label})
             return []
 
@@ -1119,7 +1121,9 @@ def test_review_compare_concurrent_branch_gets_own_github_user_token(monkeypatch
             user_tokens.append(env["GITHUB__USER_TOKEN"])
             return InvokeResult(returncode=0)
 
-        def normalize_output(self, pr, model="", *, compare_label=None, token=None, api_url=None):
+        def normalize_output(
+            self, pr, model="", *, compare_label=None, token=None, api_url=None, actor=None
+        ):
             return []
 
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
@@ -1152,7 +1156,9 @@ def test_review_compare_falls_back_to_sequential_shared_token(monkeypatch, tmp_p
             invoke_tokens.append(env["GITHUB__USER_TOKEN"])
             return InvokeResult(returncode=0)
 
-        def normalize_output(self, pr, model="", *, compare_label=None, token=None, api_url=None):
+        def normalize_output(
+            self, pr, model="", *, compare_label=None, token=None, api_url=None, actor=None
+        ):
             return []
 
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
@@ -1183,7 +1189,9 @@ def test_review_compare_concurrent_branch_failure_is_isolated(monkeypatch, tmp_p
                 raise RuntimeError("invalid credentials")
             return InvokeResult(returncode=0)
 
-        def normalize_output(self, pr, model="", *, compare_label=None, token=None, api_url=None):
+        def normalize_output(
+            self, pr, model="", *, compare_label=None, token=None, api_url=None, actor=None
+        ):
             return []
 
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
@@ -1224,3 +1232,58 @@ def test_normalize_output_uses_passed_token_over_env(monkeypatch):
     )
     # The passed branch token wins over the process env token.
     assert captured["headers"]["Authorization"] == "Bearer branch-tok"
+
+
+def test_post_branch_header_returns_acting_identity(monkeypatch):
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"id": 1, "user": {"login": "fuko-gray[bot]", "id": 4242}}
+
+    monkeypatch.setattr(runner.httpx, "post", lambda *a, **k: _Resp())
+    actor = runner._post_branch_header(PRRef("o/r", 8, "u"), "tok", "https://api.github.com", "p/m")
+    assert actor == "4242"
+
+
+def test_post_branch_header_none_on_failure(monkeypatch):
+    def boom(*a, **k):
+        raise runner.httpx.ConnectError("down")
+
+    monkeypatch.setattr(runner.httpx, "post", boom)
+    actor = runner._post_branch_header(PRRef("o/r", 8, "u"), "tok", "https://api.github.com", "p/m")
+    assert actor is None
+
+
+def test_compare_branch_threads_actor_to_normalize(monkeypatch, tmp_path):
+    """The identity revealed by each branch's header post must reach
+    normalize_output as ``actor`` so marking is author-scoped (#66)."""
+    cfg = _compare_cfg(tmp_path, token_envs=("TOK_A", "TOK_B"))
+    monkeypatch.setenv("TOK_A", "tok-a")
+    monkeypatch.setenv("TOK_B", "tok-b")
+    monkeypatch.setenv("ANTHROPIC_KEY", "k")
+    _stub_compare_io(monkeypatch)
+    monkeypatch.setattr(
+        runner, "_post_branch_header", lambda pr, token, api, label: f"actor-of-{token}"
+    )
+
+    seen = []
+
+    class FakeBackend:
+        def build_env(self, preset, model, knowledge, tools):
+            return {}
+
+        def invoke(self, pr, env, tools):
+            return InvokeResult(returncode=0)
+
+        def normalize_output(
+            self, pr, model="", *, compare_label=None, token=None, api_url=None, actor=None
+        ):
+            seen.append({"token": token, "actor": actor})
+            return []
+
+    monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
+    assert runner.review("https://github.com/o/r/pull/7", str(cfg)).returncode == 0
+    assert sorted(s["actor"] for s in seen) == ["actor-of-tok-a", "actor-of-tok-b"]
+    assert all(s["actor"] == f"actor-of-{s['token']}" for s in seen)

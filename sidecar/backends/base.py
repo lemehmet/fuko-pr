@@ -72,6 +72,7 @@ class ReviewBackend(Protocol):
         compare_label: str | None = None,
         token: str | None = None,
         api_url: str | None = None,
+        actor: str | None = None,
     ) -> list[ReviewSignal]:
         """Read the backend's posted review and map it to Review Signals (egress).
 
