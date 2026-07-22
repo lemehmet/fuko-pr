@@ -158,3 +158,36 @@ class ReviewerHealthResponse(BaseModel):
     """Body returned by ``GET /rh/state``: last observed state rows for a repo."""
 
     reviewers: list[ReviewerHealthRow] = Field(default_factory=list)
+
+
+class RunMetricRequest(BaseModel):
+    """Body of ``POST /metrics/run``: one review-run row from the runner."""
+
+    repo: str
+    pr: int
+    provider: str
+    model: str
+    slot: str | None = None
+    duration_s: float = 0.0
+    attempts: int = 1
+    outcome: str = "ok"
+    findings: int | None = None
+    detail: str | None = None
+
+
+class RunSummaryRow(BaseModel):
+    """One provider+model aggregate returned by ``GET /metrics/summary``."""
+
+    provider: str
+    model: str
+    runs: int
+    ok: int
+    not_ok: int
+    avg_duration_s: float | None = None
+    findings: int
+
+
+class RunSummaryResponse(BaseModel):
+    """Body returned by ``GET /metrics/summary``."""
+
+    summary: list[RunSummaryRow] = Field(default_factory=list)
