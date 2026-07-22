@@ -324,7 +324,10 @@ def _normalize(
 
     ``token``/``api_url`` pin the GitHub identity used to read and edit the comments;
     in concurrent A/B mode each branch passes its own so marking happens under that
-    branch's identity. When unset the backend falls back to the process token.
+    branch's identity. ``actor`` is that identity's user id (from the branch header
+    post) so the backend can filter marking to this branch's own comments without a
+    ``GET /user`` probe, which 403s for App installation tokens (#66). When unset
+    the backend falls back to the process token.
     """
     try:
         preset = get_preset(model.provider)
@@ -430,7 +433,10 @@ def _run_pool(
 
     ``token``/``api_url`` pin the GitHub identity that normalization reads/edits
     comments under; concurrent A/B branches pass their own so marking is
-    author-separated. When unset normalization falls back to the process token.
+    author-separated. ``actor`` is that identity's user id when already known
+    (from the branch header post) — required for author-scoped marking under
+    App installation tokens, whose ``GET /user`` probe 403s (#66). When unset
+    normalization falls back to the process token.
     """
     tools = review.tools if tools is None else tools
     ordered = order_pool(pool, cooled, required)
