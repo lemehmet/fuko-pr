@@ -9,6 +9,7 @@ that holds its key. Distinct from :mod:`sidecar.config`, which holds runtime
 
 import tomllib
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -56,34 +57,68 @@ class CompareModel(ModelConfig):
     token_env: str | None = None
 
 
+class ReviewModel(CompareModel):
+    """One entry of the unified ``[[review.models]]`` list.
+
+    ``role`` decides when the model runs. Every ``"active"`` entry reviews the
+    PR on every run: one active is a plain solo review, two or more actives
+    each review as their own A/B branch. A ``"backup"`` entry never starts a
+    review of its own -- it is a shared failover target every active branch may
+    fall back to when its own provider throttles or is cooling. Backups need no
+    ``token_env``: a promoted backup posts under the identity of the branch it
+    rescued, and the visible model label keeps the output attributable.
+    """
+
+    role: Literal["active", "backup"] = "active"
+
+
 class ReviewConfig(BaseModel):
     """Which backend to run, with which model(s), tools, and runtime image.
 
-    For throttle resilience, ``providers`` may list an ordered pool of models;
-    config order is priority and the first eligible provider is pinned for the
-    whole job, failing over to the next only on a throttle (see ``strategy``).
-    When ``providers`` is empty the single ``model`` is used as a one-entry pool,
-    so the legacy config keeps working.
+    ``models`` is the canonical surface: one unified ``[[review.models]]`` list
+    where each entry carries a ``role`` (see :class:`ReviewModel`). All active
+    entries review every PR -- one active is a solo review, several are an A/B
+    comparison with one branch per active -- and backup entries form a shared
+    failover pool each branch falls back to on throttling. Active branches run
+    concurrently when every active has a distinct ``token_env`` identity (see
+    :class:`CompareModel`), else sequentially under the shared token. The
+    ``describe`` tool is suppressed whenever more than one active runs, because
+    a PR has a single description the branches would otherwise overwrite.
 
-    ``compare`` turns one ``fuko review`` into an A/B comparison: when it is
-    non-empty the PR is reviewed once per listed model, each branch posting its own
-    fresh summary under a model-labelled header. List two or more models for an
-    actual comparison. Branches run concurrently when every entry has a distinct
-    ``token_env`` identity (see :class:`CompareModel`), else sequentially under the
-    shared token. The ``describe`` tool is suppressed in this mode because a PR has
-    a single description the branches would otherwise overwrite.
+    ``model``, ``providers``, and ``compare`` are the deprecated pre-unification
+    sections; when ``models`` is empty they are mapped onto it by
+    :func:`sidecar.pool.resolve_models` (``compare`` = all-active, ``providers``
+    = first active plus backups, ``model`` = one active), so existing configs
+    keep working unchanged.
     """
 
     backend: str = "pr-agent"
+    models: list[ReviewModel] = Field(
+        default_factory=list,
+        description=(
+            "Unified model list: every active entry reviews each PR (2+ actives "
+            "= A/B), backups are shared failover targets. Non-empty supersedes "
+            "the deprecated model/providers/compare sections."
+        ),
+    )
     model: ModelConfig = Field(default_factory=ModelConfig)
     providers: list[ModelConfig] = Field(
         default_factory=list,
-        description=("Ordered provider pool (priority = order). Empty means use `model`."),
+        description=("Deprecated: ordered provider pool. Superseded by `models` roles."),
     )
     compare: list[CompareModel] = Field(
         default_factory=list,
-        description="Models to A/B on one PR. Non-empty enables compare mode; 2+ to compare.",
+        description="Deprecated: models to A/B on one PR. Superseded by `models` roles.",
     )
+
+    @field_validator("models")
+    @classmethod
+    def _needs_an_active(cls, value: list[ReviewModel]) -> list[ReviewModel]:
+        """A non-empty unified list must contain a model that actually runs."""
+        if value and not any(m.role == "active" for m in value):
+            raise ValueError("[[review.models]] needs at least one entry with role = 'active'")
+        return value
+
     strategy: str = "failover"
     cooldown_seconds: int = 300
     tools: list[str] = Field(default_factory=lambda: ["review", "improve"])

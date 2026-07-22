@@ -3,19 +3,19 @@ image = "ghcr.io/lemehmet/pr-agent:0.38.0@sha256:433effb9a3cbedf31e061000a187305
 tool_timeout = 600
 optional_tools = ["improve"]
 
-[review.model]
-provider = "zai-coding"
-name = "glm-5.2"
-max_context = 1000000
-
-[[review.compare]]
+[[review.models]]
 provider = "zai-coding"
 name = "glm-5.2"
 max_context = 1000000
 token_env = "FUKO_GITHUB_TOKEN_DORIAN"
 
-[[review.compare]]
+[[review.models]]
 provider = "openrouter"
 name = "deepseek/deepseek-v4-pro"
 max_context = 1048576
 token_env = "FUKO_GITHUB_TOKEN_GRAY"
+
+[[review.models]]
+provider = "openrouter"
+name = "z-ai/glm-5.2"
+role = "backup"
