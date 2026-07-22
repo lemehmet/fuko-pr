@@ -40,21 +40,21 @@ def _num(value: object) -> str:
     return f'<td class="num">{escape(str(value if value is not None else "—"))}</td>'
 
 
-def _section(title: str, headers: list[str], rows: list[str], empty: str) -> str:
-    """Render one table section, or a muted empty-notice when there are no rows."""
+def _section(title: str, headers: list[tuple[str, bool]], rows: list[str], empty: str) -> str:
+    """Render one table section, or a muted empty-notice when there are no rows.
+
+    Each header is ``(label, numeric)`` -- numericness is declared per column
+    rather than inferred from the label text, so renaming a header can never
+    silently change its alignment.
+    """
     body = f'<p class="muted">{escape(empty)}</p>'
     if rows:
         head = "".join(
-            f'<th class="num">{escape(h)}</th>'
-            if h.startswith("#") or h in _NUMERIC
-            else f"<th>{escape(h)}</th>"
-            for h in headers
+            f'<th class="num">{escape(label)}</th>' if numeric else f"<th>{escape(label)}</th>"
+            for label, numeric in headers
         )
         body = f"<table><tr>{head}</tr>{''.join(rows)}</table>"
     return f"<h2>{escape(title)}</h2>{body}"
-
-
-_NUMERIC = {"runs", "ok", "not ok", "avg s", "findings", "PR", "s", "tries"}
 
 
 def render_page(
@@ -88,7 +88,15 @@ def render_page(
     parts.append(
         _section(
             "Models",
-            ["provider", "model", "runs", "ok", "not ok", "avg s", "findings"],
+            [
+                ("provider", False),
+                ("model", False),
+                ("runs", True),
+                ("ok", True),
+                ("not ok", True),
+                ("avg s", True),
+                ("findings", True),
+            ],
             [
                 f"<tr><td>{escape(m['provider'])}</td><td>{escape(m['model'])}</td>"
                 f"{_num(m['runs'])}{_num(m['ok'])}{_num(m['not_ok'])}"
@@ -102,7 +110,14 @@ def render_page(
     parts.append(
         _section(
             "Slots",
-            ["slot", "runs", "ok", "not ok", "avg s", "findings"],
+            [
+                ("slot", False),
+                ("runs", True),
+                ("ok", True),
+                ("not ok", True),
+                ("avg s", True),
+                ("findings", True),
+            ],
             [
                 f"<tr><td>{escape(s['slot'])}</td>{_num(s['runs'])}{_num(s['ok'])}"
                 f"{_num(s['not_ok'])}{_num(s['avg_duration_s'])}{_num(s['findings'])}</tr>"
@@ -115,7 +130,17 @@ def render_page(
     parts.append(
         _section(
             "Recent runs",
-            ["when", "repo", "PR", "slot", "model", "outcome", "s", "tries", "findings"],
+            [
+                ("when", False),
+                ("repo", False),
+                ("PR", True),
+                ("slot", False),
+                ("model", False),
+                ("outcome", False),
+                ("s", True),
+                ("tries", True),
+                ("findings", True),
+            ],
             [
                 f'<tr><td class="muted">{escape(r["started_at"][:16])}</td>'
                 f"<td>{escape(r['repo'])}</td>"
@@ -134,7 +159,13 @@ def render_page(
     parts.append(
         _section(
             "Reviewer health (last observed)",
-            ["repo", "reviewer", "state", "observed", "detail"],
+            [
+                ("repo", False),
+                ("reviewer", False),
+                ("state", False),
+                ("observed", False),
+                ("detail", False),
+            ],
             [
                 f"<tr><td>{escape(h['repo'])}</td><td>{escape(h['reviewer'])}</td>"
                 f'<td class="{"bad" if h["state"] in DEGRADED_STATES else "ok"}">'
@@ -150,7 +181,7 @@ def render_page(
     parts.append(
         _section(
             "Provider cooldowns (open breakers)",
-            ["provider", "cooling until"],
+            [("provider", False), ("cooling until", False)],
             [
                 f"<tr><td>{escape(provider)}</td><td>{escape(until[:16])}</td></tr>"
                 for provider, until in sorted(cooldowns.items())
