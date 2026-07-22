@@ -48,7 +48,9 @@ def all_states() -> list[dict]:
     """Return the last observed state rows for every repo (empty when disabled).
 
     The viewer's system-health section wants the whole fleet at a glance;
-    :func:`states` stays the per-repo read the runner uses.
+    :func:`states` stays the per-repo read the runner uses. Bounded (500 rows
+    = 250 repos at two reviewers each) so the read can never grow unbounded
+    with fleet size.
     """
     if not _enabled():
         return []
@@ -57,7 +59,7 @@ def all_states() -> list[dict]:
     with db() as conn:
         rows = conn.execute(
             "SELECT repo, reviewer, state, observed_at, pr, detail "
-            "FROM reviewer_health ORDER BY repo, reviewer"
+            "FROM reviewer_health ORDER BY repo, reviewer LIMIT 500"
         ).fetchall()
     return [
         {

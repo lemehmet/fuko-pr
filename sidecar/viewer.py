@@ -67,8 +67,19 @@ def render_page(
     repo: str | None,
     days: int,
     db_enabled: bool,
+    db_error: bool = False,
 ) -> str:
-    """Render the full viewer page from already-fetched data."""
+    """Render the full viewer page from already-fetched data.
+
+    Pure rendering: every argument is plain already-queried data (aggregate
+    dicts from :mod:`sidecar.run_metrics`, health rows from
+    :mod:`sidecar.reviewer_health`, the open-cooldown mapping from
+    :mod:`sidecar.circuit_breaker`) plus the echoed filter values -- the
+    function performs no I/O and never raises on empty inputs, so the caller
+    can always produce a 200. ``db_enabled=False`` renders the unconfigured
+    notice; ``db_error=True`` renders the configured-but-unreachable notice
+    (the caller substitutes empty data in that case).
+    """
     parts: list[str] = [
         f"<style>{_STYLE}</style>",
         "<title>fuko review metrics</title>",
@@ -84,6 +95,8 @@ def render_page(
             '<p class="notice">No database configured (FUKO_DATABASE_URL unset) — '
             "nothing to show.</p>"
         )
+    elif db_error:
+        parts.append('<p class="notice">Database unreachable — showing empty data.</p>')
 
     parts.append(
         _section(

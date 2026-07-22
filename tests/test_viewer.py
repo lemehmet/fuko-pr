@@ -119,3 +119,15 @@ def test_api_endpoints_remain_authed(monkeypatch):
     client = TestClient(main.app)
     for path in ("/metrics/summary", "/rh/state?repo=o%2Fr", "/cb/cooldowns"):
         assert client.get(path).status_code == 401
+
+
+def test_view_with_unreachable_database_renders_notice(monkeypatch):
+    _, client = _wire(monkeypatch)
+
+    def boom(repo=None, days=30):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(run_metrics, "summary", boom)
+    resp = client.get("/metrics/view")
+    assert resp.status_code == 200
+    assert "Database unreachable" in resp.text

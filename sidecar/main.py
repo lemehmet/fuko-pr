@@ -183,15 +183,25 @@ def metrics_view_endpoint(repo: str | None = None, days: int = 30) -> str:
     nothing mutating.
     """
     days = min(max(1, days), 3650)
+    data: dict = {"summary": [], "slots": [], "recent": [], "health": [], "cooldowns": {}}
+    db_error = False
+    try:
+        data = {
+            "summary": run_metrics.summary(repo=repo, days=days),
+            "slots": run_metrics.slot_summary(repo=repo, days=days),
+            "recent": run_metrics.recent_runs(repo=repo),
+            "health": reviewer_health.all_states(),
+            "cooldowns": circuit_breaker.get_cooldowns(),
+        }
+    except Exception as e:
+        print(f"fuko: metrics view degraded (database unreachable?): {e}", file=sys.stderr)
+        db_error = True
     return viewer.render_page(
-        summary=run_metrics.summary(repo=repo, days=days),
-        slots=run_metrics.slot_summary(repo=repo, days=days),
-        recent=run_metrics.recent_runs(repo=repo),
-        health=reviewer_health.all_states(),
-        cooldowns=circuit_breaker.get_cooldowns(),
+        **data,
         repo=repo,
         days=days,
         db_enabled=bool(settings.database_url),
+        db_error=db_error,
     )
 
 
