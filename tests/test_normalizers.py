@@ -11,16 +11,19 @@ from sidecar.backends.base import PRRef
 from sidecar.backends.pragent import PrAgentBackend
 from sidecar.normalizers import (
     coderabbit_signal,
+    collect_issue_comment_signals,
     collect_signals,
     copilot_signal,
+    guide_signals,
     is_coderabbit_comment,
     is_coderabbit_finding,
     is_copilot_comment,
+    is_guide_comment,
     is_pragent_comment,
     pragent_signal,
     pragent_signals,
 )
-from sidecar.signals import ReviewSignal, encode_marker
+from sidecar.signals import ReviewSignal, encode_marker, make_id, with_markers
 
 PRAGENT = {
     "id": 111,
@@ -262,6 +265,7 @@ def test_normalize_output_returns_only_pragent_signals(monkeypatch):
     monkeypatch.setattr(
         PrAgentBackend, "_fetch_review_comments", lambda self, a, p, h: [PRAGENT, COPILOT]
     )
+    monkeypatch.setattr(PrAgentBackend, "_fetch_issue_comments", lambda self, a, p, h: [])
     injected = []
     monkeypatch.setattr(
         PrAgentBackend,
@@ -389,6 +393,7 @@ def test_inject_markers_no_visible_label_without_compare(monkeypatch):
 def test_normalize_output_passes_compare_label_through(monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "ghtok")
     monkeypatch.setattr(PrAgentBackend, "_fetch_review_comments", lambda self, a, p, h: [PRAGENT])
+    monkeypatch.setattr(PrAgentBackend, "_fetch_issue_comments", lambda self, a, p, h: [])
     seen = []
     monkeypatch.setattr(
         PrAgentBackend,
@@ -515,3 +520,222 @@ def test_fetch_review_comments_empty(monkeypatch):
     monkeypatch.setattr(pragent.httpx, "Client", lambda *a, **k: _GetClient({1: []}))
     out = PrAgentBackend()._fetch_review_comments("https://api", PRRef("o/r", 8, "u"), {})
     assert out == []
+
+
+def test_fetch_issue_comments_paginates(monkeypatch):
+    pages = {1: [{"id": i} for i in range(100)], 2: [{"id": 555}]}
+    monkeypatch.setattr(pragent.httpx, "Client", lambda *a, **k: _GetClient(pages))
+    out = PrAgentBackend()._fetch_issue_comments("https://api", PRRef("o/r", 8, "u"), {})
+    assert len(out) == 101
+    assert out[-1]["id"] == 555
+
+
+# --- PR Reviewer Guide (issue comment) parsing -------------------------------
+
+GUIDE = {
+    "id": 555,
+    "html_url": "https://github.com/o/r/pull/8#issuecomment-555",
+    "user": {"login": "fuko-pr-review[bot]", "id": 7},
+    "body": (
+        "## PR Reviewer Guide 🔍\n\n"
+        "Here are some key observations to aid the review process:\n\n"
+        "<table>\n"
+        "<tr><td>⏱️&nbsp;<strong>Estimated effort to review</strong>: 4 🔵🔵🔵🔵⚪</td></tr>\n"
+        "<tr><td>🧪&nbsp;<strong>PR contains tests</strong></td></tr>\n"
+        "<tr><td>🔒&nbsp;<strong>Security concerns</strong><br><br>"
+        '<strong>Possible incomplete redaction:</strong><br> the `Fill "hunter2"`-style '
+        "test values may leak into workflow logs.</td></tr>\n"
+        "<tr><td>⚡&nbsp;<strong>Recommended focus areas for review</strong><br><br>"
+        "<details><summary><a href='https://github.com/o/r/pull/8/files#diff-abc123R10-R20'>"
+        "<strong>Regex Gap</strong></a>\n\n"
+        "The redaction regex misses multiline values in sidecar/redact.py:42 and beyond.\n"
+        "</summary>\n\n"
+        '```txt\nFill "hunter2"\n```\n\n'
+        "</details>"
+        "<details><summary><strong>Race Condition</strong>\n\n"
+        "Concurrent writers may clobber the sink registry.\n"
+        "</summary>\n\n"
+        "```txt\nregistry[key] = sink\n```\n\n"
+        "</details>\n\n"
+        "</td></tr>\n"
+        "</table>"
+    ),
+}
+
+
+def test_is_guide_comment():
+    assert is_guide_comment(GUIDE["body"])
+    assert not is_guide_comment(PRAGENT["body"])
+    assert not is_guide_comment("")
+
+
+def test_guide_signals_security_cell():
+    sigs = guide_signals(GUIDE, model="anthropic/claude")
+    [sec] = [s for s in sigs if s.category == "security"]
+    assert sec.title == "Possible incomplete redaction"
+    assert sec.severity == "medium"
+    assert sec.severity_source == "inferred"
+    assert "may leak into workflow logs" in sec.body
+    assert sec.thread_url == GUIDE["html_url"]
+    assert sec.backend == "pr-agent"
+    assert sec.model == "anthropic/claude"
+    assert sec.id == make_id("guide", "555", "Possible incomplete redaction")
+
+
+def test_guide_signals_focus_areas():
+    sigs = guide_signals(GUIDE, model="m")
+    focus = [s for s in sigs if s.category == "bug"]
+    assert [s.title for s in focus] == ["Regex Gap", "Race Condition"]
+    linked, plain = focus
+    # href fragment can't yield a path, but a literal path:line in the text can
+    assert (linked.file, linked.line) == ("sidecar/redact.py", 42)
+    assert "misses multiline values" in linked.body
+    assert (plain.file, plain.line) == (None, None)
+    assert "clobber the sink registry" in plain.body
+    for s in focus:
+        assert (s.severity, s.severity_source) == ("medium", "inferred")
+        assert s.backend == "pr-agent"
+        assert s.thread_url == GUIDE["html_url"]
+
+
+def test_guide_signals_are_deterministic():
+    a = guide_signals(GUIDE, model="m")
+    b = guide_signals(GUIDE, model="m")
+    assert [s.id for s in a] == [s.id for s in b]
+    assert len({s.id for s in a}) == 3
+
+
+def test_guide_signals_no_op_variants_emit_nothing():
+    body = (
+        "## PR Reviewer Guide 🔍\n\n<table>\n"
+        "<tr><td>🔒&nbsp;<strong>No security concerns identified</strong></td></tr>\n"
+        "<tr><td>⚡&nbsp;<strong>No major issues detected</strong></td></tr>\n"
+        "</table>"
+    )
+    assert guide_signals(dict(GUIDE, body=body)) == []
+
+
+def test_guide_signals_security_without_lead_phrase_gets_default_title():
+    body = (
+        "## PR Reviewer Guide 🔍\n\n<table>\n"
+        "<tr><td>🔒&nbsp;<strong>Security concerns</strong><br><br>"
+        "Plain free text without a bolded lead.</td></tr>\n</table>"
+    )
+    [sig] = guide_signals(dict(GUIDE, body=body))
+    assert sig.title == "Security concern"
+    assert sig.body == "Plain free text without a bolded lead."
+
+
+def test_guide_signals_empty_security_cell_emits_nothing():
+    body = (
+        "## PR Reviewer Guide 🔍\n\n<table>\n"
+        "<tr><td>🔒&nbsp;<strong>Security concerns</strong><br><br></td></tr>\n</table>"
+    )
+    assert guide_signals(dict(GUIDE, body=body)) == []
+
+
+def test_guide_signals_tolerates_malformed_bodies():
+    for body in [
+        "not a guide at all",
+        "",
+        "## PR Reviewer Guide 🔍\n\nno table here",
+        "## PR Reviewer Guide 🔍\n\n<table><tr><td>broken",
+        "## PR Reviewer Guide 🔍\n\n<table><tr><td>⚡&nbsp;"
+        "<strong>Recommended focus areas for review</strong><br><br>"
+        "<details>no summary tag</details></td></tr></table>",
+        "## PR Reviewer Guide 🔍\n\n<table><tr><td>⚡&nbsp;"
+        "<strong>Recommended focus areas for review</strong><br><br>"
+        "<details><summary><strong></strong></summary></details></td></tr></table>",
+    ]:
+        assert guide_signals(dict(GUIDE, body=body)) == []
+    assert guide_signals({}) == []
+    # a non-string body must be swallowed too, never raise
+    assert guide_signals(dict(GUIDE, body=12345)) == []
+
+
+def test_guide_signals_summary_without_strong_uses_first_line():
+    body = (
+        "## PR Reviewer Guide 🔍\n\n<table>\n"
+        "<tr><td>⚡&nbsp;<strong>Recommended focus areas for review</strong><br><br>"
+        "<details><summary>Plain Title\n\nThe description follows the title line.\n"
+        "</summary>\n\n</details></td></tr>\n</table>"
+    )
+    [sig] = guide_signals(dict(GUIDE, body=body))
+    assert sig.title == "Plain Title"
+    assert "description follows" in sig.body
+
+
+def test_collect_issue_comment_signals_rehydrates_guide_titles():
+    sigs = guide_signals(GUIDE, model="openai/glm-5.2")
+    marked = dict(GUIDE, body=with_markers(GUIDE["body"], sigs))
+    # collected under a DIFFERENT local model — marker attribution must win
+    out = collect_issue_comment_signals([marked], model="ollama/qwen")
+    assert len(out) == 3
+    assert {s.model for s in out} == {"openai/glm-5.2"}
+    assert [s.title for s in out] == [
+        "Possible incomplete redaction",
+        "Regex Gap",
+        "Race Condition",
+    ]
+    assert all(s.body for s in out)
+    assert {s.id for s in out} == {s.id for s in sigs}
+
+
+def test_collect_issue_comment_signals_marker_only_comment():
+    marker_sig = ReviewSignal(id="fk_solo", backend="pr-agent", model="m", category="security")
+    body = "some other bot output\n\n" + encode_marker(marker_sig)
+    [out] = collect_issue_comment_signals(
+        [{"id": 1, "html_url": "https://x/#c1", "body": body}], model=""
+    )
+    assert out.id == "fk_solo"
+    assert out.thread_url == "https://x/#c1"  # filled from the comment payload
+    assert out.title == ""  # no fresh parse available to rehydrate
+
+
+def test_collect_issue_comment_signals_skips_unmarked():
+    assert collect_issue_comment_signals([{"id": 1, "body": "walkthrough"}, {}]) == []
+
+
+def test_normalize_output_includes_guide_signals(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "ghtok")
+    monkeypatch.setattr(PrAgentBackend, "_fetch_review_comments", lambda self, a, p, h: [PRAGENT])
+    walkthrough = {"id": 9, "body": "a non-guide issue comment (e.g. CodeRabbit walkthrough)"}
+    empty_guide = {"id": 10, "body": "## PR Reviewer Guide 🔍\n\nno table -> no signals"}
+    monkeypatch.setattr(
+        PrAgentBackend,
+        "_fetch_issue_comments",
+        lambda self, a, p, h: [walkthrough, GUIDE, empty_guide],
+    )
+    monkeypatch.setattr(
+        PrAgentBackend, "_inject_markers", lambda self, a, p, h, pairs, label=None, actor=None: None
+    )
+    marked = []
+    monkeypatch.setattr(
+        PrAgentBackend,
+        "_mark_guide_comments",
+        lambda self, a, p, h, pairs, label=None, actor=None: marked.append((pairs, label)),
+    )
+    sigs = PrAgentBackend().normalize_output(PRRef("o/r", 8, "u"), model="anthropic/claude")
+    assert len(sigs) == 4  # 1 inline + 1 security + 2 focus areas
+    assert {s.backend for s in sigs} == {"pr-agent"}
+    assert [s.category for s in sigs[1:]] == ["security", "bug", "bug"]
+    # the guide pairs handed to the marking step carry the same parsed signals
+    assert len(marked) == 1
+    assert len(marked[0][0]) == 1
+    assert len(marked[0][0][0]["signals"]) == 3
+
+
+def test_normalize_output_degrades_when_issue_fetch_fails(monkeypatch, capsys):
+    monkeypatch.setenv("GITHUB_TOKEN", "ghtok")
+    monkeypatch.setattr(PrAgentBackend, "_fetch_review_comments", lambda self, a, p, h: [PRAGENT])
+    monkeypatch.setattr(
+        PrAgentBackend, "_inject_markers", lambda self, a, p, h, pairs, label=None, actor=None: None
+    )
+
+    def boom(self, a, p, h):
+        raise httpx.HTTPError("nope")
+
+    monkeypatch.setattr(PrAgentBackend, "_fetch_issue_comments", boom)
+    sigs = PrAgentBackend().normalize_output(PRRef("o/r", 8, "u"), model="m")
+    assert [s.file for s in sigs] == ["src/lib/breakLogic.ts"]  # inline survives
+    assert "could not read issue comments" in capsys.readouterr().err

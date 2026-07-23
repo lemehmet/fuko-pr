@@ -357,12 +357,43 @@ def test_cmd_signals_emits_json(monkeypatch, tmp_path, capsys):
         {"user": {"login": "Copilot"}, "body": "Use strict equality.", "path": "a.ts", "line": 3},
     ]
     monkeypatch.setattr(runner, "fetch_inline_comments", lambda pr, token, api: comments)
+    monkeypatch.setattr(runner, "fetch_issue_comments", lambda pr, token, api: [])
     cli._cmd_signals(argparse.Namespace(pr_url="https://github.com/o/r/pull/8", config=str(cfg)))
 
     out = json.loads(capsys.readouterr().out)
     assert len(out) == 1
     assert out[0]["backend"] == "copilot"
     assert out[0]["file"] == "a.ts"
+
+
+def test_cmd_signals_merges_issue_comment_markers(monkeypatch, tmp_path, capsys):
+    import argparse
+    import json
+
+    from sidecar import cli
+    from sidecar.signals import ReviewSignal, encode_marker
+
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text('[review.model]\nprovider = "anthropic"\nname = "claude"\n', encoding="utf-8")
+    inline = [
+        {"user": {"login": "Copilot"}, "body": "Use strict equality.", "path": "a.ts", "line": 3},
+    ]
+    guide_marker = encode_marker(
+        ReviewSignal(id="fk_guide1", category="security", backend="pr-agent", model="openai/glm")
+    )
+    issue = [
+        {"id": 5, "html_url": "https://x/#c5", "body": "## PR Reviewer Guide\n\n" + guide_marker},
+        {"id": 6, "body": "walkthrough, no markers"},
+    ]
+    monkeypatch.setattr(runner, "fetch_inline_comments", lambda pr, token, api: inline)
+    monkeypatch.setattr(runner, "fetch_issue_comments", lambda pr, token, api: issue)
+    cli._cmd_signals(argparse.Namespace(pr_url="https://github.com/o/r/pull/8", config=str(cfg)))
+
+    out = json.loads(capsys.readouterr().out)
+    assert [s["backend"] for s in out] == ["copilot", "pr-agent"]
+    assert out[1]["id"] == "fk_guide1"
+    assert out[1]["category"] == "security"
+    assert out[1]["model"] == "openai/glm"  # marker attribution, not local config
 
 
 def _http_error(status):

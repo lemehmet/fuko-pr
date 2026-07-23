@@ -98,7 +98,7 @@ def _cmd_signals(args) -> None:
 
     from . import runner
     from .fukoconfig import load_config
-    from .normalizers import collect_signals
+    from .normalizers import collect_issue_comment_signals, collect_signals
     from .presets import UnknownPresetError, get_preset
 
     cfg = load_config(args.config)
@@ -114,10 +114,13 @@ def _cmd_signals(args) -> None:
 
     try:
         comments = runner.fetch_inline_comments(pr, token, api_url)
+        issue_comments = runner.fetch_issue_comments(pr, token, api_url)
     except httpx.HTTPStatusError as e:
         _exit_on_auth_error(e, pr, token)
 
-    signals = collect_signals(comments, model)
+    signals = collect_signals(comments, model) + collect_issue_comment_signals(
+        issue_comments, model
+    )
     print(json.dumps([s.model_dump() for s in signals], indent=2))
 
 

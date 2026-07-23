@@ -29,11 +29,11 @@ import threading
 import httpx
 
 from ..fukoconfig import ModelConfig, ReviewConfig
-from ..normalizers import pragent_signals
+from ..normalizers import guide_signals, is_guide_comment, pragent_signals
 from ..presets import ProviderPreset
 from ..throttle import is_throttle
 from .base import InvokeResult, PRRef
-from ..signals import ReviewSignal, extract_markers, with_marker, with_visible_label
+from ..signals import ReviewSignal, extract_markers, with_marker, with_markers, with_visible_label
 
 
 _TOOL_FLAGS = {
@@ -278,7 +278,13 @@ class PrAgentBackend:
         api_url: str | None = None,
         actor: str | None = None,
     ) -> list[ReviewSignal]:
-        """Read PR-Agent's inline comments, map them to Review Signals, and mark them.
+        """Read PR-Agent's comments, map them to Review Signals, and mark them.
+
+        Covers both the inline suggestions AND the "PR Reviewer Guide" issue
+        comment: the guide's security-concerns cell and focus-area blocks are
+        parsed into signals too, and their markers are appended to the guide
+        comment itself (a different PATCH endpoint — issue comments, not pull
+        review comments; see :meth:`_mark_guide_comments`).
 
         Detection is by comment *format* (PR-Agent posts under whatever token ran
         it), so this matches its ``**Suggestion:**`` shape rather than an author.
@@ -319,18 +325,19 @@ class PrAgentBackend:
 
         pairs = pragent_signals(comments, model)
         self._inject_markers(api, pr, headers, pairs, label=compare_label, actor=actor)
-        return [p["signal"] for p in pairs]
 
-    def _fetch_review_comments(self, api: str, pr: PRRef, headers: dict[str, str]) -> list[dict]:
-        """Return all inline review comments on the PR (paginated)."""
+        guide_pairs = self._guide_pairs(api, pr, headers, model)
+        self._mark_guide_comments(api, pr, headers, guide_pairs, label=compare_label, actor=actor)
+        guide_sigs = [s for gp in guide_pairs for s in gp["signals"]]
+        return [p["signal"] for p in pairs] + guide_sigs
+
+    def _fetch_paginated(self, url: str, headers: dict[str, str]) -> list[dict]:
+        """Return every item of a bare-array GitHub list endpoint (paginated)."""
         out: list[dict] = []
         page = 1
         with httpx.Client(timeout=30.0, headers=headers) as client:
             while True:
-                resp = client.get(
-                    f"{api}/repos/{pr.repo}/pulls/{pr.number}/comments",
-                    params={"page": page, "per_page": 100},
-                )
+                resp = client.get(url, params={"page": page, "per_page": 100})
                 resp.raise_for_status()
                 batch = resp.json()
                 if not batch:
@@ -340,6 +347,35 @@ class PrAgentBackend:
                     break
                 page += 1
         return out
+
+    def _fetch_review_comments(self, api: str, pr: PRRef, headers: dict[str, str]) -> list[dict]:
+        """Return all inline review comments on the PR (paginated)."""
+        return self._fetch_paginated(f"{api}/repos/{pr.repo}/pulls/{pr.number}/comments", headers)
+
+    def _fetch_issue_comments(self, api: str, pr: PRRef, headers: dict[str, str]) -> list[dict]:
+        """Return all issue-level comments on the PR (paginated) — where the guide lives."""
+        return self._fetch_paginated(f"{api}/repos/{pr.repo}/issues/{pr.number}/comments", headers)
+
+    def _guide_pairs(self, api: str, pr: PRRef, headers: dict[str, str], model: str) -> list[dict]:
+        """Return ``(comment, signals)`` pairs for every guide comment yielding signals.
+
+        The "PR Reviewer Guide" is an *issue* comment (not an inline review comment),
+        so it is fetched from the issues endpoint. Failure to read degrades to an
+        empty list — the review itself already ran, same policy as inline comments.
+        """
+        try:
+            comments = self._fetch_issue_comments(api, pr, headers)
+        except httpx.HTTPError as e:
+            print(f"fuko: could not read issue comments for normalization: {e}", file=sys.stderr)
+            return []
+        pairs: list[dict] = []
+        for c in comments:
+            if not is_guide_comment(c.get("body", "") or ""):
+                continue
+            signals = guide_signals(c, model)
+            if signals:
+                pairs.append({"comment": c, "signals": signals})
+        return pairs
 
     def _resolve_actor(self, api: str, client: httpx.Client) -> str | None:
         """Return the GitHub actor id ``client``'s token authenticates as, or ``None``.
@@ -418,6 +454,58 @@ class PrAgentBackend:
                 try:
                     resp = client.patch(
                         f"{api}/repos/{pr.repo}/pulls/comments/{comment['id']}",
+                        json={"body": new_body},
+                    )
+                    resp.raise_for_status()
+                except httpx.HTTPError:
+                    continue
+
+    def _mark_guide_comments(
+        self,
+        api: str,
+        pr: PRRef,
+        headers: dict[str, str],
+        pairs: list[dict],
+        label: str | None = None,
+        actor: str | None = None,
+    ) -> None:
+        """Best-effort: append every guide signal's marker to its guide comment.
+
+        Same author-scoping contract as :meth:`_inject_markers` (skip when
+        unauthenticated; skip foreign-authored comments; in A/B mode with no
+        resolvable identity refuse outright, #66) — but a *different* PATCH
+        endpoint: the guide is an issue comment, edited via
+        ``/repos/{repo}/issues/comments/{id}``, not ``/pulls/comments/{id}``.
+
+        Unlike inline comments (one marker each, skip-if-marked), the guide body
+        carries the whole set: existing fuko markers are stripped and the freshly
+        parsed set re-appended (``with_markers``). ``make_id`` is deterministic, so
+        a re-run derives an identical body and the PATCH is skipped — idempotent
+        without ever letting markers go stale or duplicate.
+        """
+        if not pairs or "Authorization" not in headers:
+            return
+        with httpx.Client(timeout=30.0, headers=headers) as client:
+            if actor is None:
+                actor = self._resolve_actor(api, client)
+            if actor is None and label is not None:
+                print(
+                    "fuko: A/B guide marking skipped — branch identity unresolved; marking "
+                    "could relabel a sibling branch's guide comment (#66)",
+                    file=sys.stderr,
+                )
+                return
+            for pair in pairs:
+                comment, signals = pair["comment"], pair["signals"]
+                if actor is not None and str((comment.get("user") or {}).get("id")) != actor:
+                    continue
+                body = comment.get("body") or ""
+                new_body = with_markers(body, signals)
+                if new_body == body:
+                    continue
+                try:
+                    resp = client.patch(
+                        f"{api}/repos/{pr.repo}/issues/comments/{comment['id']}",
                         json={"body": new_body},
                     )
                     resp.raise_for_status()

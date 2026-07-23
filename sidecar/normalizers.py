@@ -12,6 +12,7 @@ PR-Agent posts under whatever token runs it (an app bot in CI, a human PAT local
 
 from __future__ import annotations
 
+import html
 import re
 
 from .signals import Category, ReviewSignal, extract_markers, make_id
@@ -217,6 +218,126 @@ def coderabbit_signal(comment: dict) -> ReviewSignal:
     )
 
 
+_GUIDE_HEADER = "PR Reviewer Guide"
+_GUIDE_SECURITY_CELL = "<strong>Security concerns</strong>"
+_GUIDE_FOCUS_CELL = "<strong>Recommended focus areas for review</strong>"
+_TD_RE = re.compile(r"<td>(.*?)</td>", re.S | re.I)
+_DETAILS_RE = re.compile(r"<details>(.*?)</details>", re.S | re.I)
+_SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.S | re.I)
+_STRONG_RE = re.compile(r"<strong>(.*?)</strong>", re.S | re.I)
+_BR_RE = re.compile(r"<br\s*/?>", re.I)
+_TAG_RE = re.compile(r"<[^>]+>")
+_PATH_LINE_RE = re.compile(r"\b([\w./-]+\.[A-Za-z]\w*):(\d+)\b")
+
+
+def _html_to_text(fragment: str) -> str:
+    """Flatten an HTML fragment to plain text (``<br>`` -> newline, tags dropped)."""
+    text = _BR_RE.sub("\n", fragment)
+    text = _TAG_RE.sub("", text)
+    text = html.unescape(text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def is_guide_comment(body: str) -> bool:
+    """Return whether ``body`` looks like PR-Agent's "PR Reviewer Guide" issue comment."""
+    return _GUIDE_HEADER in (body or "")
+
+
+def guide_signals(comment: dict, model: str = "") -> list[ReviewSignal]:
+    """Parse a PR-Agent "PR Reviewer Guide" issue comment into Review Signals.
+
+    The guide is an HTML table with an optional "Security concerns" cell (one
+    ``security`` signal when it carries free text; the "No security concerns
+    identified" variant emits nothing) and an optional "Recommended focus areas
+    for review" cell holding one ``<details>`` block per focus area (one ``bug``
+    signal each; the "No major issues detected" variant emits nothing). Severity
+    is always ``medium``/``inferred`` — the guide declares none.
+
+    Ids are deterministic (``make_id("guide", <comment id>, title)``), so
+    re-parsing the same comment re-derives the same signals — that is what keeps
+    marker injection into the guide body idempotent. Tolerant by contract: a
+    malformed or unexpected body yields ``[]`` and never raises.
+    """
+    try:
+        body = comment.get("body", "") or ""
+        if _GUIDE_HEADER not in body:
+            return []
+        cid = str(comment.get("id", ""))
+        url = comment.get("html_url")
+        out: list[ReviewSignal] = []
+        for cell in _TD_RE.findall(body):
+            if _GUIDE_SECURITY_CELL in cell:
+                out.extend(_guide_security_signals(cell, cid, url, model))
+            elif _GUIDE_FOCUS_CELL in cell:
+                out.extend(_guide_focus_signals(cell, cid, url, model))
+        return out
+    except Exception:
+        return []
+
+
+def _guide_security_signals(cell: str, cid: str, url: str | None, model: str):
+    """Map the guide's "Security concerns" cell to (at most) one security signal."""
+    content = cell.split(_GUIDE_SECURITY_CELL, 1)[1]
+    text = _html_to_text(content)
+    if not text:
+        return []
+    strong = _STRONG_RE.search(content)
+    title = _html_to_text(strong.group(1)).rstrip(":") if strong else ""
+    title = title or "Security concern"
+    return [
+        ReviewSignal(
+            id=make_id("guide", cid, title),
+            severity="medium",
+            severity_source="inferred",
+            category="security",
+            title=title[:200],
+            body=text,
+            thread_url=url,
+            backend="pr-agent",
+            model=model,
+        )
+    ]
+
+
+def _guide_focus_signals(cell: str, cid: str, url: str | None, model: str):
+    """Map each ``<details>`` focus area in the guide's focus cell to a signal."""
+    out: list[ReviewSignal] = []
+    for block in _DETAILS_RE.findall(cell):
+        summary = _SUMMARY_RE.search(block)
+        if not summary:
+            continue
+        summary_html = summary.group(1)
+        strong = _STRONG_RE.search(summary_html)
+        if strong:
+            title = _html_to_text(strong.group(1))
+            desc_html = re.sub(r"^\s*</a>", "", summary_html[strong.end() :])
+        else:
+            title = _html_to_text(summary_html).split("\n", 1)[0]
+            desc_html = summary_html
+        if not title:
+            continue
+        desc = _html_to_text(desc_html)
+        # The diff-anchor href fragment cannot yield a path; only a literal
+        # ``path:line`` in the text can locate the finding.
+        loc = _PATH_LINE_RE.search(desc)
+        out.append(
+            ReviewSignal(
+                id=make_id("guide", cid, title),
+                file=loc.group(1) if loc else None,
+                line=int(loc.group(2)) if loc else None,
+                severity="medium",
+                severity_source="inferred",
+                category="bug",
+                title=title[:200],
+                body=desc,
+                thread_url=url,
+                backend="pr-agent",
+                model=model,
+            )
+        )
+    return out
+
+
 def _prefer_marker(base: ReviewSignal, body: str) -> ReviewSignal:
     """If ``body`` carries a fuko-signal marker, trust it over the fresh parse.
 
@@ -252,4 +373,32 @@ def collect_signals(comments: list[dict], model: str = "") -> list[ReviewSignal]
             out.append(_prefer_marker(copilot_signal(c), body))
         elif is_coderabbit_comment(c) and is_coderabbit_finding(body):
             out.append(_prefer_marker(coderabbit_signal(c), body))
+    return out
+
+
+def collect_issue_comment_signals(comments: list[dict], model: str = "") -> list[ReviewSignal]:
+    """Collect signals from PR *issue* comments carrying embedded fuko markers.
+
+    Marker-driven, mirroring :func:`_prefer_marker`: the markers written at review
+    time are authoritative for the machine fields. The human-facing ``title``/``body``
+    (excluded from markers) are re-hydrated from a fresh guide parse when the comment
+    is PR-Agent's "PR Reviewer Guide" — ``make_id`` is deterministic, so each marker
+    matches its freshly parsed signal by id. Markers in other issue comments are
+    yielded as-is. Comments without markers yield nothing.
+    """
+    out: list[ReviewSignal] = []
+    for c in comments:
+        body = c.get("body", "") or ""
+        markers = extract_markers(body)
+        if not markers:
+            continue
+        fresh = {s.id: s for s in guide_signals(c, model)}
+        for marker in markers:
+            parsed = fresh.get(marker.id)
+            if parsed is not None:
+                marker.title = parsed.title
+                marker.body = parsed.body
+            if not marker.thread_url:
+                marker.thread_url = c.get("html_url")
+            out.append(marker)
     return out

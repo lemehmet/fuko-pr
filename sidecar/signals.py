@@ -84,6 +84,21 @@ def with_marker(body: str, signal: ReviewSignal) -> str:
     return strip_markers(body).rstrip() + "\n\n" + encode_marker(signal)
 
 
+def with_markers(body: str, signals: list[ReviewSignal]) -> str:
+    """Return ``body`` with every signal's marker appended, replacing existing markers.
+
+    Unlike :func:`with_marker` (one marker per inline comment), this supports comments
+    that carry SEVERAL findings — e.g. PR-Agent's "PR Reviewer Guide" issue comment,
+    where each security concern and focus area gets its own marker. All existing fuko
+    markers are stripped first and the fresh set appended, so re-running with a
+    deterministically re-derived set is idempotent (same signals -> same body).
+    """
+    out = strip_markers(body).rstrip()
+    for signal in signals:
+        out += "\n\n" + encode_marker(signal)
+    return out
+
+
 _VISIBLE_LABEL_RE = re.compile(r"^🤖 `[^`]+`\n\n")
 
 

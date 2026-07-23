@@ -8,6 +8,7 @@ from sidecar.signals import (
     strip_markers,
     visible_label,
     with_marker,
+    with_markers,
     with_visible_label,
 )
 
@@ -110,6 +111,33 @@ def test_with_marker_is_idempotent():
     twice = with_marker(once, _signal(id="fk_x"))
     assert twice.count("fuko-signal:v1") == 1
     assert extract_markers(twice)[0].id == "fk_x"
+
+
+def test_with_markers_appends_all_signals():
+    body = with_markers("Guide text", [_signal(id="fk_a"), _signal(id="fk_b")])
+    assert body.startswith("Guide text")
+    assert [s.id for s in extract_markers(body)] == ["fk_a", "fk_b"]
+
+
+def test_with_markers_is_idempotent():
+    signals = [_signal(id="fk_a"), _signal(id="fk_b")]
+    once = with_markers("Guide text", signals)
+    twice = with_markers(once, signals)
+    assert twice == once
+    assert twice.count("fuko-signal:v1") == 2
+
+
+def test_with_markers_replaces_stale_set():
+    once = with_markers("Guide text", [_signal(id="fk_old")])
+    reset = with_markers(once, [_signal(id="fk_new1"), _signal(id="fk_new2")])
+    ids = [s.id for s in extract_markers(reset)]
+    assert ids == ["fk_new1", "fk_new2"]
+    assert "Guide text" in reset
+
+
+def test_with_markers_empty_strips_only():
+    once = with_markers("Guide text", [_signal(id="fk_a")])
+    assert with_markers(once, []) == "Guide text"
 
 
 def test_with_visible_label_prepends_tag_and_marker():
