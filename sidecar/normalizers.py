@@ -221,10 +221,10 @@ def coderabbit_signal(comment: dict) -> ReviewSignal:
 _GUIDE_HEADER = "PR Reviewer Guide"
 _GUIDE_SECURITY_CELL = "<strong>Security concerns</strong>"
 _GUIDE_FOCUS_CELL = "<strong>Recommended focus areas for review</strong>"
-_TD_RE = re.compile(r"<td>(.*?)</td>", re.S | re.I)
-_DETAILS_RE = re.compile(r"<details>(.*?)</details>", re.S | re.I)
-_SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.S | re.I)
-_STRONG_RE = re.compile(r"<strong>(.*?)</strong>", re.S | re.I)
+_TD_RE = re.compile(r"<td\b[^>]*>(.*?)</td>", re.S | re.I)
+_DETAILS_RE = re.compile(r"<details\b[^>]*>(.*?)</details>", re.S | re.I)
+_SUMMARY_RE = re.compile(r"<summary\b[^>]*>(.*?)</summary>", re.S | re.I)
+_STRONG_RE = re.compile(r"<strong\b[^>]*>(.*?)</strong>", re.S | re.I)
 _BR_RE = re.compile(r"<br\s*/?>", re.I)
 _TAG_RE = re.compile(r"<[^>]+>")
 _PATH_LINE_RE = re.compile(r"\b([\w./-]+\.[A-Za-z]\w*):(\d+)\b")
@@ -300,7 +300,13 @@ def _guide_security_signals(cell: str, cid: str, url: str | None, model: str):
 
 
 def _guide_focus_signals(cell: str, cid: str, url: str | None, model: str):
-    """Map each ``<details>`` focus area in the guide's focus cell to a signal."""
+    """Map each ``<details>`` focus area in the guide's focus cell to a signal.
+
+    ``file``/``line`` are populated only from a literal ``path:line`` in the
+    description text: the focus area's ``<a href>`` points at a GitHub diff
+    anchor (``#diff-<sha>R<start>-R<end>``), which carries no source path, so
+    the href alone cannot locate the finding.
+    """
     out: list[ReviewSignal] = []
     for block in _DETAILS_RE.findall(cell):
         summary = _SUMMARY_RE.search(block)
@@ -317,8 +323,6 @@ def _guide_focus_signals(cell: str, cid: str, url: str | None, model: str):
         if not title:
             continue
         desc = _html_to_text(desc_html)
-        # The diff-anchor href fragment cannot yield a path; only a literal
-        # ``path:line`` in the text can locate the finding.
         loc = _PATH_LINE_RE.search(desc)
         out.append(
             ReviewSignal(

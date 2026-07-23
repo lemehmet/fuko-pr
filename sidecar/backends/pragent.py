@@ -305,6 +305,15 @@ class PrAgentBackend:
         token CAN edit a sibling branch's comments -- GitHub does not stop it
         (#66) -- so in A/B mode marking is refused outright when no identity can
         be resolved rather than risk relabeling another branch's output.
+
+        The returned signal set feeds each branch's per-run findings metric
+        (``_record_run``). In A/B mode every slot's comments are visible here, so
+        the return is author-scoped the same way marking is -- otherwise a sibling
+        slot's inline and guide findings would inflate this slot's count (see
+        issues #66 and #73). Identity is resolved once up front for that scoping
+        (A/B only; when unresolvable, nothing is attributed rather than
+        everything). Solo mode keeps the legacy return-all and resolves lazily
+        inside the mark path.
         """
         token = os.environ.get("GITHUB_TOKEN", "") if token is None else token
         if api_url is None:
@@ -317,13 +326,6 @@ class PrAgentBackend:
         if token:
             headers["Authorization"] = "Bearer " + token
 
-        # In A/B compare mode, resolve our GitHub identity ONCE up front so marking
-        # and the returned findings set agree. Several slots review the same PR, so
-        # `_fetch_*` sees every slot's comments; without author-scoping the returned
-        # set (which feeds this branch's per-run findings metric via `_record_run`)
-        # would be inflated by sibling slots' findings — the same misattribution the
-        # marking filter guards against (#66, #73). Solo mode needs no up-front
-        # resolution: it returns all signals and the mark path resolves lazily.
         if compare_label is not None and actor is None and "Authorization" in headers:
             with httpx.Client(timeout=30.0, headers=headers) as client:
                 actor = self._resolve_actor(api, client)
@@ -340,10 +342,6 @@ class PrAgentBackend:
         guide_pairs = self._guide_pairs(api, pr, headers, model)
         self._mark_guide_comments(api, pr, headers, guide_pairs, label=compare_label, actor=actor)
 
-        # Scope the returned signals to comments WE authored in A/B mode, mirroring
-        # the marking author-filter. Solo mode (no label) keeps the legacy
-        # return-all. If identity is unresolvable in A/B mode we can attribute
-        # nothing to ourselves, so we claim nothing rather than inflate.
         if compare_label is not None:
             pairs = [p for p in pairs if self._authored_by(p["comment"], actor)]
             guide_pairs = [gp for gp in guide_pairs if self._authored_by(gp["comment"], actor)]
@@ -352,10 +350,18 @@ class PrAgentBackend:
 
     @staticmethod
     def _authored_by(comment: dict, actor: str | None) -> bool:
-        """Return whether ``comment`` was authored by ``actor`` (False if unresolved)."""
+        """Return whether ``comment`` was authored by ``actor`` (False if unresolved).
+
+        The comment's numeric ``user.id`` is stringified before comparison so an
+        ``int`` id matches the string ``actor`` (both the branch-header post and
+        ``_resolve_actor`` yield ``actor`` as a string).
+        """
         if actor is None:
             return False
-        return str((comment.get("user") or {}).get("id")) == actor
+        user_id = (comment.get("user") or {}).get("id")
+        if user_id is None:
+            return False
+        return str(user_id) == actor
 
     def _fetch_paginated(self, url: str, headers: dict[str, str]) -> list[dict]:
         """Return every item of a bare-array GitHub list endpoint (paginated)."""

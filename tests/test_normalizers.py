@@ -665,6 +665,29 @@ def test_guide_signals_summary_without_strong_uses_first_line():
     assert "description follows" in sig.body
 
 
+def test_guide_signals_tolerate_tag_attributes():
+    # PR-Agent may emit attributes on the structural tags (<td align=...>,
+    # <details open>); parsing must not silently yield nothing (Copilot, #73).
+    body = (
+        "## PR Reviewer Guide 🔍\n\n<table>\n"
+        '<tr><td align="left">⚡&nbsp;<strong>Recommended focus areas for review</strong><br><br>'
+        '<details open><summary class="x"><strong>Attr Tag</strong>\n\n'
+        "Body under an attributed summary.\n</summary>\n\n</details></td></tr>\n</table>"
+    )
+    [sig] = guide_signals(dict(GUIDE, body=body))
+    assert sig.title == "Attr Tag"
+    assert "attributed summary" in sig.body
+
+
+def test_authored_by_matches_int_user_id():
+    from sidecar.backends.pragent import PrAgentBackend
+
+    assert PrAgentBackend._authored_by({"user": {"id": 42}}, "42") is True
+    assert PrAgentBackend._authored_by({"user": {"id": 99}}, "42") is False
+    assert PrAgentBackend._authored_by({"user": {"id": 42}}, None) is False
+    assert PrAgentBackend._authored_by({}, "42") is False
+
+
 def test_collect_issue_comment_signals_rehydrates_guide_titles():
     sigs = guide_signals(GUIDE, model="openai/glm-5.2")
     marked = dict(GUIDE, body=with_markers(GUIDE["body"], sigs))
