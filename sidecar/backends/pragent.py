@@ -317,6 +317,17 @@ class PrAgentBackend:
         if token:
             headers["Authorization"] = "Bearer " + token
 
+        # In A/B compare mode, resolve our GitHub identity ONCE up front so marking
+        # and the returned findings set agree. Several slots review the same PR, so
+        # `_fetch_*` sees every slot's comments; without author-scoping the returned
+        # set (which feeds this branch's per-run findings metric via `_record_run`)
+        # would be inflated by sibling slots' findings — the same misattribution the
+        # marking filter guards against (#66, #73). Solo mode needs no up-front
+        # resolution: it returns all signals and the mark path resolves lazily.
+        if compare_label is not None and actor is None and "Authorization" in headers:
+            with httpx.Client(timeout=30.0, headers=headers) as client:
+                actor = self._resolve_actor(api, client)
+
         try:
             comments = self._fetch_review_comments(api, pr, headers)
         except httpx.HTTPError as e:
@@ -328,8 +339,23 @@ class PrAgentBackend:
 
         guide_pairs = self._guide_pairs(api, pr, headers, model)
         self._mark_guide_comments(api, pr, headers, guide_pairs, label=compare_label, actor=actor)
+
+        # Scope the returned signals to comments WE authored in A/B mode, mirroring
+        # the marking author-filter. Solo mode (no label) keeps the legacy
+        # return-all. If identity is unresolvable in A/B mode we can attribute
+        # nothing to ourselves, so we claim nothing rather than inflate.
+        if compare_label is not None:
+            pairs = [p for p in pairs if self._authored_by(p["comment"], actor)]
+            guide_pairs = [gp for gp in guide_pairs if self._authored_by(gp["comment"], actor)]
         guide_sigs = [s for gp in guide_pairs for s in gp["signals"]]
         return [p["signal"] for p in pairs] + guide_sigs
+
+    @staticmethod
+    def _authored_by(comment: dict, actor: str | None) -> bool:
+        """Return whether ``comment`` was authored by ``actor`` (False if unresolved)."""
+        if actor is None:
+            return False
+        return str((comment.get("user") or {}).get("id")) == actor
 
     def _fetch_paginated(self, url: str, headers: dict[str, str]) -> list[dict]:
         """Return every item of a bare-array GitHub list endpoint (paginated)."""

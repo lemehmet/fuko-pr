@@ -1301,6 +1301,80 @@ def test_normalize_output_uses_passed_token_over_env(monkeypatch):
     assert captured["headers"]["Authorization"] == "Bearer branch-tok"
 
 
+def test_normalize_output_scopes_returned_signals_to_actor_in_ab_mode(monkeypatch):
+    """In A/B compare mode several slots comment on one PR. The returned signal set
+    feeds this branch's per-run findings metric, so it must be scoped to comments WE
+    authored — a sibling slot's inline suggestion AND guide finding must not inflate
+    our count (#73). Marking is already author-scoped; this covers the return path."""
+    mine = "42"
+    theirs = "99"
+    suggestion = "**Suggestion:** Guard the zero case. [possible issue, importance: 7]"
+    guide_body = (
+        "## PR Reviewer Guide 🔍\n\n<table>\n"
+        "<tr><td>⚡&nbsp;<strong>Recommended focus areas for review</strong><br><br>"
+        "<details><summary><strong>Ownership race</strong>\n\n"
+        "Two writers can claim the same sink.\n</summary>\n\n</details>\n"
+        "</td></tr>\n</table>"
+    )
+
+    def comment(cid, uid, body, kind):
+        c = {"id": cid, "user": {"login": f"bot-{uid}[bot]", "id": uid}, "body": body}
+        c["html_url"] = f"https://github.com/o/r/pull/8#{kind}-{cid}"
+        return c
+
+    class _RWClient:
+        patched = []
+
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *e):
+            return False
+
+        def get(self, url, params=None):
+            page = (params or {}).get("page", 1)
+            if page and page > 1:
+                return _Resp([])
+            if "/pulls/8/comments" in url:
+                return _Resp(
+                    [
+                        comment(1, mine, suggestion, "discussion_r"),
+                        comment(2, theirs, suggestion, "discussion_r"),
+                    ]
+                )
+            if "/issues/8/comments" in url:
+                return _Resp(
+                    [
+                        comment(3, mine, guide_body, "issuecomment"),
+                        comment(4, theirs, guide_body, "issuecomment"),
+                    ]
+                )
+            return _Resp([])
+
+        def patch(self, url, json=None, **_kw):
+            _RWClient.patched.append(url)
+            return _Resp({})
+
+    monkeypatch.setattr(pragent.httpx, "Client", _RWClient)
+    out = pragent.PrAgentBackend().normalize_output(
+        PRRef("o/r", 8, "u"),
+        model="openai/m",
+        token="tok",
+        compare_label="p/m",
+        actor=mine,
+    )
+    # One inline + one guide signal, both from our own comments (ids 1 and 3) —
+    # the sibling slot's inline suggestion (2) and guide (4) are excluded.
+    assert len(out) == 2
+    assert any(s.thread_url == "https://github.com/o/r/pull/8#issuecomment-3" for s in out)
+    # Only our own comments were PATCHed (marking is likewise scoped to ids 1, 3).
+    patched_ids = {u.rsplit("/", 1)[1] for u in _RWClient.patched}
+    assert patched_ids == {"1", "3"}
+
+
 def test_post_branch_header_returns_acting_identity(monkeypatch):
     class _Resp:
         def raise_for_status(self):
