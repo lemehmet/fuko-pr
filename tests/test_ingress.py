@@ -76,6 +76,7 @@ def test_build_env_enables_live_verbosity():
     env = PrAgentBackend().build_env(get_preset("ollama"), ModelConfig(), "", ["review"])
     assert env["CONFIG__VERBOSITY_LEVEL"] == "1"
     assert env["PYTHONUNBUFFERED"] == "1"
+    assert env["CONFIG__MAX_DESCRIPTION_TOKENS"] == "2000"
 
 
 def test_build_env_max_model_tokens_override_beats_preset(monkeypatch):

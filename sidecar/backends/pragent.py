@@ -73,6 +73,13 @@ class PrAgentBackend:
         and key route to ``<FAMILY>__API_BASE`` / ``<FAMILY>__KEY`` derived from
         the preset's prefix (``OPENAI``, ``OLLAMA``, ``ANTHROPIC``, ...).
 
+        The PR description reaches the review prompt clipped to
+        ``CONFIG__MAX_DESCRIPTION_TOKENS`` -- PR-Agent's default of 500 truncates
+        the detailed PR bodies this pipeline writes, so it is raised to 2000
+        (cheap relative to the diff, and the description is the reviewer's only
+        source of intent). The ``improve`` prompt template ignores the
+        description entirely upstream; no env can change that.
+
         Ticket-compliance analysis is disabled
         (``PR_REVIEWER__REQUIRE_TICKET_ANALYSIS_REVIEW=false``): it fetches the
         sub-issues of ``#<n>`` refs in the PR body and throws on a ref that
@@ -84,6 +91,7 @@ class PrAgentBackend:
             "CONFIG__MODEL": model_id,
             "CONFIG__FALLBACK_MODELS": f'["{model_id}"]',
             "CONFIG__VERBOSITY_LEVEL": "1",
+            "CONFIG__MAX_DESCRIPTION_TOKENS": "2000",
             "PR_CODE_SUGGESTIONS__COMMITABLE_CODE_SUGGESTIONS": "true",
             "PR_REVIEWER__REQUIRE_TICKET_ANALYSIS_REVIEW": "false",
             "PYTHONUNBUFFERED": "1",
