@@ -107,7 +107,7 @@ def test_list_learnings_endpoint():
     assert [x["source"] for x in scoped.json()["learnings"]] == ["remember"]
 
 
-def test_ingest_threads_mines_resolved():
+def test_ingest_threads_mines_declines():
     from fastapi.testclient import TestClient
 
     from sidecar import retrieve
