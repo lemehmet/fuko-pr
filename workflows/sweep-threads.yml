@@ -94,7 +94,7 @@ jobs:
           graphql_url = os.environ.get("GITHUB_GRAPHQL_URL", "https://api.github.com/graphql")
           fuko_url = os.environ.get("FUKO_URL", "").rstrip("/")
           fuko_token = os.environ.get("FUKO_TOKEN", "")
-          bot_login = os.environ.get("FUKO_BOT_LOGIN") or None
+          bot_login = (os.environ.get("FUKO_BOT_LOGIN") or "").strip() or None
           # Fail fast with a clear message if the sidecar URL isn't configured,
           # rather than crashing later with an opaque "unknown url type" from the
           # POST. Skip (exit 0) to match the graceful-degrade posture of
@@ -218,6 +218,8 @@ jobs:
           try:
               chunk_size = max(1, min(100, int(os.environ.get("FUKO_CHUNK_SIZE") or "25")))
           except ValueError:
+              print("fuko: WARNING FUKO_CHUNK_SIZE=%r is not a number; using 25"
+                    % os.environ.get("FUKO_CHUNK_SIZE"), file=sys.stderr)
               chunk_size = 25
           headers = {"Content-Type": "application/json"}
           if fuko_token:
@@ -231,7 +233,7 @@ jobs:
           for start in range(0, len(threads), chunk_size):
               chunk = threads[start : start + chunk_size]
               payload = json.dumps({"repo": repo, "threads": chunk, "bot_login": bot_login}).encode()
-              drained = chunk_failed = False
+              drained = chunk_failed = recorded = False
               # Safety bound on the drain: a thread yields at most one learning
               # (select_learning returns a single item or None) and each pass must
               # embed at least one to be worth repeating, so this chunk cannot
@@ -247,19 +249,21 @@ jobs:
                           # otherwise make the .get() calls raise AttributeError and report
                           # a successful ingest as a failure.
                           resp = json.load(r) or {}
-                      # Count the chunk's totals once, from the first pass: later
-                      # passes re-report the same threads (and re-skip what the
-                      # earlier passes inserted), so summing every pass would
-                      # inflate both. `inserted` is summed because each insert
-                      # happens exactly once across the drain.
-                      if attempt == 0:
+                      # Count the chunk's totals once, from its first SUCCESSFUL
+                      # pass: later passes re-report the same threads (and re-skip
+                      # what the earlier passes inserted), so summing every pass
+                      # would inflate both. Keyed on `recorded` rather than the
+                      # attempt index so a chunk whose first POST failed still
+                      # contributes its totals. `inserted` is summed because each
+                      # insert happens exactly once across the drain.
+                      if not recorded:
                           considered += resp.get("considered") or 0
                           skipped += resp.get("skipped") or 0
+                          recorded = True
                       else:
                           extra_passes += 1
                       pass_inserted = resp.get("inserted") or 0
                       inserted += pass_inserted
-                      consecutive = 0
                       # A sidecar older than the bounded-ingest change omits
                       # `remaining`; defaulting to 0 makes this a single pass,
                       # exactly the pre-cap behaviour.
@@ -289,10 +293,17 @@ jobs:
                           start // chunk_size, e, ("\n" + detail) if detail else ""),
                           file=sys.stderr)
                       break
-              if not drained and not chunk_failed:
-                  print("fuko: WARNING chunk %d still reported uningested learnings; "
-                        "the next sweep will retry them" % (start // chunk_size),
-                        file=sys.stderr)
+              # Only a chunk that finished without a transport failure clears the
+              # abort counter. Clearing it on every successful *pass* would let a
+              # sidecar that answers the first pass and then times out under embed
+              # load fail every chunk in the sweep without ever tripping the guard
+              # below, burning the job budget one timeout at a time.
+              if not chunk_failed:
+                  consecutive = 0
+                  if not drained:
+                      print("fuko: WARNING chunk %d still reported uningested learnings; "
+                            "the next sweep will retry them" % (start // chunk_size),
+                            file=sys.stderr)
               if consecutive >= 3:
                   print("fuko: aborting after %d consecutive chunk failures" % consecutive,
                         file=sys.stderr)
