@@ -118,13 +118,20 @@ jobs:
           # Pass parameters as GraphQL variables rather than interpolating them
           # into the query string — the standard safe form, with the validate/
           # clamp above kept as defense in depth.
+          #
+          # Page sizes multiply into GitHub's node budget: a query is scored on
+          # its maximum possible nodes (count x reviewThreads x comments), not on
+          # what it returns. count=100 with comments(last: 50) scores 510,100
+          # against a 500,000 ceiling, so the documented maximum backfill failed
+          # outright with MAX_NODE_LIMIT_EXCEEDED. last: 30 keeps count=100 inside
+          # the budget; observed threads run to 3 comments, so it loses nothing.
           query = """query($owner: String!, $name: String!, $states: [PullRequestState!], $count: Int!) {
             repository(owner: $owner, name: $name) {
               pullRequests(states: $states, orderBy: {field: UPDATED_AT, direction: DESC}, first: $count) {
                 nodes { number isCrossRepository reviewThreads(first: 100) {
                   pageInfo { hasNextPage }
-                  nodes { isResolved path comments(last: 50) {
-                    nodes { author { login __typename } authorAssociation body url } } } } } } } }"""
+                  nodes { isResolved path comments(last: 30) {
+                    totalCount nodes { author { login __typename } authorAssociation body url } } } } } } } }"""
 
           req = urllib.request.Request(
               graphql_url,
@@ -188,7 +195,16 @@ jobs:
                   # comments (public repos), so filter each thread's comments to
                   # trusted associations before ingest — untrusted text must not
                   # become a learning fed back into the reviewer LLM.
-                  cnodes = ((t.get("comments") or {}).get("nodes")) or []
+                  comments = t.get("comments") or {}
+                  cnodes = comments.get("nodes") or []
+                  # The last: 30 window is sized from measurement (the deepest
+                  # observed thread holds 3 comments), so say so out loud if a
+                  # thread ever outgrows it rather than silently mining a
+                  # truncated view. Same posture as the >100 threads warning.
+                  if (comments.get("totalCount") or 0) > 30:
+                      print(f"fuko: WARNING PR #{pr.get('number')} thread on {t.get('path')} "
+                            f"has {comments['totalCount']} comments; only the last 30 were read",
+                            file=sys.stderr)
                   # Trusted association AND not a bot. The bot check is by
                   # __typename (the reliable GraphQL signal — GraphQL bot logins
                   # don't carry the REST "[bot]" suffix); the suffix check is a
