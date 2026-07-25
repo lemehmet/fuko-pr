@@ -7,7 +7,7 @@
 #
 # After it pushes, set in your .fuko.toml:
 #   [review]
-#   image = "ghcr.io/<owner>/pr-agent:0.38.0"
+#   image = "ghcr.io/<owner>/pr-agent:0.39.0"
 # and either make the GHCR package public or `docker login ghcr.io` on your runners.
 #
 # Action refs are pinned to commit SHAs (with a "# vX.Y.Z" comment) to match this
@@ -19,8 +19,8 @@ on:
   workflow_dispatch:
     inputs:
       pr_agent_ref:
-        description: "the-pr-agent/pr-agent git tag to build (e.g. v0.38.0)"
-        default: "v0.38.0"
+        description: "the-pr-agent/pr-agent git tag to build (e.g. v0.39.0)"
+        default: "v0.39.0"
         required: true
 
 jobs:
