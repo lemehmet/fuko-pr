@@ -1,4 +1,5 @@
-from sidecar.cli import _split_paragraphs, chunk_markdown, format_extra_instructions
+from sidecar.chunking import _split_paragraphs, chunk_markdown
+from sidecar.cli import format_extra_instructions
 
 
 def test_chunk_markdown_splits_on_headings():

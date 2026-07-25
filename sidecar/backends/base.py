@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Literal, Protocol, runtime_checkable
 
 from ..fukoconfig import ModelConfig
-from ..models import IngestItem
+from ..models import UNSET, IngestItem
 from ..presets import ProviderPreset
 from ..signals import ReviewSignal
 
@@ -135,6 +135,52 @@ class Store(Protocol):
         source: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        q: str | None = None,
+        include_expired: bool = False,
     ) -> tuple[list[dict], int]:
-        """Return a page of live learnings (newest-first) plus the total match count."""
+        """Return a page of learnings (newest-first) plus the total match count.
+
+        ``q`` is a case-insensitive substring matched against text and topic;
+        ``include_expired`` widens the listing past what retrieval would surface,
+        which is the only way to see an expired learning at all.
+        """
+        ...
+
+    def get_learning(self, repo: str, id: str) -> dict | None:
+        """Return one learning, or ``None`` when ``id`` is not in ``repo``.
+
+        Expired learnings are returned: they are invisible to retrieval, which is
+        exactly why an operator needs to be able to look at one.
+        """
+        ...
+
+    def update_learning(
+        self,
+        repo: str,
+        id: str,
+        *,
+        text: str = UNSET,
+        source: str = UNSET,
+        source_url: str | None = UNSET,
+        file_globs: list[str] = UNSET,
+        topic: str | None = UNSET,
+        expires_at: str | None = UNSET,
+    ) -> dict | None:
+        """Apply the supplied fields to one learning and return the updated row.
+
+        Arguments left at :data:`~sidecar.models.UNSET` are not written, so
+        clearing a field and leaving it alone stay distinguishable. Changing
+        ``text`` re-embeds; every other change skips the embedder.
+
+        Returns ``None`` when ``id`` is not in ``repo``.
+
+        Raises:
+            DuplicateLearningError: The result would collide with the
+                ``(repo, text, source)`` unique key.
+            UnknownSourceError: ``source`` is outside ``SOURCES``.
+        """
+        ...
+
+    def repos(self) -> list[dict]:
+        """Return ``{"repo", "count", "sources"}`` per repository holding live learnings."""
         ...

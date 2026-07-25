@@ -89,19 +89,63 @@ def list_learnings_endpoint(
     source: str | None = None,
     limit: int = 100,
     offset: int = 0,
+    q: str | None = None,
+    include_expired: bool = False,
 ) -> dict:
     """List stored learnings for browsing, newest first.
 
     Unlike ``/query`` (semantic + file-scoped, for review-time retrieval) this is
-    a plain inspection listing of live (non-expired) learnings, optionally filtered
-    by ``repo`` and ``source``. ``limit`` is clamped to 500 and ``offset`` floored
-    at 0. ``count`` is the total matching the filters (for paging), not the page
-    size.
+    a plain inspection listing, optionally filtered by ``repo``, ``source``, and a
+    case-insensitive substring ``q`` over text and topic. Expired learnings are
+    excluded unless ``include_expired`` is set, matching what retrieval surfaces.
+    ``limit`` is clamped to 500 and ``offset`` floored at 0. ``count`` is the total
+    matching the filters (for paging), not the page size.
     """
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
-    learnings, total = _store.list_learnings(repo=repo, source=source, limit=limit, offset=offset)
+    learnings, total = _store.list_learnings(
+        repo=repo,
+        source=source,
+        limit=limit,
+        offset=offset,
+        q=q,
+        include_expired=include_expired,
+    )
     return {"learnings": learnings, "count": total}
+
+
+@app.get("/repos", response_model=models.ReposResponse, dependencies=[Depends(_auth)])
+def repos_endpoint() -> dict:
+    """Return every repository holding live learnings, with per-source counts."""
+    return {"repos": _store.repos()}
+
+
+@app.get("/learnings/{id}", response_model=models.StoredLearning, dependencies=[Depends(_auth)])
+def get_learning_endpoint(id: str, repo: str) -> dict:
+    """Return one learning by id within ``repo``, expired ones included."""
+    learning = _store.get_learning(repo, id)
+    if learning is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such learning in that repo")
+    return learning
+
+
+@app.patch("/learnings/{id}", response_model=models.StoredLearning, dependencies=[Depends(_auth)])
+def update_learning_endpoint(id: str, req: models.UpdateLearningRequest) -> dict:
+    """Apply the supplied fields to one learning and return the updated row.
+
+    Only the fields present in the request body are written, so clearing a field
+    (sending it as null) stays distinguishable from omitting it. Changing ``text``
+    re-embeds; any other change skips the embedder.
+    """
+    try:
+        updated = _store.update_learning(req.repo, id, **req.changes())
+    except models.UnknownSourceError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
+    except models.DuplicateLearningError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
+    if updated is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such learning in that repo")
+    return updated
 
 
 @app.post("/forget", dependencies=[Depends(_auth)])

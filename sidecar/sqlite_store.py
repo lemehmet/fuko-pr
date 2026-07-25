@@ -27,14 +27,36 @@ from .config import settings
 from .dedup import partition
 from .embed import get_embedder
 from .fukoconfig import KnowledgeConfig
-from .ingest import _parse_dt
-from .models import IngestItem
+from .ingest import _UPDATABLE, _parse_dt
+from .models import UNSET, DuplicateLearningError, IngestItem, check_source
 from .objectstore import PreconditionFailed, make_object_store
-from .retrieve import _build_query
+from .retrieve import _build_query, fold_repo_counts
 
 _MAX_RETRIES = 5
 
 _VAR_BATCH = 500
+
+_ROW_COLUMNS = "lid, repo, text, source, source_url, file_globs, topic, expires_at"
+
+
+def _row_to_dict(row: tuple) -> dict:
+    """Shape one ``_ROW_COLUMNS`` row like the Postgres store's rows.
+
+    ``created_at`` is always ``None``: this schema orders by insertion rowid and
+    never recorded a timestamp, and inventing one here would make the two stores
+    disagree about what they know.
+    """
+    return {
+        "id": row[0],
+        "repo": row[1],
+        "text": row[2],
+        "source": row[3],
+        "source_url": row[4],
+        "file_globs": json.loads(row[5]) if row[5] else [],
+        "topic": row[6],
+        "created_at": None,
+        "expires_at": row[7],
+    }
 
 
 def _pack(vec: list[float]) -> bytes:
@@ -339,19 +361,29 @@ class SqliteVecStore:
         source: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        q: str | None = None,
+        include_expired: bool = False,
     ) -> tuple[list[dict], int]:
-        """Return a page of live learnings (newest insert first) plus the total count."""
-        now = datetime.now(timezone.utc).isoformat()
-        where, params = ["(expires_at IS NULL OR expires_at > ?)"], [now]
+        """Return a page of learnings (newest insert first) plus the total match count."""
+        where: list[str] = []
+        params: list = []
+        if not include_expired:
+            where.append("(expires_at IS NULL OR expires_at > ?)")
+            params.append(datetime.now(timezone.utc).isoformat())
         if repo:
             where.append("repo = ?")
             params.append(repo)
         if source:
             where.append("source = ?")
             params.append(source)
-        clause = " AND ".join(where)
+        if q:
+            where.append(
+                "(text LIKE ? COLLATE NOCASE OR coalesce(topic, '') LIKE ? COLLATE NOCASE)"
+            )
+            params.extend([f"%{q}%", f"%{q}%"])
+        clause = " AND ".join(where) if where else "1"
         page_sql = (
-            "SELECT lid, repo, text, source, source_url, file_globs, topic "
+            f"SELECT {_ROW_COLUMNS} "
             f"FROM learnings WHERE {clause} ORDER BY rowid DESC LIMIT ? OFFSET ?"
         )
 
@@ -360,19 +392,110 @@ class SqliteVecStore:
                 f"SELECT count(*) FROM learnings WHERE {clause}", params
             ).fetchone()[0]
             rows = conn.execute(page_sql, [*params, limit, offset]).fetchall()
-            items = [
-                {
-                    "id": row[0],
-                    "repo": row[1],
-                    "text": row[2],
-                    "source": row[3],
-                    "source_url": row[4],
-                    "file_globs": json.loads(row[5]) if row[5] else [],
-                    "topic": row[6],
-                    "created_at": None,
-                }
-                for row in rows
-            ]
-            return items, int(total)
+            return [_row_to_dict(row) for row in rows], int(total)
+
+        return self._read(fn)
+
+    def get_learning(self, repo: str, id: str) -> dict | None:
+        """Return one learning by id within ``repo`` (expired included), else ``None``."""
+
+        def fn(conn: sqlite3.Connection) -> dict | None:
+            row = conn.execute(
+                f"SELECT {_ROW_COLUMNS} FROM learnings WHERE repo = ? AND lid = ?", (repo, id)
+            ).fetchone()
+            return _row_to_dict(row) if row else None
+
+        return self._read(fn)
+
+    def update_learning(
+        self,
+        repo: str,
+        id: str,
+        *,
+        text: str = UNSET,
+        source: str = UNSET,
+        source_url: str | None = UNSET,
+        file_globs: list[str] = UNSET,
+        topic: str | None = UNSET,
+        expires_at: str | None = UNSET,
+    ) -> dict | None:
+        """Apply the supplied fields to one learning; re-embeds only on a text change.
+
+        The embedding is computed before the mutation opens, so a lost
+        optimistic-concurrency race retries the write without paying for the
+        (slow) embedder again.
+        """
+        supplied = {
+            name: value
+            for name, value in zip(
+                _UPDATABLE,
+                (text, source, source_url, file_globs, topic, expires_at),
+                strict=True,
+            )
+            if value is not UNSET
+        }
+        if "source" in supplied:
+            check_source(supplied["source"])
+        if not supplied:
+            return self.get_learning(repo, id)
+
+        current = self.get_learning(repo, id)
+        if current is None:
+            return None
+        embedding = (
+            _pack(get_embedder().embed_one(supplied["text"]))
+            if supplied.get("text", current["text"]) != current["text"]
+            else None
+        )
+
+        assignments: list[str] = []
+        params: list = []
+        for name, value in supplied.items():
+            assignments.append(f"{name} = ?")
+            if name == "file_globs":
+                params.append(json.dumps(value or []))
+            elif name == "expires_at":
+                params.append(_norm_expires(value))
+            else:
+                params.append(value)
+
+        def fn(conn: sqlite3.Connection) -> dict | None:
+            row = conn.execute(
+                "SELECT vec_rowid FROM learnings WHERE repo = ? AND lid = ?", (repo, id)
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                conn.execute(
+                    f"UPDATE learnings SET {', '.join(assignments)} WHERE repo = ? AND lid = ?",
+                    (*params, repo, id),
+                )
+            except sqlite3.IntegrityError as e:
+                raise DuplicateLearningError(
+                    "another learning in this repo already has that (text, source)"
+                ) from e
+            if embedding is not None and row[0] is not None:
+                conn.execute(
+                    "UPDATE vec_learnings SET embedding = ? WHERE rowid = ?", (embedding, row[0])
+                )
+            updated = conn.execute(
+                f"SELECT {_ROW_COLUMNS} FROM learnings WHERE repo = ? AND lid = ?", (repo, id)
+            ).fetchone()
+            return _row_to_dict(updated) if updated else None
+
+        return self._mutate(fn)
+
+    def repos(self) -> list[dict]:
+        """Return the per-repository footprint of live learnings, repo-sorted."""
+        now = datetime.now(timezone.utc).isoformat()
+
+        def fn(conn: sqlite3.Connection) -> list[dict]:
+            return fold_repo_counts(
+                conn.execute(
+                    "SELECT repo, source, count(*) FROM learnings "
+                    "WHERE expires_at IS NULL OR expires_at > ? GROUP BY repo, source",
+                    (now,),
+                ).fetchall()
+            )
 
         return self._read(fn)
