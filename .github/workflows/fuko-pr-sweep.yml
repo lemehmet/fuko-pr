@@ -3,7 +3,8 @@
 #
 # Resolution state is not a filter on merged PRs: the merge settles the
 # thread, and a decline is usually left unresolved while a fix resolves it,
-# so gating on it discarded 71% of the available learnings. Only an OPEN-state
+# so gating on it discarded most of the available learnings (measured in
+# lemehmet/fuko-pr#83; the exact share differs per repo). Only an OPEN-state
 # sweep still requires resolution, where it is the one signal that a thread
 # is no longer being argued.
 #
@@ -199,8 +200,9 @@ jobs:
                   # sidecar's allowlist ignores it, because in the
                   # address-pr-reviews loop a fix resolves the thread while a
                   # decline is typically left unresolved. Gating on it here threw
-                  # away 71% of the available learnings (measured across a 60-PR
-                  # window on three repos). On a MERGED PR the merge itself
+                  # away most of the available learnings -- see
+                  # lemehmet/fuko-pr#83 for the measurement, which differs per
+                  # repo. On a MERGED PR the merge itself
                   # settles every thread, so the guard only costs signal. On an
                   # OPEN PR it is the one hint that a decline is not still being
                   # argued, so keep it there.
