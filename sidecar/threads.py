@@ -21,6 +21,9 @@ convention.
 Resolution state is deliberately ignored: in the address-pr-reviews loop a fix
 resolves the thread while a decline is often left unresolved, so gating on
 ``isResolved`` would bias toward the fix acknowledgements we want to exclude.
+Measured on live repos, gating on it discarded 71% of the available learnings
+(74 kept vs 256 available across a 60-PR window) -- which is why the sweep
+workflow forwards unresolved threads on merged PRs too.
 """
 
 import re
@@ -113,7 +116,7 @@ def select_learning(thread: dict, bot_login: str | None = None) -> IngestItem | 
     path = thread.get("path")
     return IngestItem(
         text=body,
-        source="resolved_thread",
+        source="review_thread",
         source_url=last.get("url"),
         file_globs=[path] if path else [],
         topic="review decision",

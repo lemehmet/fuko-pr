@@ -1,7 +1,7 @@
 # fuko-pr knowledge commands — /remember and /forget from a PR comment.
 #
 # /remember <text>   store a repo learning (optional trailing `paths: a/**, b.py`)
-# /forget all | /forget source=<docs|remember|resolved_thread> | /forget <id>
+# /forget all | /forget source=<docs|remember|review_thread> | /forget <id>
 #
 # Forwards the comment to the fuko sidecar's /comment endpoint and reacts on the
 # comment. Reacts as the "Fuko PR Review" GitHub App. PR-Agent slash commands

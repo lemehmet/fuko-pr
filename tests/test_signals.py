@@ -28,7 +28,7 @@ def _signal(**kw):
         thread_url="https://github.com/o/r/pull/1#discussion_r1",
         backend="pr-agent",
         model="anthropic/claude-sonnet-4-6",
-        kb_refs=["resolved_thread:9"],
+        kb_refs=["review_thread:9"],
     )
     base.update(kw)
     return ReviewSignal(**base)
@@ -55,7 +55,7 @@ def test_marker_round_trips_machine_fields():
     assert got.suggestion is True
     assert got.thread_url == sig.thread_url
     assert got.backend == "pr-agent"
-    assert got.kb_refs == ["resolved_thread:9"]
+    assert got.kb_refs == ["review_thread:9"]
 
 
 def test_marker_excludes_human_text():

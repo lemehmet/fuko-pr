@@ -89,7 +89,7 @@ def test_list_learnings_endpoint():
         [
             IngestItem(
                 text="Declining — this synchronous path is intentional for ordering here.",
-                source="resolved_thread",
+                source="review_thread",
                 file_globs=["src/q.py"],
             ),
             IngestItem(text="Use absolute imports across the codebase always.", source="remember"),

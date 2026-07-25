@@ -10,7 +10,7 @@ _ROW = {
     "id": "abc-1",
     "repo": "o/r",
     "text": "Declining — this synchronous path is intentional for ordering here.",
-    "source": "resolved_thread",
+    "source": "review_thread",
     "source_url": "https://example/pull/1#r1",
     "file_globs": ["a.py"],
     "topic": "review decision",
@@ -40,15 +40,15 @@ def test_list_calls_learnings_and_prints(monkeypatch, capsys):
 
 def test_count_aggregates_by_repo_and_source(monkeypatch, capsys):
     rows = [
-        {**_ROW, "repo": "o/r", "source": "resolved_thread"},
+        {**_ROW, "repo": "o/r", "source": "review_thread"},
         {**_ROW, "repo": "o/r", "source": "remember"},
-        {**_ROW, "repo": "o/r", "source": "resolved_thread"},
+        {**_ROW, "repo": "o/r", "source": "review_thread"},
     ]
     monkeypatch.setattr(kbcli, "_call", lambda *a, **k: {"learnings": rows, "count": 3})
     kbcli._count(_ns(repo=None, source=None))
     out = capsys.readouterr().out
     assert "3 total" in out
-    assert "resolved_thread" in out and "remember" in out
+    assert "review_thread" in out and "remember" in out
 
 
 def test_count_paginates_past_the_page_cap(monkeypatch, capsys):
