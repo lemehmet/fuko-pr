@@ -38,7 +38,7 @@ as a service so it survives reboots:
 ./config.sh \
   --url https://github.com/<owner>/<app-repo> \
   --token <REGISTRATION_TOKEN> \
-  --labels "<your-fleet-label>,X64,Linux" \
+  --labels "<your-fleet-label>" \
   --unattended
 sudo ./svc.sh install && sudo ./svc.sh start
 ```
@@ -53,9 +53,16 @@ the `self-hosted` ones to your own labels when you copy them into an app repo.
 
 ## 2. Start the fuko stack
 
+Pick a stable checkout directory you can write to — `$HOME/fuko-pr` needs no
+privileges, `/opt/fuko-pr` is the conventional service location but is
+root-owned by default (`sudo install -d -o "$USER" /opt/fuko-pr` first). The
+rest of this page writes `$FUKO_SRC`; substitute your own.
+
 ```bash
-git clone <fuko-pr-url> /opt/fuko-pr
-cd /opt/fuko-pr
+export FUKO_SRC=/opt/fuko-pr                     # or $HOME/fuko-pr
+git clone <fuko-pr-url> "$FUKO_SRC"
+cd "$FUKO_SRC"
+export COMPOSE_PROJECT_NAME=fuko                 # see the warning below
 export FUKO_AUTH_TOKEN=$(openssl rand -hex 16)   # workflows send this as FUKO_TOKEN
 docker compose -f docker/runner-compose.yml up -d --build
 docker compose -f docker/runner-compose.yml exec ollama ollama pull bge-m3
@@ -67,12 +74,18 @@ docker compose -f docker/runner-compose.yml exec ollama ollama pull bge-m3
 - `ollama` — local embeddings backend (`bge-m3`, 1024-dim)
 - `sidecar` — FastAPI service on host port `8000`, auth via `FUKO_AUTH_TOKEN`
 
-> **Run compose from the directory holding the compose file you mean to use.**
-> Compose derives its project name from the working directory, and a different
-> project name means *different volumes* — you get a second, empty knowledge base
-> and a port-8000 collision with the stack you already had. If you keep the
-> compose file somewhere other than the checkout, always pass the same
-> `-f <path>` (or set `COMPOSE_PROJECT_NAME`) so volumes are reused.
+> **Pin `COMPOSE_PROJECT_NAME`, or always invoke compose identically.**
+> The project name decides which volumes you get, and a different name means a
+> second, empty knowledge base plus a port-8000 collision with the stack you
+> already had. Compose derives it from the base name of the directory holding
+> the first `-f` file — **not** your shell's working directory — so the commands
+> above yield the project `docker`, and moving the compose file elsewhere
+> silently changes it. Export `COMPOSE_PROJECT_NAME=fuko` (or pass `-p fuko`)
+> once and use it for every invocation.
+>
+> Already running a stack? Check its name with `docker compose ls` first.
+> Adopting a different project name orphans the volumes holding your existing
+> knowledge base rather than migrating them.
 
 All services use `restart: unless-stopped`. Ensure Docker starts on boot so the
 sidecar returns after a host reboot:
@@ -136,7 +149,7 @@ slow embedder still makes the sweep's POST time out.
 ## 6. Updating the stack
 
 ```bash
-cd /opt/fuko-pr
+cd "$FUKO_SRC"
 git pull
 docker compose -f docker/runner-compose.yml up -d --build   # rebuilds sidecar image
 ```
