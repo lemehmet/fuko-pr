@@ -1,7 +1,8 @@
 # fuko-pr resolved-thread sweep — mines resolved review threads into the fuko
 # knowledge base via the sidecar's /ingest-threads endpoint.
 #
-# Copy into your app repo as `.github/workflows/sweep-threads.yml`.
+# This is fuko-pr's own copy of workflows/sweep-threads.yml -- the template is
+# the source of truth; keep edits in sync with it.
 #
 # Two modes:
 #   * schedule (hourly)     — sweeps the few most-recently-updated MERGED PRs, so
@@ -55,7 +56,7 @@ concurrency:
 
 jobs:
   sweep:
-    runs-on: self-hosted   # narrow to your own labels, e.g. [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, fuko-pr]   # reaches the LAN sidecar (FUKO_URL)
     timeout-minutes: 10   # don't let a hung runner/network hold a fleet slot
     permissions:
       pull-requests: read   # reviewThreads via GraphQL; no checkout, so no contents
