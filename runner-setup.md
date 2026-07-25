@@ -1,12 +1,23 @@
-# Runner setup
+# Sidecar & runner setup
 
-How to prepare a self-hosted runner to host the **fuko-pr sidecar stack** and run
-the fuko-pr workflows against an application repository.
+How to run the **fuko-pr sidecar stack** and point an application repository's
+workflows at it.
 
-The workflows (`workflows/*.yml`) target a runner labeled
-`[self-hosted, mepro, X64, Linux]`. The fuko sidecar (pgvector + Ollama + the
-FastAPI service) runs as containers **on the same host**; the workflows reach it at
-`http://localhost:8000`.
+## Pick a topology
+
+The sidecar is an HTTP service; nothing requires it to share a host with the
+runner. Two arrangements work, and they differ only in what `FUKO_URL` points at.
+
+| | Co-located | Dedicated host |
+| --- | --- | --- |
+| Sidecar runs on | the runner itself | its own box / VM / container |
+| `FUKO_URL` | `http://localhost:8000` | `http://<host>:8000` |
+| Compose file | [`docker/runner-compose.yml`](./docker/runner-compose.yml) | your own, or config management |
+| Good for | a single runner, trying things out | several runners or repos sharing one knowledge base |
+
+The knowledge base is per-repo *inside* one store, so a dedicated host lets every
+repo and every runner share a single sidecar. That is how the reference
+deployment runs; see [Dedicated host](#dedicated-host) below.
 
 ## Prerequisites
 
@@ -14,36 +25,44 @@ A Linux x64 host with:
 
 - Docker + Docker Compose v2
 - ~3 GB free for the Ollama `bge-m3` model
-- Outbound access to `api.z.ai` (GLM-5.2 chat), `openrouter.ai` (compare branch b), and to GitHub
-- A GitHub self-hosted runner agent registered to the repo or org
+- Outbound access to your chat provider (e.g. `api.z.ai`, `openrouter.ai`) and to GitHub
+- For the co-located setup: a GitHub self-hosted runner agent registered to the repo or org
 
 ## 1. Register the GitHub runner
 
 Follow [GitHub's self-hosted runner guide](https://docs.github.com/en/actions/hosting-your-own-runners).
-When configuring, attach the custom labels and install it as a service so it
-survives reboots:
+When configuring, attach whatever labels your workflows select on and install it
+as a service so it survives reboots:
 
 ```bash
 ./config.sh \
   --url https://github.com/<owner>/<app-repo> \
   --token <REGISTRATION_TOKEN> \
-  --labels "mepro,X64,Linux" \
+  --labels "<your-fleet-label>" \
   --unattended
 sudo ./svc.sh install && sudo ./svc.sh start
 ```
 
 `<REGISTRATION_TOKEN>` comes from the repo/org **Settings → Actions → Runners →
-New self-hosted runner**. `self-hosted` is added automatically; `Linux`/`X64` match
-the auto-added OS/arch labels (matching is case-insensitive); `mepro` targets this
-specific fleet.
+New self-hosted runner**. `self-hosted` is added automatically, as are the OS/arch
+labels (matching is case-insensitive).
+
+The shipped workflows use a bare `runs-on: self-hosted` for every job that reaches
+the sidecar; the lightweight permission-guard jobs run on `ubuntu-latest`. Narrow
+the `self-hosted` ones to your own labels when you copy them into an app repo.
 
 ## 2. Start the fuko stack
 
-On the runner, clone this repo and bring up the stack:
+Pick a stable checkout directory you can write to — `$HOME/fuko-pr` needs no
+privileges, `/opt/fuko-pr` is the conventional service location but is
+root-owned by default (`sudo install -d -o "$USER" /opt/fuko-pr` first). The
+rest of this page writes `$FUKO_SRC`; substitute your own.
 
 ```bash
-git clone <fuko-pr-url> ~/fuko-pr
-cd ~/fuko-pr
+export FUKO_SRC=/opt/fuko-pr                     # or $HOME/fuko-pr
+git clone <fuko-pr-url> "$FUKO_SRC"
+cd "$FUKO_SRC"
+export COMPOSE_PROJECT_NAME=fuko                 # see the warning below
 export FUKO_AUTH_TOKEN=$(openssl rand -hex 16)   # workflows send this as FUKO_TOKEN
 docker compose -f docker/runner-compose.yml up -d --build
 docker compose -f docker/runner-compose.yml exec ollama ollama pull bge-m3
@@ -55,6 +74,19 @@ docker compose -f docker/runner-compose.yml exec ollama ollama pull bge-m3
 - `ollama` — local embeddings backend (`bge-m3`, 1024-dim)
 - `sidecar` — FastAPI service on host port `8000`, auth via `FUKO_AUTH_TOKEN`
 
+> **Pin `COMPOSE_PROJECT_NAME`, or always invoke compose identically.**
+> The project name decides which volumes you get, and a different name means a
+> second, empty knowledge base plus a port-8000 collision with the stack you
+> already had. Compose derives it from the base name of the directory holding
+> the first `-f` file — **not** your shell's working directory — so the commands
+> above yield the project `docker`, and moving the compose file elsewhere
+> silently changes it. Export `COMPOSE_PROJECT_NAME=fuko` (or pass `-p fuko`)
+> once and use it for every invocation.
+>
+> Already running a stack? Check its name with `docker compose ls` first.
+> Adopting a different project name orphans the volumes holding your existing
+> knowledge base rather than migrating them.
+
 All services use `restart: unless-stopped`. Ensure Docker starts on boot so the
 sidecar returns after a host reboot:
 
@@ -64,6 +96,10 @@ sudo systemctl enable docker
 
 ## 3. Verify
 
+`/healthz` deliberately touches neither auth nor the database, so on its own it
+can green-light a sidecar whose Postgres never came up. Check an authenticated,
+DB-backed endpoint too:
+
 ```bash
 curl -s localhost:8000/healthz                                   # {"ok":true}
 curl -s -H "Authorization: Bearer $FUKO_AUTH_TOKEN" \
@@ -71,49 +107,103 @@ curl -s -H "Authorization: Bearer $FUKO_AUTH_TOKEN" \
   -d '{"repo":"<owner>/<app-repo>"}'                             # {"results":[]}
 ```
 
-## 4. Add secrets to the application repository
+## 4. Configure the application repository
 
-In the target repo (e.g. `lemehmet/pomotodo`) → **Settings → Secrets and variables →
-Actions**:
+**Settings → Secrets and variables → Actions.**
 
-| Secret       | Value                                              |
-| ------------ | -------------------------------------------------- |
-| `FUKO_URL`   | `http://localhost:8000`                            |
-| `FUKO_TOKEN` | the `FUKO_AUTH_TOKEN` generated above              |
-| `ZAI_KEY`    | your z.ai API key (for GLM-5.2 chat)               |
-| `OPENROUTER_KEY` | your OpenRouter API key (compare branch b)     |
+Secrets:
+
+| Secret           | Value                                                    |
+| ---------------- | -------------------------------------------------------- |
+| `FUKO_URL`       | `http://localhost:8000`, or `http://<host>:8000`          |
+| `FUKO_TOKEN`     | the `FUKO_AUTH_TOKEN` generated above                     |
+| `ZAI_KEY`        | your z.ai API key (if a configured model uses that provider) |
+| `OPENROUTER_KEY` | your OpenRouter API key (likewise)                        |
 
 `GITHUB_TOKEN` is provided automatically.
 
-## 5. Updating the stack
+Variables (all optional — the defaults are fine for most repos):
 
-Deploy a newer `fuko-pr`:
+| Variable           | Effect                                                                 |
+| ------------------ | ---------------------------------------------------------------------- |
+| `FUKO_CHUNK_SIZE`  | threads per `/ingest-threads` request in the sweep (1-100, default 25)  |
+| `FUKO_BOT_LOGIN`   | also exclude a reviewer service account whose login has no `[bot]` suffix |
+
+## 5. Sidecar settings
+
+Read from the environment with a `FUKO_` prefix (see [`.env.example`](./.env.example)):
+
+| Setting                | Default | Effect                                                            |
+| ---------------------- | ------- | ------------------------------------------------------------------ |
+| `FUKO_AUTH_TOKEN`      | unset   | bearer token for every write/read endpoint; unset **refuses** them   |
+| `FUKO_TOP_K`           | `6`     | learnings injected into a review                                    |
+| `FUKO_INGEST_MAX_NEW`  | `10`    | new learnings embedded per `/ingest-threads` call                   |
+| `FUKO_EMBED_BASE_URL`  | Ollama  | any OpenAI-compatible `/embeddings` endpoint                        |
+| `FUKO_EMBED_MODEL`     | `bge-m3`| embedding model                                                     |
+
+`FUKO_INGEST_MAX_NEW` bounds how long a single ingest request can take, not how
+much a sweep can ingest: the sweep re-posts a batch until the sidecar reports
+`remaining: 0`, and already-stored learnings dedup away for free. Lower it if a
+slow embedder still makes the sweep's POST time out.
+
+## 6. Updating the stack
 
 ```bash
-cd ~/fuko-pr
+cd "$FUKO_SRC"
 git pull
 docker compose -f docker/runner-compose.yml up -d --build   # rebuilds sidecar image
 ```
 
-Rotate the auth token: change `FUKO_AUTH_TOKEN`, restart the sidecar, and update the
-`FUKO_TOKEN` secret in each app repo:
+Migrations in `migrations/*.sql` are idempotent and apply themselves at sidecar
+startup, so a newer build needs no manual database step.
+
+Rotate the auth token: change `FUKO_AUTH_TOKEN`, restart the sidecar, and update
+the `FUKO_TOKEN` secret in each app repo:
 
 ```bash
 docker compose -f docker/runner-compose.yml restart sidecar
 ```
 
-Change the embedding model: update `FUKO_EMBED_MODEL`/`FUKO_EMBED_DIM` in
-`docker/runner-compose.yml`, **and** the `vector()` dimension in
-`migrations/001_init.sql`, then drop & recreate the `learnings` table (the migration
-is `IF NOT EXISTS`) — see [`AGENTS.md`](./AGENTS.md).
+**Changing the embedding model needs no manual migration.** Point
+`FUKO_EMBED_MODEL` (and `FUKO_EMBED_BASE_URL`) at the new one and restart. The
+sidecar probes the model's real dimension at startup and, if it changed,
+re-embeds every learning and rebuilds the vector column and index itself — a
+one-time and potentially slow startup, but automatic. Do not drop the `learnings`
+table by hand; see [`AGENTS.md`](./AGENTS.md).
+
+## Dedicated host
+
+Nothing in the sidecar cares whether a runner is present. Put the same three
+containers on their own box, expose port 8000 to the runners, and set each app
+repo's `FUKO_URL` secret to `http://<host>:8000` instead of `localhost`.
+
+Worth doing there:
+
+- **Keep secrets off the compose file.** Render them to a root-owned env file and
+  reference it with `env_file:`, so rebuilds and config management never bake a
+  token into the image or the repo.
+- **Bind deliberately.** Port 8000 carries your whole knowledge base behind a
+  single bearer token. Expose it on a trusted network only.
+- **Back up the `pg` volume.** It *is* the knowledge base; the containers are
+  disposable, that volume is not.
+- **Smoke an authed endpoint after every deploy**, not just `/healthz` — see
+  [Verify](#3-verify).
 
 ## Troubleshooting
 
 - **"context build failed" in the review workflow** — the sidecar isn't reachable from
-  the job. Confirm `curl localhost:8000/healthz` works on the host and that the job
-  actually ran on this runner (labels matched).
+  the job. Confirm `curl <FUKO_URL>/healthz` works from the runner and that the job
+  actually ran on the runner you expected (labels matched).
 - **Embedding 400 / model not found** — `ollama pull bge-m3` not run, or
   `FUKO_EMBED_MODEL`/`FUKO_EMBED_BASE_URL` mismatch.
-- **PR-Agent model error** — `ZAI_KEY` or `OPENROUTER_KEY` missing/invalid,
-  `openrouter.ai` unreachable, or `config.model` / `OPENAI.API_BASE` changed in
-  the review workflow.
+- **The sweep reports `chunk N failed: timed out`** — the sidecar took too long to
+  embed a batch. It retries on the next hourly sweep by itself; if it persists,
+  lower `FUKO_INGEST_MAX_NEW` on the sidecar, or `FUKO_CHUNK_SIZE` on the repo.
+- **The sweep runs clean but stores nothing** — expected when no resolved thread
+  ends in a *decline*. Only a trusted author pushing back on a finding and stating
+  the convention is kept; fix acknowledgements and chatter are dropped by design.
+- **Empty knowledge base after a restart** — compose almost certainly picked a
+  different project name and therefore a different volume. See the warning in
+  [Start the fuko stack](#2-start-the-fuko-stack).
+- **PR-Agent model error** — a provider key is missing/invalid, the provider is
+  unreachable, or the model config in `.fuko.toml` is wrong.
