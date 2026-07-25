@@ -223,13 +223,6 @@ jobs:
           if fuko_token:
               headers["Authorization"] = "Bearer " + fuko_token
 
-          # Safety bound on the drain: each pass must embed at least one learning
-          # to be worth repeating, so a chunk cannot legitimately need more passes
-          # than it has threads. The +2 absorbs an off-by-one and a final
-          # confirming pass; exhausting it means the sidecar is not draining and
-          # the leftovers are picked up by the next sweep either way.
-          max_passes = chunk_size + 2
-
           # A persistent failure (sidecar down, auth misconfigured) would make
           # every remaining chunk wait out the full timeout, so bail after a few
           # consecutive failures while still tolerating a transient single-chunk
@@ -239,7 +232,14 @@ jobs:
               chunk = threads[start : start + chunk_size]
               payload = json.dumps({"repo": repo, "threads": chunk, "bot_login": bot_login}).encode()
               drained = chunk_failed = False
-              for attempt in range(max_passes):
+              # Safety bound on the drain: a thread yields at most one learning
+              # (select_learning returns a single item or None) and each pass must
+              # embed at least one to be worth repeating, so this chunk cannot
+              # legitimately need more passes than it holds threads. Sized from
+              # the chunk rather than chunk_size so a short final chunk gets a
+              # correspondingly tight bound. The +2 absorbs an off-by-one and the
+              # final confirming pass.
+              for attempt in range(len(chunk) + 2):
                   try:
                       req = urllib.request.Request(fuko_url + "/ingest-threads", data=payload, headers=headers)
                       with urllib.request.urlopen(req, timeout=120) as r:
