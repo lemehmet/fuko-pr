@@ -4,6 +4,7 @@ from datetime import datetime
 from uuid import UUID
 
 from .db import db, vector_literal
+from .dedup import partition
 from .embed import get_embedder
 from .models import IngestItem
 
@@ -35,7 +36,7 @@ def _existing_keys(repo: str, items: list[IngestItem]) -> set[tuple[str, str]]:
     return {(text, source) for text, source in rows if (text, source) in candidates}
 
 
-def ingest(repo: str, items: list[IngestItem]) -> tuple[int, int]:
+def ingest(repo: str, items: list[IngestItem], *, max_new: int | None = None) -> tuple[int, int]:
     """Embed and insert learnings for ``repo``, skipping exact duplicates.
 
     Duplicates of the ``(repo, text, source)`` key are filtered out *before*
@@ -43,22 +44,21 @@ def ingest(repo: str, items: list[IngestItem]) -> tuple[int, int]:
     only genuinely new learnings reach the (potentially slow) embedder. The
     ``ON CONFLICT`` insert remains as a backstop for races.
 
+    Args:
+        repo: Repository the learnings belong to.
+        items: Candidate learnings.
+        max_new: Cap on how many new learnings are embedded in this call. Items
+            past the cap are neither inserted nor skipped, so a caller can detect
+            them as ``len(items) - inserted - skipped`` and re-send the same batch
+            to drain the rest. ``None`` embeds everything new.
+
     Returns:
         A ``(inserted, skipped)`` tuple.
     """
     if not items:
         return 0, 0
     existing = _existing_keys(repo, items)
-    to_embed: list[IngestItem] = []
-    seen: set[tuple[str, str]] = set()
-    skipped = 0
-    for item in items:
-        key = (item.text, item.source)
-        if key in existing or key in seen:
-            skipped += 1
-            continue
-        seen.add(key)
-        to_embed.append(item)
+    to_embed, skipped, _deferred = partition(items, existing, max_new)
     if not to_embed:
         return 0, skipped
     embeddings = get_embedder().embed([it.text for it in to_embed])

@@ -148,16 +148,33 @@ def comment_endpoint(req: models.CommentRequest) -> dict:
     return {"action": "ignored"}
 
 
-@app.post("/ingest-threads", dependencies=[Depends(_auth)])
+@app.post(
+    "/ingest-threads",
+    response_model=models.IngestThreadsResponse,
+    dependencies=[Depends(_auth)],
+)
 def ingest_threads_endpoint(req: models.IngestThreadsRequest) -> dict:
-    """Mine resolved review threads for learnings and ingest them."""
+    """Mine resolved review threads for learnings and ingest a bounded batch.
+
+    Embedding is the slow part and its cost tracks the number of *new* learnings,
+    which the caller cannot see — a batch of already-stored threads is free while
+    the same-sized batch of fresh ones can outrun any client timeout. So the cap
+    lives here, where the post-dedup count is known: at most
+    ``FUKO_INGEST_MAX_NEW`` learnings are embedded per call and the rest are
+    reported as ``remaining`` for the caller to drain by re-sending the batch.
+    """
     items = [
         it
         for it in (threads_mod.select_learning(t, req.bot_login) for t in req.threads)
         if it is not None
     ]
-    inserted, skipped = _store.ingest(req.repo, items)
-    return {"considered": len(req.threads), "inserted": inserted, "skipped": skipped}
+    inserted, skipped = _store.ingest(req.repo, items, max_new=settings.ingest_max_new)
+    return {
+        "considered": len(req.threads),
+        "inserted": inserted,
+        "skipped": skipped,
+        "remaining": len(items) - inserted - skipped,
+    }
 
 
 @app.get("/cb/cooldowns", response_model=models.CooldownsResponse, dependencies=[Depends(_auth)])

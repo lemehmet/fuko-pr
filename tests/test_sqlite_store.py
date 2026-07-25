@@ -145,6 +145,44 @@ def test_reingest_skips_embedding_known_threads(store, monkeypatch):
     assert embedded == [["ui spacing rule"]]
 
 
+def test_max_new_bounds_embedding_and_leaves_the_rest_unaccounted(store, monkeypatch):
+    embedded: list[list[str]] = []
+
+    class _CountingEmbedder(_FakeEmbedder):
+        def embed(self, texts):
+            embedded.append(list(texts))
+            return super().embed(texts)
+
+    monkeypatch.setattr(ss, "get_embedder", lambda: _CountingEmbedder())
+
+    items = [IngestItem(text=f"learning {i}", source="resolved_thread") for i in range(5)]
+    inserted, skipped = store.ingest("o/r", items, max_new=2)
+
+    assert (inserted, skipped) == (2, 0)
+    assert embedded == [["learning 0", "learning 1"]]
+    assert len(items) - inserted - skipped == 3
+
+
+def test_resending_the_same_batch_drains_the_backlog(store):
+    items = [IngestItem(text=f"learning {i}", source="resolved_thread") for i in range(5)]
+
+    passes = []
+    for _ in range(10):
+        inserted, skipped = store.ingest("o/r", items, max_new=2)
+        remaining = len(items) - inserted - skipped
+        passes.append((inserted, skipped, remaining))
+        if not remaining:
+            break
+
+    assert passes == [(2, 0, 3), (2, 2, 1), (1, 4, 0)]
+    assert store.list_learnings("o/r")[1] == 5
+
+
+def test_max_new_none_embeds_everything(store):
+    items = [IngestItem(text=f"learning {i}", source="resolved_thread") for i in range(5)]
+    assert store.ingest("o/r", items, max_new=None) == (5, 0)
+
+
 def test_existing_keys_batches_over_sqlite_var_limit(store, monkeypatch):
     monkeypatch.setattr(ss, "_VAR_BATCH", 50)
     big = [IngestItem(text=f"learning number {i}", source="resolved_thread") for i in range(120)]
