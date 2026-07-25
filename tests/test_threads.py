@@ -27,7 +27,7 @@ def test_selects_substantive_decline():
     item = select_learning(t)
     assert item is not None
     assert item.text == _DECLINE
-    assert item.source == "resolved_thread"
+    assert item.source == "review_thread"
     assert item.topic == "review decision"
     assert item.file_globs == ["src/a.py"]
     assert item.source_url == "u"

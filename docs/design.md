@@ -238,7 +238,7 @@ The canonical egress schema. The `address-pr-reviews` consumer reads only this.
   "suggestion": true,              // is there an applicable code block?
   "thread_url": "…",
   "backend": "pr-agent", "model": "glm-5.2",
-  "kb_refs": ["resolved_thread:…"] // which learnings drove this finding
+  "kb_refs": ["review_thread:…"] // which learnings drove this finding
 }
 ```
 

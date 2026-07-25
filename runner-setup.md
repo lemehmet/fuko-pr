@@ -199,7 +199,7 @@ Worth doing there:
 - **The sweep reports `chunk N failed: timed out`** — the sidecar took too long to
   embed a batch. It retries on the next hourly sweep by itself; if it persists,
   lower `FUKO_INGEST_MAX_NEW` on the sidecar, or `FUKO_CHUNK_SIZE` on the repo.
-- **The sweep runs clean but stores nothing** — expected when no resolved thread
+- **The sweep runs clean but stores nothing** — expected when no review thread
   ends in a *decline*. Only a trusted author pushing back on a finding and stating
   the convention is kept; fix acknowledgements and chatter are dropped by design.
 - **Empty knowledge base after a restart** — compose almost certainly picked a

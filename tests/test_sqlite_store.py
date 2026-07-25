@@ -126,8 +126,8 @@ def test_ingest_empty(store):
 
 def test_reingest_skips_embedding_known_threads(store, monkeypatch):
     items = [
-        IngestItem(text="auth login flow", source="resolved_thread"),
-        IngestItem(text="db migration notes", source="resolved_thread"),
+        IngestItem(text="auth login flow", source="review_thread"),
+        IngestItem(text="db migration notes", source="review_thread"),
     ]
     assert store.ingest("o/r", items) == (2, 0)
 
@@ -140,7 +140,7 @@ def test_reingest_skips_embedding_known_threads(store, monkeypatch):
 
     monkeypatch.setattr(ss, "get_embedder", lambda: _CountingEmbedder())
 
-    new = IngestItem(text="ui spacing rule", source="resolved_thread")
+    new = IngestItem(text="ui spacing rule", source="review_thread")
     assert store.ingest("o/r", items + [new]) == (1, 2)
     assert embedded == [["ui spacing rule"]]
 
@@ -155,7 +155,7 @@ def test_max_new_bounds_embedding_and_leaves_the_rest_unaccounted(store, monkeyp
 
     monkeypatch.setattr(ss, "get_embedder", lambda: _CountingEmbedder())
 
-    items = [IngestItem(text=f"learning {i}", source="resolved_thread") for i in range(5)]
+    items = [IngestItem(text=f"learning {i}", source="review_thread") for i in range(5)]
     inserted, skipped = store.ingest("o/r", items, max_new=2)
 
     assert (inserted, skipped) == (2, 0)
@@ -164,7 +164,7 @@ def test_max_new_bounds_embedding_and_leaves_the_rest_unaccounted(store, monkeyp
 
 
 def test_resending_the_same_batch_drains_the_backlog(store):
-    items = [IngestItem(text=f"learning {i}", source="resolved_thread") for i in range(5)]
+    items = [IngestItem(text=f"learning {i}", source="review_thread") for i in range(5)]
 
     passes = []
     for _ in range(10):
@@ -179,16 +179,16 @@ def test_resending_the_same_batch_drains_the_backlog(store):
 
 
 def test_max_new_none_embeds_everything(store):
-    items = [IngestItem(text=f"learning {i}", source="resolved_thread") for i in range(5)]
+    items = [IngestItem(text=f"learning {i}", source="review_thread") for i in range(5)]
     assert store.ingest("o/r", items, max_new=None) == (5, 0)
 
 
 def test_existing_keys_batches_over_sqlite_var_limit(store, monkeypatch):
     monkeypatch.setattr(ss, "_VAR_BATCH", 50)
-    big = [IngestItem(text=f"learning number {i}", source="resolved_thread") for i in range(120)]
+    big = [IngestItem(text=f"learning number {i}", source="review_thread") for i in range(120)]
     assert store.ingest("o/r", big) == (120, 0)
 
-    extra = IngestItem(text="brand new learning", source="resolved_thread")
+    extra = IngestItem(text="brand new learning", source="review_thread")
     assert store.ingest("o/r", big + [extra]) == (1, 120)
 
 

@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS learnings (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     repo        TEXT NOT NULL,
     text        TEXT NOT NULL,
-    source      TEXT NOT NULL CHECK (source IN ('remember', 'resolved_thread', 'docs')),
+    source      TEXT NOT NULL CHECK (source IN ('remember', 'review_thread', 'docs')),
     source_url  TEXT,
     file_globs  TEXT[] NOT NULL DEFAULT '{}',
     topic       TEXT,

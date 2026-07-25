@@ -10,7 +10,7 @@ _ROW = {
     "id": "1",
     "repo": "o/r",
     "text": "Declining — vitest hoists vi.mock above the imports here.",
-    "source": "resolved_thread",
+    "source": "review_thread",
     "source_url": "https://example/pull/1#discussion_r1",
     "file_globs": ["a.py"],
     "topic": "review decision",
@@ -52,8 +52,8 @@ def test_passes_filters_through(monkeypatch):
         seen.update(kw)
         return [], 0
 
-    _client(monkeypatch, fake).get("/learnings?repo=o/r&source=resolved_thread&limit=10&offset=20")
-    assert seen == {"repo": "o/r", "source": "resolved_thread", "limit": 10, "offset": 20}
+    _client(monkeypatch, fake).get("/learnings?repo=o/r&source=review_thread&limit=10&offset=20")
+    assert seen == {"repo": "o/r", "source": "review_thread", "limit": 10, "offset": 20}
 
 
 def test_requires_auth(monkeypatch):

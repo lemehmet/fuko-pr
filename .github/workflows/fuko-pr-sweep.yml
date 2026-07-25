@@ -1,5 +1,12 @@
-# fuko-pr resolved-thread sweep — mines resolved review threads into the fuko
+# fuko-pr review-thread sweep — mines PR review threads into the fuko
 # knowledge base via the sidecar's /ingest-threads endpoint.
+#
+# Resolution state is not a filter on merged PRs: the merge settles the
+# thread, and a decline is usually left unresolved while a fix resolves it,
+# so gating on it discarded most of the available learnings (measured in
+# lemehmet/fuko-pr#83; the exact share differs per repo). Only an OPEN-state
+# sweep still requires resolution, where it is the one signal that a thread
+# is no longer being argued.
 #
 # This is fuko-pr's own copy of workflows/sweep-threads.yml -- the template is
 # the source of truth; keep edits in sync with it.
@@ -61,7 +68,7 @@ jobs:
     permissions:
       pull-requests: read   # reviewThreads via GraphQL; no checkout, so no contents
     steps:
-      - name: Mine resolved threads
+      - name: Mine review threads
         env:
           GITHUB_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -189,7 +196,17 @@ jobs:
                   print(f"fuko: WARNING PR #{pr.get('number')} has >100 review threads; "
                         "threads beyond the first 100 were not mined", file=sys.stderr)
               for t in rt.get("nodes", []):
-                  if not t.get("isResolved"):
+                  # Resolution is not a signal that the argument is over -- the
+                  # sidecar's allowlist ignores it, because in the
+                  # address-pr-reviews loop a fix resolves the thread while a
+                  # decline is typically left unresolved. Gating on it here threw
+                  # away most of the available learnings -- see
+                  # lemehmet/fuko-pr#83 for the measurement, which differs per
+                  # repo. On a MERGED PR the merge itself
+                  # settles every thread, so the guard only costs signal. On an
+                  # OPEN PR it is the one hint that a decline is not still being
+                  # argued, so keep it there.
+                  if states == "OPEN" and not t.get("isResolved"):
                       continue
                   # Even on same-repo PRs, non-collaborators can leave review
                   # comments (public repos), so filter each thread's comments to
@@ -222,7 +239,7 @@ jobs:
                   t["comments"]["nodes"] = trusted
                   threads.append(t)
           print(f"fuko: scanned {len(prs)} {states} PRs "
-                f"({skipped_forks} fork PRs skipped), {len(threads)} resolved threads")
+                f"({skipped_forks} fork PRs skipped), {len(threads)} threads to mine")
 
           # Embedding is the slow part of an ingest and its cost tracks the number
           # of *new* learnings — which only the sidecar can see, since it dedups
