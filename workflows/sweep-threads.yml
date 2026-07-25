@@ -117,12 +117,19 @@ jobs:
           # Pass parameters as GraphQL variables rather than interpolating them
           # into the query string — the standard safe form, with the validate/
           # clamp above kept as defense in depth.
+          #
+          # Page sizes multiply into GitHub's node budget: a query is scored on
+          # its maximum possible nodes (count x reviewThreads x comments), not on
+          # what it returns. count=100 with comments(last: 50) scores 510,100
+          # against a 500,000 ceiling, so the documented maximum backfill failed
+          # outright with MAX_NODE_LIMIT_EXCEEDED. last: 30 keeps count=100 inside
+          # the budget; observed threads run to 3 comments, so it loses nothing.
           query = """query($owner: String!, $name: String!, $states: [PullRequestState!], $count: Int!) {
             repository(owner: $owner, name: $name) {
               pullRequests(states: $states, orderBy: {field: UPDATED_AT, direction: DESC}, first: $count) {
                 nodes { number isCrossRepository reviewThreads(first: 100) {
                   pageInfo { hasNextPage }
-                  nodes { isResolved path comments(last: 50) {
+                  nodes { isResolved path comments(last: 30) {
                     nodes { author { login __typename } authorAssociation body url } } } } } } } }"""
 
           req = urllib.request.Request(
