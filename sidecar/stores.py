@@ -99,6 +99,24 @@ class UnknownStoreError(ValueError):
     """Raised when ``.fuko.toml`` names a knowledge store that is not implemented."""
 
 
+_current: Store | None = None
+
+
+def current_store() -> Store:
+    """Return the process-wide store, built once from ``.fuko.toml``.
+
+    The HTTP API and the browser console must operate on the *same* store
+    instance -- two independently constructed sqlite-vec stores would each carry
+    their own probed embedding dimension and object-store sync state.
+    """
+    global _current
+    if _current is None:
+        from .fukoconfig import load_config
+
+        _current = get_store(load_config().knowledge)
+    return _current
+
+
 def get_store(knowledge: KnowledgeConfig) -> Store:
     """Return the store implementation selected by ``knowledge.store``."""
     if knowledge.store == "postgres":

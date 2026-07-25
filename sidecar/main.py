@@ -12,8 +12,7 @@ from . import run_metrics
 from . import web
 from . import threads as threads_mod
 from .config import settings
-from .fukoconfig import load_config
-from .stores import get_store
+from .stores import current_store
 
 
 @asynccontextmanager
@@ -43,7 +42,7 @@ app = FastAPI(title="fuko-pr sidecar", version="0.6.0", lifespan=lifespan)
 app.include_router(web.router)
 
 # The sidecar serves one store, selected by .fuko.toml (defaults to Postgres).
-_store = get_store(load_config().knowledge)
+_store = current_store()
 
 
 def _auth(authorization: str | None = Header(default=None)) -> None:

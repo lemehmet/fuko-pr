@@ -12,7 +12,9 @@ sidecar/web/
   __init__.py    # imports the page modules, assembles one APIRouter
   layout.py      # Page, PAGES (the registry), the shared stylesheet, document()
   components.py  # escape-safe table/section/notice/pager/field primitives
+  security.py    # session cookie + CSRF for the routes that write
   metrics.py     # the review-metrics page
+  kb.py          # the knowledge-base console
 ```
 
 ## Adding a page
@@ -86,11 +88,44 @@ one deliberate exception, for markup the page already assembled and escaped.
 stylesheet in `layout._STYLE`; pages work with plain forms and links. A page that
 wants progressive enhancement can add it, but it must not be load-bearing.
 
-**Read is open, mutation is not.** `/ui/metrics` is deliberately unauthenticated
-— read-only aggregates on a LAN-only deployment, following the precedent
-`/healthz` set. Every API endpoint keeps its bearer auth. A page that mutates
-anything must gate those routes behind a session (see `security.py` once it
-lands with the knowledge-base console).
+**Read is open, mutation is not.** `/ui/metrics` and the knowledge-base browsing
+and preview views are deliberately unauthenticated — read-only on a LAN-only
+deployment, following the precedent `/healthz` set. Every API endpoint keeps its
+bearer auth. Anything that writes goes through `security.py`.
+
+## Writing routes that mutate
+
+`security.py` exchanges the existing `FUKO_AUTH_TOKEN` for a signed cookie at
+`/ui/login`, so there is no second secret and no new configuration. Three calls
+are all a page needs:
+
+```python
+@router.post(MY_PATH)
+def submit(request: Request, csrf: str = Form(default=""), ...):
+    session = security.require(request)      # 303 to login, or 503 with no token set
+    security.check_csrf(session, csrf)       # 400 on a missing or forged token
+    ...
+    return RedirectResponse(..., status_code=303)   # post/redirect/get
+```
+
+and every form that posts must embed `security.csrf_field(session)`.
+
+Details worth knowing before you touch it:
+
+- The cookie is `HttpOnly`, `SameSite=Strict`, scoped to `Path=/ui`, and expires
+  after `TTL_SECONDS`. Its value is an HMAC over the auth token, so rotating the
+  token invalidates every outstanding session for free.
+- The CSRF token is derived from the *session*, not global — one lifted from
+  another user's page does not verify. `SameSite=Strict` already blocks the
+  cross-site POST; this is the second lock.
+- `require()` redirects rather than returning 401, because the caller is a
+  browser and a bare 401 is a dead end. With `FUKO_AUTH_TOKEN` unset it raises
+  503 instead: no login could ever succeed, so a redirect would loop.
+- Pass `extra_nav=security.nav_extra(request)` to `document()` so the page shows
+  a sign-in link or a sign-out button.
+- Rejected writes should re-render the form with the submitted values, not
+  redirect. Losing a long edit to a unique collision is its own bug; see
+  `kb.edit_submit`.
 
 ## URLs
 

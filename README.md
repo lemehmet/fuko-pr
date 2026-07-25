@@ -196,10 +196,20 @@ Design and contracts: [`docs/design.md`](docs/design.md).
 
 ## Browser UI
 
-The sidecar serves utility pages under `/ui` — `/ui/metrics` shows per-model and
-per-slot review aggregates, recent runs, reviewer health, and open provider
-cooldowns. Read-only and unauthenticated, for a LAN-only deployment. Adding a
-page: [`docs/web-ui.md`](docs/web-ui.md).
+The sidecar serves utility pages under `/ui`:
+
+- **`/ui/metrics`** — per-model and per-slot review aggregates, recent runs,
+  reviewer health, open provider cooldowns.
+- **`/ui/kb`** — the knowledge-base console. Pick a repository, search and page
+  through its learnings, fix a mis-scoped glob or a bad text, add one by hand,
+  upload design docs (same chunking as `fuko ingest-docs`), purge in bulk, and
+  **preview retrieval** — the query a review would run, so you can check a
+  learning will actually reach the reviewer.
+
+Browsing is unauthenticated, for a LAN-only deployment. Editing needs the
+sidecar's `FUKO_AUTH_TOKEN`, exchanged once at `/ui/login` for a signed
+`HttpOnly`, `SameSite=Strict` session cookie; with no token configured, every
+editing action is refused. Adding a page: [`docs/web-ui.md`](docs/web-ui.md).
 
 ## Contributing
 
