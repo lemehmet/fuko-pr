@@ -89,6 +89,54 @@ def test_link_and_badge_escape_their_text():
     assert "&lt;x&gt;" in c.badge("<x>")
 
 
+@pytest.mark.parametrize(
+    "href",
+    [
+        "javascript:alert(1)",
+        "JaVaScRiPt:alert(1)",
+        "java\tscript:alert(1)",
+        "  javascript:alert(1)  ",
+        "data:text/html,<script>alert(1)</script>",
+        "vbscript:msgbox(1)",
+    ],
+)
+def test_link_refuses_an_unsafe_scheme(href):
+    assert c.safe_href(href) is None
+    assert c.link(href, "click me") == '<span class="muted">click me</span>'
+    assert "href" not in c.link(href, "click me")
+
+
+@pytest.mark.parametrize(
+    "href",
+    [
+        "https://github.com/o/r/pull/1",
+        "http://fuko.nonni:8000/ui",
+        "mailto:a@b.example",
+        "/ui/kb?repo=o%2Fr",
+        "?offset=25",
+        "#section",
+        "relative/path.md",
+        "a/b:c/d",
+    ],
+)
+def test_link_keeps_relative_and_web_urls(href):
+    assert c.safe_href(href) == href.strip()
+    assert c.link(href, "x").startswith("<a href=")
+
+
+def test_form_value_keeps_falsy_non_none_values():
+    assert c.form_value(0) == "0"
+    assert c.form_value(False) == "False"
+    assert c.form_value(None) == ""
+    assert c.form_value("") == ""
+
+
+def test_form_helpers_round_trip_a_zero():
+    assert '<input name="n" value="0">' in c.field("N", "n", 0)
+    assert '<textarea name="n">0</textarea>' in c.textarea("N", "n", 0)
+    assert '<option value="0" selected>' in c.select("N", "n", [("0", "zero")], value=0)
+
+
 def test_table_renders_headers_and_falls_back_to_the_empty_notice():
     rendered = c.table([("a", False), ("n", True)], ["<tr><td>1</td></tr>"], "nothing")
     assert "<th>a</th>" in rendered and '<th class="num">n</th>' in rendered

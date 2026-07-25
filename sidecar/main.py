@@ -39,7 +39,6 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="fuko-pr sidecar", version="0.6.0", lifespan=lifespan)
 
-# The browser-facing pages live under /ui; see sidecar/web and docs/web-ui.md.
 app.include_router(web.router)
 
 # The sidecar serves one store, selected by .fuko.toml (defaults to Postgres).
