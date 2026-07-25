@@ -20,8 +20,8 @@ def test_get_store_rejects_unknown():
 def test_postgres_store_delegates(monkeypatch):
     calls = {}
 
-    def fake_ingest(repo, items):
-        calls["ingest"] = (repo, items)
+    def fake_ingest(repo, items, *, max_new=None):
+        calls["ingest"] = (repo, items, max_new)
         return (1, 0)
 
     def fake_query(repo, files, pr_body, query_text, top_k):
@@ -37,7 +37,8 @@ def test_postgres_store_delegates(monkeypatch):
     monkeypatch.setattr(stores._ingest, "forget", fake_forget)
 
     s = PostgresStore()
-    assert s.ingest("o/r", [IngestItem(text="t", source="docs")]) == (1, 0)
+    assert s.ingest("o/r", [IngestItem(text="t", source="docs")], max_new=4) == (1, 0)
+    assert calls["ingest"][2] == 4
     assert s.query("o/r", ["a.py"]) == [{"text": "x"}]
     # the protocol's `all` maps onto ingest.forget's `all_`
     assert s.forget("o/r", all=True) == 3

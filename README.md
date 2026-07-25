@@ -141,8 +141,10 @@ Learnings come from three sources and live in your store:
 
 - **`/remember <text>`** on a PR comment — stores a repo learning. Add a trailing
   `paths: src/**/*.py` line to scope it to files. (`workflows/ingest-comment.yml`)
-- **Resolved review threads** — an hourly sweep keeps the last human comment of
-  each resolved thread as a learning, scoped to its file. (`workflows/sweep-threads.yml`)
+- **Resolved review threads** — an hourly sweep of merged PRs keeps the last
+  trusted-author comment of a resolved thread when it declines a reviewer finding
+  and states the project's convention, scoped to its file.
+  (`workflows/sweep-threads.yml`)
 - **Docs / ADRs** — `fuko ingest-docs <globs> --repo owner/repo`.
 
 On each review, `fuko review` retrieves the most relevant learnings (semantic

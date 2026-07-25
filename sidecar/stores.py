@@ -22,9 +22,11 @@ if TYPE_CHECKING:
 class PostgresStore:
     """Store backed by pgvector (delegates to the ingest/retrieve modules)."""
 
-    def ingest(self, repo: str, items: list[IngestItem]) -> tuple[int, int]:
+    def ingest(
+        self, repo: str, items: list[IngestItem], *, max_new: int | None = None
+    ) -> tuple[int, int]:
         """Embed and insert learnings, skipping exact duplicates."""
-        return _ingest.ingest(repo, items)
+        return _ingest.ingest(repo, items, max_new=max_new)
 
     def query(
         self,

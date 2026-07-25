@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     auth_token: str | None = None
     top_k: int = 6
     candidate_k: int = 50
+    ingest_max_new: int = 10
 
 
 settings = Settings()

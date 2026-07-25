@@ -95,8 +95,16 @@ class ReviewBackend(Protocol):
 class Store(Protocol):
     """A pluggable knowledge store (e.g. Postgres/pgvector, sqlite-vec)."""
 
-    def ingest(self, repo: str, items: list[IngestItem]) -> tuple[int, int]:
-        """Persist ``items`` for ``repo``; return ``(inserted, skipped)``."""
+    def ingest(
+        self, repo: str, items: list[IngestItem], *, max_new: int | None = None
+    ) -> tuple[int, int]:
+        """Persist ``items`` for ``repo``; return ``(inserted, skipped)``.
+
+        ``max_new`` caps how many new learnings are embedded in one call. Items
+        past the cap are neither inserted nor skipped, leaving the caller to
+        drain them by re-sending the same batch — the seam that keeps a large
+        backlog from turning into a single request that outruns its timeout.
+        """
         ...
 
     def query(

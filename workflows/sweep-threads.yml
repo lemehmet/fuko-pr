@@ -1,12 +1,32 @@
-# fuko-pr resolved-thread sweep.
+# fuko-pr resolved-thread sweep — mines resolved review threads into the fuko
+# knowledge base via the sidecar's /ingest-threads endpoint.
 #
 # Copy into your app repo as `.github/workflows/sweep-threads.yml`.
-# Runs hourly on the default branch, mines resolved review threads from the 20
-# most-recently-updated open PRs, and forwards them to the fuko sidecar, which
-# keeps the last human comment of each resolved thread as a learning.
 #
-# Dedup is automatic: re-sweeping a thread is a no-op (UNIQUE on repo,text,source).
-# For GitHub Enterprise Server, set FUKO_GRAPHQL_URL.
+# Two modes:
+#   * schedule (hourly)     — sweeps the few most-recently-updated MERGED PRs, so
+#                             reviewer declines (which finalize at merge) are
+#                             harvested continuously. Cheap, idempotent, hands-off.
+#                             The count is kept small so one run's threads embed
+#                             well under the sidecar timeout.
+#   * workflow_dispatch     — manual backfill. Pick `states` (OPEN or MERGED) and
+#                             `count` to mine historical PRs on demand. This is how
+#                             you seed the store from already-merged review history.
+#
+# Dedup is automatic: re-sweeping a thread is a no-op (UNIQUE on repo,text,source),
+# so running schedule + backfill repeatedly is safe. Only comments from trusted
+# authors (OWNER/MEMBER/COLLABORATOR; [bot]s and fork PRs excluded) are kept, so
+# untrusted text can't be injected into the reviewer LLM via the knowledge base.
+#
+# Requires repo secret FUKO_URL. FUKO_TOKEN is optional — sent as a bearer to the
+# sidecar when set. Both are already set for the fuko-pr review workflow.
+#
+# Tuning: set the repo variable FUKO_CHUNK_SIZE (1-100, default 25) to lower the
+# per-request ingest batch if a busy repo's backfill trips the sidecar timeout.
+# Set the repo variable FUKO_BOT_LOGIN to also exclude a reviewer service account
+# whose login has no "[bot]" suffix.
+#
+# GitHub Enterprise Server works unchanged — the runner sets GITHUB_GRAPHQL_URL.
 
 name: fuko-pr thread sweep
 
@@ -14,22 +34,51 @@ on:
   schedule:
     - cron: "0 * * * *"
   workflow_dispatch:
+    inputs:
+      states:
+        description: "PR state to mine"
+        type: choice
+        default: OPEN
+        options: [OPEN, MERGED]
+      count:
+        description: "How many most-recently-updated PRs to scan (1-100)"
+        type: number
+        default: 20
+      chunk_size:
+        description: "Threads per ingest request (1-100); lower this if a backfill times out"
+        type: number
+        default: 25
+
+concurrency:
+  group: fuko-pr-sweep
+  cancel-in-progress: false
 
 jobs:
   sweep:
-    runs-on: self-hosted
+    runs-on: self-hosted   # narrow to your own labels, e.g. [self-hosted, Linux, X64]
+    timeout-minutes: 10   # don't let a hung runner/network hold a fleet slot
     permissions:
-      pull-requests: read
-      contents: read
+      pull-requests: read   # reviewThreads via GraphQL; no checkout, so no contents
     steps:
       - name: Mine resolved threads
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           FUKO_URL: ${{ secrets.FUKO_URL }}
           FUKO_TOKEN: ${{ secrets.FUKO_TOKEN }}
-          # FUKO_BOT_LOGIN: my-reviewer-app   # also exclude a non-[bot] reviewer app
-          # FUKO_GRAPHQL_URL: https://ghes.example/api/graphql
+          # On schedule there are no inputs, so default to the ongoing merged-PR
+          # sweep with a small count (declines finalize at merge; a bounded batch
+          # keeps the per-run embed under the sidecar timeout).
+          STATES: ${{ github.event.inputs.states || 'MERGED' }}
+          COUNT: ${{ github.event.inputs.count || '8' }}
+          # Optional: also exclude a reviewer app whose login carries no "[bot]"
+          # suffix and whose GraphQL author type is a plain User (a service
+          # account). The association/type filter below cannot catch that case on
+          # its own, since such an account looks exactly like a collaborator.
+          FUKO_BOT_LOGIN: ${{ vars.FUKO_BOT_LOGIN }}
+          # Dispatch input wins for a one-off backfill; otherwise the repo
+          # variable, so a busy repo can be tuned without editing this file.
+          FUKO_CHUNK_SIZE: ${{ github.event.inputs.chunk_size || vars.FUKO_CHUNK_SIZE }}
         run: |
           python3 - <<'PY'
           import json
@@ -40,58 +89,218 @@ jobs:
           token = os.environ["GITHUB_TOKEN"]
           repo = os.environ["REPO"]
           owner, _, name = repo.partition("/")
-          fuko_url = os.environ["FUKO_URL"].rstrip("/")
+          # Use the runtime-provided GraphQL base so this works on GHES too; the
+          # Actions runner sets GITHUB_GRAPHQL_URL automatically.
+          graphql_url = os.environ.get("GITHUB_GRAPHQL_URL", "https://api.github.com/graphql")
+          fuko_url = os.environ.get("FUKO_URL", "").rstrip("/")
           fuko_token = os.environ.get("FUKO_TOKEN", "")
-          bot_login = os.environ.get("FUKO_BOT_LOGIN")
-          graphql_url = os.environ.get("FUKO_GRAPHQL_URL", "https://api.github.com/graphql")
+          bot_login = os.environ.get("FUKO_BOT_LOGIN") or None
+          # Fail fast with a clear message if the sidecar URL isn't configured,
+          # rather than crashing later with an opaque "unknown url type" from the
+          # POST. Skip (exit 0) to match the graceful-degrade posture of
+          # ingest-comment.yml when FUKO_URL is unset.
+          if not fuko_url:
+              print("fuko: FUKO_URL is not set; skipping sweep "
+                    "(configure the FUKO_URL secret)", file=sys.stderr)
+              sys.exit(0)
 
-          query = """query {
-            repository(owner: "%s", name: "%s") {
-              pullRequests(states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}, first: 20) {
-                nodes { number reviewThreads(first: 100) {
-                  nodes { isResolved path comments(first: 50) {
-                    nodes { author { login } body url } } } } } } } }""" % (owner, name)
+          # Validate inputs before they reach the GraphQL string (no injection).
+          states = (os.environ.get("STATES") or "OPEN").strip().upper()
+          if states not in ("OPEN", "MERGED"):
+              print(f"invalid states={states!r}", file=sys.stderr)
+              sys.exit(1)
+          try:
+              count = max(1, min(100, int(os.environ.get("COUNT") or "20")))
+          except ValueError:
+              count = 20
+
+          # Pass parameters as GraphQL variables rather than interpolating them
+          # into the query string — the standard safe form, with the validate/
+          # clamp above kept as defense in depth.
+          query = """query($owner: String!, $name: String!, $states: [PullRequestState!], $count: Int!) {
+            repository(owner: $owner, name: $name) {
+              pullRequests(states: $states, orderBy: {field: UPDATED_AT, direction: DESC}, first: $count) {
+                nodes { number isCrossRepository reviewThreads(first: 100) {
+                  pageInfo { hasNextPage }
+                  nodes { isResolved path comments(last: 50) {
+                    nodes { author { login __typename } authorAssociation body url } } } } } } } }"""
 
           req = urllib.request.Request(
               graphql_url,
-              data=json.dumps({"query": query}).encode(),
-              headers={
-                  "Authorization": "Bearer " + token,
-                  "Content-Type": "application/json",
-              },
+              data=json.dumps({"query": query, "variables": {
+                  "owner": owner, "name": name, "states": [states], "count": count,
+              }}).encode(),
+              headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
           )
-          with urllib.request.urlopen(req, timeout=60) as r:
-              data = json.load(r)
+          # A network/HTTP failure on the fetch should fail the run cleanly rather
+          # than dump an uncaught traceback (and never reach the ingest POST).
+          try:
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  data = json.load(r)
+          except Exception as e:
+              # Same body-read as the ingest handler: HTTPError carries GitHub's
+              # diagnostics (rate-limit, auth) in the response body, not str(e).
+              detail = ""
+              if hasattr(e, "read"):
+                  try:
+                      detail = e.read().decode("utf-8", errors="replace")[:500]
+                  except Exception:
+                      pass
+              print("GitHub GraphQL request failed: " + str(e) + (("\n" + detail) if detail else ""),
+                    file=sys.stderr)
+              sys.exit(1)
 
+          # Fail closed on GraphQL errors: a partial/errored response can carry a
+          # null/incomplete `repository`, and ingesting that would let dedup lock
+          # in truncated threads that a later clean sweep can't repair.
           errors = data.get("errors")
           if errors:
               print("GitHub GraphQL errors: " + json.dumps(errors), file=sys.stderr)
+              sys.exit(1)
+
+          # Author associations we trust to seed knowledge, matching the
+          # /remember gate in ingest-comment.yml.
+          TRUSTED_ASSOC = {"OWNER", "MEMBER", "COLLABORATOR"}
 
           repo_node = ((data.get("data") or {}).get("repository")) or {}
           prs = (repo_node.get("pullRequests") or {}).get("nodes") or []
           threads = []
+          skipped_forks = 0
           for pr in prs:
-              for t in (pr.get("reviewThreads") or {}).get("nodes", []):
-                  if t.get("isResolved"):
-                      threads.append(t)
+              # Never mine fork (cross-repo) PRs: their thread text is authored by
+              # untrusted contributors and would be injected verbatim into the
+              # reviewer LLM as a "learning" — a prompt-injection vector. This
+              # mirrors the fork-PR guard in ingest-comment.yml.
+              if pr.get("isCrossRepository"):
+                  skipped_forks += 1
+                  continue
+              rt = pr.get("reviewThreads") or {}
+              # The first:100 cap is unpaginated; warn loudly (don't fail) if a PR
+              # exceeds it so incomplete mining is visible.
+              if (rt.get("pageInfo") or {}).get("hasNextPage"):
+                  print(f"fuko: WARNING PR #{pr.get('number')} has >100 review threads; "
+                        "threads beyond the first 100 were not mined", file=sys.stderr)
+              for t in rt.get("nodes", []):
+                  if not t.get("isResolved"):
+                      continue
+                  # Even on same-repo PRs, non-collaborators can leave review
+                  # comments (public repos), so filter each thread's comments to
+                  # trusted associations before ingest — untrusted text must not
+                  # become a learning fed back into the reviewer LLM.
+                  cnodes = ((t.get("comments") or {}).get("nodes")) or []
+                  # Trusted association AND not a bot. The bot check is by
+                  # __typename (the reliable GraphQL signal — GraphQL bot logins
+                  # don't carry the REST "[bot]" suffix); the suffix check is a
+                  # belt-and-suspenders fallback. A bot installed with collaborator
+                  # rights would otherwise have a COLLABORATOR association and slip
+                  # automated text into the knowledge base.
+                  trusted = [
+                      c for c in cnodes
+                      if c.get("authorAssociation") in TRUSTED_ASSOC
+                      and (c.get("author") or {}).get("__typename") != "Bot"
+                      and not ((c.get("author") or {}).get("login") or "").endswith("[bot]")
+                  ]
+                  if not trusted:
+                      continue
+                  t["comments"]["nodes"] = trusted
+                  threads.append(t)
+          print(f"fuko: scanned {len(prs)} {states} PRs "
+                f"({skipped_forks} fork PRs skipped), {len(threads)} resolved threads")
 
-          payload = json.dumps(
-              {"repo": repo, "threads": threads, "bot_login": bot_login}
-          ).encode()
+          # Embedding is the slow part of an ingest and its cost tracks the number
+          # of *new* learnings — which only the sidecar can see, since it dedups
+          # before embedding. So the sidecar caps its own per-request embed work
+          # and reports what is left as `remaining`; re-posting the same chunk
+          # drains it, because everything already stored dedups away for free.
+          # Chunking on top of that just bounds the request body and the dedup
+          # lookup; with a current sidecar the size no longer decides whether a
+          # request times out, so FUKO_CHUNK_SIZE should rarely need touching.
+          try:
+              chunk_size = max(1, min(100, int(os.environ.get("FUKO_CHUNK_SIZE") or "25")))
+          except ValueError:
+              chunk_size = 25
           headers = {"Content-Type": "application/json"}
           if fuko_token:
               headers["Authorization"] = "Bearer " + fuko_token
-          try:
-              req = urllib.request.Request(
-                  fuko_url + "/ingest-threads", data=payload, headers=headers
-              )
-              with urllib.request.urlopen(req, timeout=60) as r:
-                  resp = json.load(r)
-              print(
-                  "fuko: considered %s threads, inserted %s"
-                  % (resp.get("considered"), resp.get("inserted"))
-              )
-          except Exception as e:
-              print("fuko /ingest-threads failed: " + str(e), file=sys.stderr)
+
+          # Safety bound on the drain: each pass must embed at least one learning
+          # to be worth repeating, so a chunk cannot legitimately need more passes
+          # than it has threads. The +2 absorbs an off-by-one and a final
+          # confirming pass; exhausting it means the sidecar is not draining and
+          # the leftovers are picked up by the next sweep either way.
+          max_passes = chunk_size + 2
+
+          # A persistent failure (sidecar down, auth misconfigured) would make
+          # every remaining chunk wait out the full timeout, so bail after a few
+          # consecutive failures while still tolerating a transient single-chunk
+          # blip. The exit below still flags the run as failed.
+          considered = inserted = skipped = failed = consecutive = extra_passes = 0
+          for start in range(0, len(threads), chunk_size):
+              chunk = threads[start : start + chunk_size]
+              payload = json.dumps({"repo": repo, "threads": chunk, "bot_login": bot_login}).encode()
+              drained = chunk_failed = False
+              for attempt in range(max_passes):
+                  try:
+                      req = urllib.request.Request(fuko_url + "/ingest-threads", data=payload, headers=headers)
+                      with urllib.request.urlopen(req, timeout=120) as r:
+                          # `or {}` guards a valid 200 with a JSON null body, which would
+                          # otherwise make the .get() calls raise AttributeError and report
+                          # a successful ingest as a failure.
+                          resp = json.load(r) or {}
+                      # Count the chunk's totals once, from the first pass: later
+                      # passes re-report the same threads (and re-skip what the
+                      # earlier passes inserted), so summing every pass would
+                      # inflate both. `inserted` is summed because each insert
+                      # happens exactly once across the drain.
+                      if attempt == 0:
+                          considered += resp.get("considered") or 0
+                          skipped += resp.get("skipped") or 0
+                      else:
+                          extra_passes += 1
+                      pass_inserted = resp.get("inserted") or 0
+                      inserted += pass_inserted
+                      consecutive = 0
+                      # A sidecar older than the bounded-ingest change omits
+                      # `remaining`; defaulting to 0 makes this a single pass,
+                      # exactly the pre-cap behaviour.
+                      if not (resp.get("remaining") or 0):
+                          drained = True
+                          break
+                      # Still work left but this pass stored nothing: the sidecar
+                      # isn't making progress (a zero cap, or every candidate
+                      # losing an insert race), so stop rather than re-post the
+                      # same chunk until the bound runs out.
+                      if not pass_inserted:
+                          break
+                  except Exception as e:
+                      failed += 1
+                      consecutive += 1
+                      chunk_failed = True
+                      # Surface the sidecar's response body (HTTPError carries it via
+                      # .read()); str(e) alone is just the status code, which isn't
+                      # enough to diagnose a production ingest failure.
+                      detail = ""
+                      if hasattr(e, "read"):
+                          try:
+                              detail = e.read().decode("utf-8", errors="replace")[:500]
+                          except Exception:
+                              pass
+                      print("fuko /ingest-threads chunk %d failed: %s%s" % (
+                          start // chunk_size, e, ("\n" + detail) if detail else ""),
+                          file=sys.stderr)
+                      break
+              if not drained and not chunk_failed:
+                  print("fuko: WARNING chunk %d still reported uningested learnings; "
+                        "the next sweep will retry them" % (start // chunk_size),
+                        file=sys.stderr)
+              if consecutive >= 3:
+                  print("fuko: aborting after %d consecutive chunk failures" % consecutive,
+                        file=sys.stderr)
+                  break
+
+          print("fuko: considered %s threads, inserted %s, skipped %s "
+                "(%d extra drain pass(es), %d chunk(s) failed)" % (
+                    considered, inserted, skipped, extra_passes, failed))
+          if failed:
               sys.exit(1)
           PY

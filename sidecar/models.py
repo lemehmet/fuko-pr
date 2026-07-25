@@ -107,6 +107,21 @@ class IngestThreadsRequest(BaseModel):
     bot_login: str | None = None
 
 
+class IngestThreadsResponse(BaseModel):
+    """Body returned by ``POST /ingest-threads``.
+
+    ``remaining`` is how many mined learnings were left unembedded because this
+    call hit its per-request cap. A caller drains a backlog by re-sending the
+    same batch until it reports zero; the already-stored ones dedup away, so each
+    pass costs only the embed work it is bounded to.
+    """
+
+    considered: int
+    inserted: int
+    skipped: int
+    remaining: int = 0
+
+
 class CooldownsResponse(BaseModel):
     """Body returned by ``GET /cb/cooldowns``: provider -> ISO cooldown end."""
 
