@@ -96,6 +96,39 @@ def test_remaining_counts_only_unprocessed_not_duplicates(monkeypatch):
     assert body == {"considered": 3, "inserted": 0, "skipped": 3, "remaining": 0}
 
 
+def test_a_nonsense_cap_still_makes_progress(monkeypatch):
+    for bad in (0, -1):
+        store = _CappingStore()
+        client = _client(monkeypatch, store, max_new=bad)
+        threads = [_thread(_decline(i)) for i in range(3)]
+
+        body = client.post("/ingest-threads", json={"repo": "o/r", "threads": threads}).json()
+
+        assert body["inserted"] == 1, f"cap {bad} must still embed something"
+        assert body["remaining"] == 2
+
+
+def test_bot_login_is_forwarded_to_thread_selection(monkeypatch):
+    store = _CappingStore()
+    client = _client(monkeypatch, store, max_new=10)
+    threads = [_thread(_decline(1), login="reviewer-svc")]
+
+    kept = client.post("/ingest-threads", json={"repo": "o/r", "threads": threads}).json()
+    assert kept["inserted"] == 1
+
+    store2 = _CappingStore()
+    excluded = (
+        _client(monkeypatch, store2, max_new=10)
+        .post(
+            "/ingest-threads",
+            json={"repo": "o/r", "threads": threads, "bot_login": "reviewer-svc"},
+        )
+        .json()
+    )
+    assert excluded["inserted"] == 0
+    assert excluded["remaining"] == 0
+
+
 def test_requires_auth(monkeypatch):
     monkeypatch.setattr(main.settings, "auth_token", _TOKEN)
     resp = TestClient(main.app).post("/ingest-threads", json={"repo": "o/r", "threads": []})

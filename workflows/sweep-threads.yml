@@ -23,6 +23,8 @@
 #
 # Tuning: set the repo variable FUKO_CHUNK_SIZE (1-100, default 25) to lower the
 # per-request ingest batch if a busy repo's backfill trips the sidecar timeout.
+# Set the repo variable FUKO_BOT_LOGIN to also exclude a reviewer service account
+# whose login has no "[bot]" suffix.
 #
 # GitHub Enterprise Server works unchanged — the runner sets GITHUB_GRAPHQL_URL.
 
@@ -69,6 +71,11 @@ jobs:
           # keeps the per-run embed under the sidecar timeout).
           STATES: ${{ github.event.inputs.states || 'MERGED' }}
           COUNT: ${{ github.event.inputs.count || '8' }}
+          # Optional: also exclude a reviewer app whose login carries no "[bot]"
+          # suffix and whose GraphQL author type is a plain User (a service
+          # account). The association/type filter below cannot catch that case on
+          # its own, since such an account looks exactly like a collaborator.
+          FUKO_BOT_LOGIN: ${{ vars.FUKO_BOT_LOGIN }}
           # Dispatch input wins for a one-off backfill; otherwise the repo
           # variable, so a busy repo can be tuned without editing this file.
           FUKO_CHUNK_SIZE: ${{ github.event.inputs.chunk_size || vars.FUKO_CHUNK_SIZE }}
@@ -87,6 +94,7 @@ jobs:
           graphql_url = os.environ.get("GITHUB_GRAPHQL_URL", "https://api.github.com/graphql")
           fuko_url = os.environ.get("FUKO_URL", "").rstrip("/")
           fuko_token = os.environ.get("FUKO_TOKEN", "")
+          bot_login = os.environ.get("FUKO_BOT_LOGIN") or None
           # Fail fast with a clear message if the sidecar URL isn't configured,
           # rather than crashing later with an opaque "unknown url type" from the
           # POST. Skip (exit 0) to match the graceful-degrade posture of
@@ -229,7 +237,7 @@ jobs:
           considered = inserted = skipped = failed = consecutive = extra_passes = 0
           for start in range(0, len(threads), chunk_size):
               chunk = threads[start : start + chunk_size]
-              payload = json.dumps({"repo": repo, "threads": chunk, "bot_login": None}).encode()
+              payload = json.dumps({"repo": repo, "threads": chunk, "bot_login": bot_login}).encode()
               drained = chunk_failed = False
               for attempt in range(max_passes):
                   try:

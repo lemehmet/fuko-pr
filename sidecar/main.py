@@ -162,13 +162,17 @@ def ingest_threads_endpoint(req: models.IngestThreadsRequest) -> dict:
     lives here, where the post-dedup count is known: at most
     ``FUKO_INGEST_MAX_NEW`` learnings are embedded per call and the rest are
     reported as ``remaining`` for the caller to drain by re-sending the batch.
+
+    The cap floors at 1 because it is operator-supplied: a zero or negative value
+    would defer every item forever, reporting work remaining while never making
+    progress, and a draining caller would spin until its own retry bound.
     """
     items = [
         it
         for it in (threads_mod.select_learning(t, req.bot_login) for t in req.threads)
         if it is not None
     ]
-    inserted, skipped = _store.ingest(req.repo, items, max_new=settings.ingest_max_new)
+    inserted, skipped = _store.ingest(req.repo, items, max_new=max(1, settings.ingest_max_new))
     return {
         "considered": len(req.threads),
         "inserted": inserted,
