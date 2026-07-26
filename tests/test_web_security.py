@@ -141,3 +141,42 @@ def test_nav_shows_sign_in_when_signed_out_and_sign_out_when_in(client):
 
 def test_metrics_page_stays_open_without_a_session(client):
     assert client.get("/ui/metrics").status_code == 200
+
+
+def test_cookie_is_not_secure_over_plain_http(client):
+    resp = client.post(security.LOGIN_PATH, data={"token": _TOKEN}, follow_redirects=False)
+    assert "Secure" not in resp.headers["set-cookie"]
+
+
+def test_cookie_is_secure_over_https(monkeypatch):
+    monkeypatch.setattr(main.settings, "auth_token", _TOKEN)
+    https = TestClient(main.app, base_url="https://fuko.example")
+    resp = https.post(security.LOGIN_PATH, data={"token": _TOKEN}, follow_redirects=False)
+    assert "Secure" in resp.headers["set-cookie"]
+
+
+def test_cookie_is_secure_behind_a_tls_terminating_proxy(client):
+    resp = client.post(
+        security.LOGIN_PATH,
+        data={"token": _TOKEN},
+        headers={"X-Forwarded-Proto": "https"},
+        follow_redirects=False,
+    )
+    assert "Secure" in resp.headers["set-cookie"]
+
+
+def test_forwarded_proto_reads_only_the_first_hop(client):
+    resp = client.post(
+        security.LOGIN_PATH,
+        data={"token": _TOKEN},
+        headers={"X-Forwarded-Proto": "https, http"},
+        follow_redirects=False,
+    )
+    assert "Secure" in resp.headers["set-cookie"]
+    plain = client.post(
+        security.LOGIN_PATH,
+        data={"token": _TOKEN},
+        headers={"X-Forwarded-Proto": "http, https"},
+        follow_redirects=False,
+    )
+    assert "Secure" not in plain.headers["set-cookie"]

@@ -75,6 +75,20 @@ def csrf_token(session: str) -> str:
     return _sign(f"csrf:{session}") or ""
 
 
+def is_secure(request: Request) -> bool:
+    """Return whether this request reached the sidecar over https.
+
+    Honours ``X-Forwarded-Proto`` because the sidecar habitually sits behind a
+    reverse proxy that terminates TLS -- reading only ``request.url.scheme``
+    there would see http and drop the ``Secure`` flag on a connection that was
+    in fact encrypted.
+    """
+    forwarded = request.headers.get("x-forwarded-proto", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip().lower() == "https"
+    return request.url.scheme == "https"
+
+
 def session_of(request: Request) -> str | None:
     """Return the request's valid session value, or ``None``."""
     value = request.cookies.get(COOKIE)
@@ -177,11 +191,18 @@ def login_form(request: Request, next: str | None = None) -> str:
 
 
 @router.post(LOGIN_PATH, include_in_schema=False)
-def login_submit(token: str = Form(default=""), next: str | None = Form(default=None)) -> Response:
+def login_submit(
+    request: Request, token: str = Form(default=""), next: str | None = Form(default=None)
+) -> Response:
     """Exchange ``FUKO_AUTH_TOKEN`` for a session cookie.
 
     The token is compared in constant time, and a failure re-renders the form
     rather than redirecting, so a wrong paste does not lose the destination.
+
+    ``Secure`` is set whenever the request arrived over https, which keeps the
+    cookie off any plaintext path to the same host. It is not set unconditionally
+    because the LAN deployments this console targets are commonly plain http, and
+    a ``Secure`` cookie there would simply never be stored.
     """
     destination = _safe_next(next)
     if not settings.auth_token or not hmac.compare_digest(token, settings.auth_token):
@@ -197,6 +218,7 @@ def login_submit(token: str = Form(default=""), next: str | None = Form(default=
         max_age=TTL_SECONDS,
         httponly=True,
         samesite="strict",
+        secure=is_secure(request),
         path=PREFIX,
     )
     return response

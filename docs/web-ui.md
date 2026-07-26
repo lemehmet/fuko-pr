@@ -115,6 +115,10 @@ Details worth knowing before you touch it:
 - The cookie is `HttpOnly`, `SameSite=Strict`, scoped to `Path=/ui`, and expires
   after `TTL_SECONDS`. Its value is an HMAC over the auth token, so rotating the
   token invalidates every outstanding session for free.
+- `Secure` is set when the request arrived over https — including via
+  `X-Forwarded-Proto` from a TLS-terminating proxy, which is how the sidecar is
+  usually deployed. It is not set unconditionally because a plain-http LAN
+  deployment would then never store the cookie at all.
 - The CSRF token is derived from the *session*, not global — one lifted from
   another user's page does not verify. `SameSite=Strict` already blocks the
   cross-site POST; this is the second lock.

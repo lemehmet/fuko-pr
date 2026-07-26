@@ -456,7 +456,7 @@ def edit_submit(
             if updated is None:
                 raise HTTPException(status.HTTP_404_NOT_FOUND, "no such learning in that repo")
             return _redirect(_BROWSE, repo=repo, msg="Saved.")
-        inserted, skipped = store.ingest(repo, [IngestItem(**fields)])
+        inserted, _skipped = store.ingest(repo, [IngestItem(**fields)])
         note = "Added." if inserted else "Already stored — nothing added."
         return _redirect(_BROWSE, repo=repo, msg=note)
     except (DuplicateLearningError, UnknownSourceError) as e:

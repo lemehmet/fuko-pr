@@ -397,3 +397,15 @@ def test_tools_page_carries_a_flash_message(user):
 
 def test_kb_is_registered_in_the_shared_nav(anon):
     assert 'href="/ui/kb" class="active"' in anon.get("/ui/kb").text
+
+
+def test_a_javascript_source_url_is_not_rendered_as_a_link(anon, store):
+    store.items[0]["source_url"] = "javascript:alert(document.cookie)"
+    page = anon.get("/ui/kb?repo=o/r").text
+    assert "javascript:" not in page
+    assert 'href="javascript' not in page
+
+
+def test_an_https_source_url_stays_clickable(anon, store):
+    page = anon.get("/ui/kb?repo=o/r").text
+    assert 'href="https://example/docs"' in page
