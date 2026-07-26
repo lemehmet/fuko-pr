@@ -44,6 +44,12 @@ class ReviewSignal(BaseModel):
     thread_url: str | None = None
     backend: str = ""
     model: str = ""
+    # The role of the fuko branch that produced this finding: "active" (gating),
+    # "trial" (runs + surfaced but NON-gating), or "backup" (a promoted failover
+    # running under a branch — inherits that branch's role, so this is rarely
+    # "backup" in practice). Defaults to "active" so external reviewers
+    # (coderabbit/copilot) and pre-role markers decode as gating, unchanged.
+    role: str = "active"
     kb_refs: list[str] = Field(default_factory=list)
 
 

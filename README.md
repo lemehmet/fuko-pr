@@ -78,6 +78,8 @@ file — no paid APIs, no server.
    # Add more entries to scale up: every active entry (the default role) reviews
    # each PR — two or more actives run as an A/B comparison — while entries with
    # role = "backup" are shared failover targets used when a provider throttles.
+   # role = "trial" runs a candidate model alongside the actives and surfaces its
+   # output for evaluation, but non-gating (consumers don't block or gate on it).
 
    [knowledge]
    store = "sqlite-vec"

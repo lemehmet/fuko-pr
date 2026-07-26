@@ -21,12 +21,23 @@ tools = ["review", "improve"]   # PR-Agent tools to run
 #   summary under a "🤖 fuko A/B — model <id>" header. `describe` is
 #   auto-disabled in A/B mode (a PR has one description).
 #
+#   role = "trial" — runs on EVERY PR exactly like an active branch (its own
+#   A/B branch + header + marked findings), but is tagged NON-gating: its
+#   header shows "· trial" and its findings carry role="trial" in the signal
+#   marker, so a consumer (e.g. the review-loop skill) surfaces its output for
+#   evaluation WITHOUT waiting on it or blocking merge. Use it to vet a new
+#   candidate model alongside the actives before promoting it to active. Wants a
+#   `token_env` like an active (distinct identity / concurrent run).
+#
 #   role = "backup" — never starts a review. A shared failover target every
-#   active falls back to when its provider throttles (429/quota/overload/
+#   active/trial falls back to when its provider throttles (429/quota/overload/
 #   timeout). A throttle trips the provider's breaker (the cooldown is global
 #   per provider and shared across repos, since the API key is shared;
 #   persisted in the sidecar's Postgres); a non-throttle error fails fast.
 #   Entry order = failover priority.
+#
+# At least one entry must be role = "active" (trials and backups are non-gating,
+# so a config with none would have nothing that gates).
 #
 # Known presets: zai-coding, ollama, ollama-cloud, lemonade, openrouter,
 # anthropic, openai. (lemonade = any Lemonade server, e.g. a LAN AMD box;
@@ -61,10 +72,17 @@ max_context = 1000000
 # token_env = "FUKO_GITHUB_TOKEN_B"   # distinct actor from A => the two run concurrently
 
 # [[review.models]]
+# provider = "openrouter"       # a candidate model you want to evaluate live
+# name = "meta/muse-spark-1.1"
+# max_context = 1000000
+# token_env = "FUKO_GITHUB_TOKEN_C"
+# role = "trial"                # runs + surfaced for evaluation, but NON-gating
+
+# [[review.models]]
 # provider = "ollama-cloud"     # same model via Ollama Cloud, key from OLLAMA_API_KEY
 # name = "glm-5.2:cloud"
 # max_context = 976000
-# role = "backup"               # runs only when an active's provider throttles
+# role = "backup"               # runs only when an active/trial's provider throttles
 #
 # Running the SAME model on two providers (different keys/endpoints, so separate
 # throttle buckets) is the simplest real failover. Use a shared Postgres

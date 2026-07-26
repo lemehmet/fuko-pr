@@ -285,6 +285,7 @@ class PrAgentBackend:
         token: str | None = None,
         api_url: str | None = None,
         actor: str | None = None,
+        role: str = "active",
     ) -> list[ReviewSignal]:
         """Read PR-Agent's comments, map them to Review Signals, and mark them.
 
@@ -345,9 +346,17 @@ class PrAgentBackend:
             return []
 
         pairs = pragent_signals(comments, model)
+        # Stamp the producing branch's role onto every signal BEFORE the markers
+        # are injected, so the persisted marker (and thus `fuko signals`) carries
+        # it. A trial branch's findings are then self-identifying as non-gating.
+        for p in pairs:
+            p["signal"].role = role
         self._inject_markers(api, pr, headers, pairs, label=compare_label, actor=actor)
 
         guide_pairs = self._guide_pairs(api, pr, headers, model)
+        for gp in guide_pairs:
+            for s in gp["signals"]:
+                s.role = role
         self._mark_guide_comments(api, pr, headers, guide_pairs, label=compare_label, actor=actor)
 
         if compare_label is not None:

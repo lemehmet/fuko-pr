@@ -73,8 +73,14 @@ class ReviewBackend(Protocol):
         token: str | None = None,
         api_url: str | None = None,
         actor: str | None = None,
+        role: str = "active",
     ) -> list[ReviewSignal]:
         """Read the backend's posted review and map it to Review Signals (egress).
+
+        ``role`` is the producing branch's role ("active"/"trial"/"backup"); it is
+        stamped onto every signal (and thus into the invisible marker) so a
+        consumer of ``fuko signals`` can tell a gating (active) finding from a
+        non-gating (trial) one without resolving comment authorship.
 
         When ``compare_label`` is set (A/B mode) the backend additionally prepends
         that visible label to each inline comment it newly marks, so a human reading
