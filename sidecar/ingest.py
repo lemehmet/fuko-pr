@@ -8,7 +8,14 @@ from psycopg.errors import UniqueViolation
 from .db import db, vector_literal
 from .dedup import partition
 from .embed import get_embedder
-from .models import UNSET, DuplicateLearningError, IngestItem, check_source, check_text
+from .models import (
+    UNSET,
+    DuplicateLearningError,
+    IngestItem,
+    InvalidLearningError,
+    check_source,
+    check_text,
+)
 from .retrieve import _ROW_COLUMNS, _row_to_dict, get_learning
 
 _INSERT_SQL = """
@@ -26,6 +33,23 @@ def _parse_dt(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def checked_expires(value: str | None) -> datetime | None:
+    """Parse an ``expires_at`` for a deliberate edit, rejecting a value that will not parse.
+
+    ``_parse_dt`` returns ``None`` for anything it cannot read, which on the
+    bulk ingest path is the right shape -- one malformed field should not fail a
+    whole swept batch. On an edit it is not: a typo would silently clear the
+    expiry rather than report itself, changing the row in a way the operator did
+    not ask for. Empty and ``None`` still mean "clear".
+    """
+    if not value:
+        return None
+    parsed = _parse_dt(value)
+    if parsed is None:
+        raise InvalidLearningError(f"expires_at is not an ISO-8601 timestamp: {value!r}")
+    return parsed
 
 
 def _existing_keys(repo: str, items: list[IngestItem]) -> set[tuple[str, str]]:
@@ -121,7 +145,8 @@ def update(
         DuplicateLearningError: The result would collide with the
             ``(repo, text, source)`` unique key.
         UnknownSourceError: ``source`` is outside ``SOURCES``.
-        InvalidLearningError: ``text`` is null or blank.
+        InvalidLearningError: ``text`` is null or blank, or ``expires_at`` will
+            not parse.
     """
     try:
         UUID(id)
@@ -138,6 +163,8 @@ def update(
         check_source(supplied["source"])
     if "text" in supplied:
         check_text(supplied["text"])
+    if "expires_at" in supplied:
+        supplied["expires_at"] = checked_expires(supplied["expires_at"])
 
     if not supplied:
         return get_learning(repo, id)
@@ -152,12 +179,8 @@ def update(
         assignments: list[str] = []
         params: list = []
         for name, value in supplied.items():
-            if name == "expires_at":
-                assignments.append("expires_at = %s")
-                params.append(_parse_dt(value))
-            else:
-                assignments.append(f"{name} = %s")
-                params.append(value)
+            assignments.append(f"{name} = %s")
+            params.append(value)
         if supplied.get("text", current[0]) != current[0]:
             assignments.append("embedding = %s::vector")
             params.append(vector_literal(get_embedder().embed_one(supplied["text"])))

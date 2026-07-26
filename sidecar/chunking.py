@@ -3,6 +3,10 @@
 Used by every doc-ingestion path -- ``fuko ingest-docs`` and the knowledge-base
 console's upload -- so both produce identical chunks from the same file. Pure
 string handling, no I/O.
+
+Nothing is discarded: a paragraph longer than ``max_len`` is emitted as
+successive full-length chunks rather than truncated, so ingesting a document
+cannot silently lose part of it.
 """
 
 import re
@@ -19,9 +23,9 @@ def _split_paragraphs(body: str, max_len: int) -> list[str]:
         else:
             out.append(cur)
             cur = para
-        if len(cur) > max_len:
+        while len(cur) > max_len:
             out.append(cur[:max_len])
-            cur = ""
+            cur = cur[max_len:]
     if cur:
         out.append(cur)
     return out or [body[:max_len]]
@@ -51,4 +55,7 @@ def chunk_markdown(text: str, max_len: int = 1500) -> list[tuple[str, str]]:
         else:
             buf.append(line)
     flush()
-    return chunks or [(text.strip()[:max_len], "")]
+    if chunks:
+        return chunks
+    body = text.strip()
+    return [(body[:max_len], "")] if body else []

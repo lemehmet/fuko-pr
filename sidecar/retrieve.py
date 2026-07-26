@@ -78,6 +78,17 @@ def query(
 _ROW_COLUMNS = "id, repo, text, source, source_url, file_globs, topic, created_at, expires_at"
 
 
+def like_escape(term: str) -> str:
+    r"""Escape ``LIKE``/``ILIKE`` metacharacters so a search term matches literally.
+
+    Without this, searching ``100%`` or ``a_b`` silently over-matches: ``%`` and
+    ``_`` are pattern syntax, not text. Callers pair the escaped term with an
+    explicit ``ESCAPE '\'`` clause. Shared by both stores so their search
+    semantics cannot drift.
+    """
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _row_to_dict(row: tuple) -> dict:
     return {
         "id": str(row[0]),
@@ -120,8 +131,8 @@ def list_learnings(
         where.append("source = %s")
         params.append(source)
     if q:
-        where.append("(text ILIKE %s OR coalesce(topic, '') ILIKE %s)")
-        pattern = f"%{q}%"
+        where.append(r"(text ILIKE %s ESCAPE '\' OR coalesce(topic, '') ILIKE %s ESCAPE '\')")
+        pattern = f"%{like_escape(q)}%"
         params.extend([pattern, pattern])
     clause = " AND ".join(where) if where else "TRUE"
     page_sql = f"""

@@ -491,3 +491,52 @@ def test_update_reads_the_stored_text_inside_the_mutation(store, monkeypatch):
     # exactly one connection is opened for the mutation: the decision cannot be
     # based on a snapshot from an earlier, separate read
     assert seen == ["auth login flow"]
+
+
+def test_search_treats_like_metacharacters_literally(store):
+    store.ingest(
+        "o/r",
+        [
+            IngestItem(text="auth coverage is 100% on this path", source="docs"),
+            IngestItem(text="auth coverage is 55 percent elsewhere", source="docs"),
+            IngestItem(text="db a_b naming convention", source="docs"),
+            IngestItem(text="db axb naming convention", source="docs"),
+        ],
+    )
+    hits, total = store.list_learnings(repo="o/r", q="100%")
+    assert total == 1 and hits[0]["text"].startswith("auth coverage is 100%")
+
+    hits, total = store.list_learnings(repo="o/r", q="a_b")
+    assert total == 1 and "a_b" in hits[0]["text"]
+
+    # a bare % must not become a match-everything wildcard
+    assert store.list_learnings(repo="o/r", q="%")[1] == 1
+
+
+def test_update_rejects_an_unparseable_expiry_instead_of_clearing_it(store):
+    lid = _seed(store)["auth login flow"]["id"]
+    store.update_learning("o/r", lid, expires_at="2099-01-01T00:00:00Z")
+    assert store.get_learning("o/r", lid)["expires_at"].startswith("2099-01-01")
+
+    with pytest.raises(InvalidLearningError):
+        store.update_learning("o/r", lid, expires_at="next tuesday")
+    assert store.get_learning("o/r", lid)["expires_at"].startswith("2099-01-01")
+
+
+def test_update_still_clears_an_expiry_with_an_empty_value(store):
+    lid = _seed(store)["auth login flow"]["id"]
+    store.update_learning("o/r", lid, expires_at="2099-01-01T00:00:00Z")
+    assert store.update_learning("o/r", lid, expires_at=None)["expires_at"] is None
+
+
+def test_search_is_case_insensitive_beyond_ascii(store):
+    store.ingest(
+        "o/r",
+        [
+            IngestItem(text="auth ÄPFEL naming in the German docs", source="docs"),
+            IngestItem(text="db STRASSE unrelated", source="docs"),
+        ],
+    )
+    hits, total = store.list_learnings(repo="o/r", q="äpfel")
+    assert total == 1 and "ÄPFEL" in hits[0]["text"]
+    assert store.list_learnings(repo="o/r", q="ÄPFEL")[1] == 1

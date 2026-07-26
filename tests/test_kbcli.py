@@ -232,3 +232,55 @@ def test_call_requires_token(monkeypatch):
     monkeypatch.delenv("FUKO_AUTH_TOKEN", raising=False)
     with pytest.raises(SystemExit):
         kbcli._call("GET", "/learnings")
+
+
+def _edit_ns(**over):
+    base = dict(
+        repo="o/r",
+        id="abc-1",
+        text=None,
+        source=None,
+        source_url=None,
+        topic=None,
+        expires_at=None,
+        globs=None,
+    )
+    base.update(over)
+    return _ns(**base)
+
+
+@pytest.mark.parametrize("field", ["source_url", "topic", "expires_at"])
+def test_edit_clears_a_nullable_field_with_an_empty_string(monkeypatch, field):
+    seen = {}
+
+    def fake(method, path, params=None, body=None):
+        seen.update(body=body)
+        return _ROW
+
+    monkeypatch.setattr(kbcli, "_call", fake)
+    kbcli._edit(_edit_ns(**{field: ""}))
+    assert seen["body"] == {"repo": "o/r", field: None}
+
+
+def test_edit_does_not_clear_text_or_source_on_an_empty_string(monkeypatch):
+    seen = {}
+
+    def fake(method, path, params=None, body=None):
+        seen.update(body=body)
+        return _ROW
+
+    monkeypatch.setattr(kbcli, "_call", fake)
+    kbcli._edit(_edit_ns(text=""))
+    assert seen["body"] == {"repo": "o/r", "text": ""}
+
+
+def test_edit_omits_fields_that_were_not_passed(monkeypatch):
+    seen = {}
+
+    def fake(method, path, params=None, body=None):
+        seen.update(body=body)
+        return _ROW
+
+    monkeypatch.setattr(kbcli, "_call", fake)
+    kbcli._edit(_edit_ns(topic="Migrations"))
+    assert seen["body"] == {"repo": "o/r", "topic": "Migrations"}

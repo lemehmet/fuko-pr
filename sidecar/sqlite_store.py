@@ -27,10 +27,10 @@ from .config import settings
 from .dedup import partition
 from .embed import get_embedder
 from .fukoconfig import KnowledgeConfig
-from .ingest import _UPDATABLE, _parse_dt
+from .ingest import _UPDATABLE, _parse_dt, checked_expires
 from .models import UNSET, DuplicateLearningError, IngestItem, check_source, check_text
 from .objectstore import PreconditionFailed, make_object_store
-from .retrieve import _build_query, fold_repo_counts
+from .retrieve import _build_query, fold_repo_counts, like_escape
 
 _MAX_RETRIES = 5
 
@@ -57,6 +57,17 @@ def _row_to_dict(row: tuple) -> dict:
         "created_at": None,
         "expires_at": row[7],
     }
+
+
+def _unicode_lower(value):
+    """Case-fold with Python's Unicode rules, overriding sqlite's ASCII-only ``lower``.
+
+    Both sqlite's ``LIKE`` and its built-in ``lower()`` fold ASCII only, so
+    ``'ÄPFEL'`` never matches a search for ``'äpfel'`` -- while Postgres ``ILIKE``
+    does match it. Registering this keeps the two stores' search agreeing on text
+    that is not plain ASCII, without needing an ICU-enabled sqlite build.
+    """
+    return value.lower() if isinstance(value, str) else value
 
 
 def _pack(vec: list[float]) -> bytes:
@@ -107,6 +118,7 @@ class SqliteVecStore:
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
+        conn.create_function("lower", 1, _unicode_lower, deterministic=True)
         conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS learnings("
@@ -378,9 +390,10 @@ class SqliteVecStore:
             params.append(source)
         if q:
             where.append(
-                "(text LIKE ? COLLATE NOCASE OR coalesce(topic, '') LIKE ? COLLATE NOCASE)"
+                r"(lower(text) LIKE ? ESCAPE '\' OR lower(coalesce(topic, '')) LIKE ? ESCAPE '\')"
             )
-            params.extend([f"%{q}%", f"%{q}%"])
+            pattern = f"%{like_escape(q.lower())}%"
+            params.extend([pattern, pattern])
         clause = " AND ".join(where) if where else "1"
         page_sql = (
             f"SELECT {_ROW_COLUMNS} "
@@ -441,6 +454,9 @@ class SqliteVecStore:
             check_source(supplied["source"])
         if "text" in supplied:
             check_text(supplied["text"])
+        if "expires_at" in supplied:
+            parsed = checked_expires(supplied["expires_at"])
+            supplied["expires_at"] = parsed.isoformat() if parsed else None
         if not supplied:
             return self.get_learning(repo, id)
 
@@ -450,8 +466,6 @@ class SqliteVecStore:
             assignments.append(f"{name} = ?")
             if name == "file_globs":
                 params.append(json.dumps(value or []))
-            elif name == "expires_at":
-                params.append(_norm_expires(value))
             else:
                 params.append(value)
 
