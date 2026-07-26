@@ -28,7 +28,7 @@ from .dedup import partition
 from .embed import get_embedder
 from .fukoconfig import KnowledgeConfig
 from .ingest import _UPDATABLE, _parse_dt
-from .models import UNSET, DuplicateLearningError, IngestItem, check_source
+from .models import UNSET, DuplicateLearningError, IngestItem, check_source, check_text
 from .objectstore import PreconditionFailed, make_object_store
 from .retrieve import _build_query, fold_repo_counts
 
@@ -421,9 +421,12 @@ class SqliteVecStore:
     ) -> dict | None:
         """Apply the supplied fields to one learning; re-embeds only on a text change.
 
-        The embedding is computed before the mutation opens, so a lost
-        optimistic-concurrency race retries the write without paying for the
-        (slow) embedder again.
+        The re-embed decision reads the stored text inside the mutation's own
+        connection, not from an earlier read: ``_mutate`` re-runs its callback
+        after losing an optimistic-concurrency race, and a decision made against
+        the pre-race snapshot could leave the row holding this write's text with
+        the winner's embedding. The computed vector is memoized across those
+        retries, so a lost race never pays the (slow) embedder twice.
         """
         supplied = {
             name: value
@@ -436,17 +439,10 @@ class SqliteVecStore:
         }
         if "source" in supplied:
             check_source(supplied["source"])
+        if "text" in supplied:
+            check_text(supplied["text"])
         if not supplied:
             return self.get_learning(repo, id)
-
-        current = self.get_learning(repo, id)
-        if current is None:
-            return None
-        embedding = (
-            _pack(get_embedder().embed_one(supplied["text"]))
-            if supplied.get("text", current["text"]) != current["text"]
-            else None
-        )
 
         assignments: list[str] = []
         params: list = []
@@ -459,12 +455,22 @@ class SqliteVecStore:
             else:
                 params.append(value)
 
+        memo: list[bytes] = []
+
+        def embedding_for(new_text: str) -> bytes:
+            if not memo:
+                memo.append(_pack(get_embedder().embed_one(new_text)))
+            return memo[0]
+
         def fn(conn: sqlite3.Connection) -> dict | None:
             row = conn.execute(
-                "SELECT vec_rowid FROM learnings WHERE repo = ? AND lid = ?", (repo, id)
+                "SELECT vec_rowid, text FROM learnings WHERE repo = ? AND lid = ?", (repo, id)
             ).fetchone()
             if row is None:
                 return None
+            embedding = (
+                embedding_for(supplied["text"]) if supplied.get("text", row[1]) != row[1] else None
+            )
             try:
                 conn.execute(
                     f"UPDATE learnings SET {', '.join(assignments)} WHERE repo = ? AND lid = ?",

@@ -134,12 +134,14 @@ def update_learning_endpoint(id: str, req: models.UpdateLearningRequest) -> dict
     """Apply the supplied fields to one learning and return the updated row.
 
     Only the fields present in the request body are written, so clearing a field
-    (sending it as null) stays distinguishable from omitting it. Changing ``text``
-    re-embeds; any other change skips the embedder.
+    (sending it as null) stays distinguishable from omitting it. ``text`` is the
+    exception: it is ``NOT NULL`` and is what gets embedded, so a null or blank
+    one is rejected rather than treated as a clear. Changing ``text`` re-embeds;
+    any other change skips the embedder.
     """
     try:
         updated = _store.update_learning(req.repo, id, **req.changes())
-    except models.UnknownSourceError as e:
+    except models.InvalidLearningError as e:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
     except models.DuplicateLearningError as e:
         raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e

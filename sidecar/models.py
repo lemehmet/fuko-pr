@@ -40,7 +40,11 @@ class DuplicateLearningError(ValueError):
     """Raised when a write would collide with the ``(repo, text, source)`` unique key."""
 
 
-class UnknownSourceError(ValueError):
+class InvalidLearningError(ValueError):
+    """Raised when a write's field values are not storable."""
+
+
+class UnknownSourceError(InvalidLearningError):
     """Raised when a write names a source outside :data:`SOURCES`."""
 
 
@@ -54,6 +58,19 @@ def check_source(source: str) -> str:
     if source not in SOURCES:
         raise UnknownSourceError(f"unknown source '{source}'; known sources: {', '.join(SOURCES)}")
     return source
+
+
+def check_text(text: object) -> str:
+    """Return ``text`` if it is storable as a learning body, else raise.
+
+    ``text`` is the column the embedding is derived from and it is ``NOT NULL``,
+    so a null or blank update is not a "clear this field" — it is a write with
+    nowhere to go. Rejecting it here stops a ``null`` reaching the embedder,
+    which would fail deep inside an HTTP call rather than at the request edge.
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise InvalidLearningError("text must be a non-empty string")
+    return text
 
 
 class IngestItem(BaseModel):

@@ -17,9 +17,11 @@ from sidecar import ingest, main, retrieve
 from sidecar.models import (
     UNSET,
     DuplicateLearningError,
+    InvalidLearningError,
     UnknownSourceError,
     UpdateLearningRequest,
     check_source,
+    check_text,
 )
 
 _ID = "11111111-1111-1111-1111-111111111111"
@@ -306,3 +308,43 @@ def test_new_endpoints_require_auth(monkeypatch):
 
 def test_unset_sentinel_reads_as_unset():
     assert repr(UNSET) == "UNSET"
+
+
+def test_check_text_rejects_null_and_blank():
+    assert check_text("real text") == "real text"
+    for bad in (None, "", "   ", "\n\t", 5):
+        with pytest.raises(InvalidLearningError):
+            check_text(bad)
+
+
+def test_unknown_source_is_an_invalid_learning():
+    assert issubclass(UnknownSourceError, InvalidLearningError)
+
+
+def test_update_rejects_a_null_text_before_reaching_the_embedder(pg):
+    conn = pg([])
+    with pytest.raises(InvalidLearningError):
+        ingest.update("o/r", _ID, text=None)
+    assert conn.statements == []
+    assert pg.embedder.calls == []
+
+
+def test_update_rejects_a_blank_text(pg):
+    conn = pg([])
+    with pytest.raises(InvalidLearningError):
+        ingest.update("o/r", _ID, text="   ")
+    assert conn.statements == []
+
+
+def test_update_locks_the_row_it_reads_for_the_embed_decision(pg):
+    conn = pg([("original text",), _row(topic="new")])
+    ingest.update("o/r", _ID, topic="new")
+    assert conn.statements[0][0].endswith("FOR UPDATE")
+
+
+def test_patch_422s_on_a_null_text(api):
+    store, client = api
+    store.raises = InvalidLearningError("text must be a non-empty string")
+    resp = client.patch(f"/learnings/{_ID}", json={"repo": "o/r", "text": None})
+    assert resp.status_code == 422
+    assert "non-empty" in resp.json()["detail"]
