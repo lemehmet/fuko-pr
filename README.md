@@ -192,6 +192,13 @@ fuko kb forget owner/name --id <uuid>
 
 Design and contracts: [`docs/design.md`](docs/design.md).
 
+## Browser UI
+
+The sidecar serves utility pages under `/ui` — `/ui/metrics` shows per-model and
+per-slot review aggregates, recent runs, reviewer health, and open provider
+cooldowns. Read-only and unauthenticated, for a LAN-only deployment. Adding a
+page: [`docs/web-ui.md`](docs/web-ui.md).
+
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md). In short: `ruff check`, `ruff format

@@ -4,13 +4,12 @@ import sys
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
-from fastapi.responses import HTMLResponse
 
 from . import circuit_breaker
 from . import models
 from . import reviewer_health
 from . import run_metrics
-from . import viewer
+from . import web
 from . import threads as threads_mod
 from .config import settings
 from .fukoconfig import load_config
@@ -39,6 +38,8 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="fuko-pr sidecar", version="0.6.0", lifespan=lifespan)
+
+app.include_router(web.router)
 
 # The sidecar serves one store, selected by .fuko.toml (defaults to Postgres).
 _store = get_store(load_config().knowledge)
@@ -192,38 +193,6 @@ def cb_trip_endpoint(req: models.TripRequest) -> dict:
     """Open a provider's circuit breaker for a cooldown window (idempotent upsert)."""
     until = circuit_breaker.trip(req.provider, req.cooldown_seconds, req.reason or "")
     return {"provider": req.provider, "cooldown_until": until}
-
-
-@app.get("/metrics/view", response_class=HTMLResponse)
-def metrics_view_endpoint(repo: str | None = None, days: int = 30) -> str:
-    """Serve the human-facing metrics page (deliberately unauthenticated).
-
-    Read-only aggregates on a LAN-only deployment (decision in #71); the
-    ``/healthz`` probe set the unauthenticated precedent. Every API endpoint
-    keeps its bearer auth -- only this HTML view is open, and it can reach
-    nothing mutating.
-    """
-    days = min(max(1, days), 3650)
-    data: dict = {"summary": [], "slots": [], "recent": [], "health": [], "cooldowns": {}}
-    db_error = False
-    try:
-        data = {
-            "summary": run_metrics.summary(repo=repo, days=days),
-            "slots": run_metrics.slot_summary(repo=repo, days=days),
-            "recent": run_metrics.recent_runs(repo=repo),
-            "health": reviewer_health.all_states(),
-            "cooldowns": circuit_breaker.get_cooldowns(),
-        }
-    except Exception as e:
-        print(f"fuko: metrics view degraded (database unreachable?): {e}", file=sys.stderr)
-        db_error = True
-    return viewer.render_page(
-        **data,
-        repo=repo,
-        days=days,
-        db_enabled=bool(settings.database_url),
-        db_error=db_error,
-    )
 
 
 @app.get("/rh/state", response_model=models.ReviewerHealthResponse, dependencies=[Depends(_auth)])
