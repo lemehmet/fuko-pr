@@ -174,9 +174,11 @@ To browse a running sidecar's store from any machine, `fuko kb` is an HTTP clien
 over `FUKO_URL` + `FUKO_AUTH_TOKEN`:
 
 ```bash
+fuko kb repos                       # every repo with a KB, and its source mix
 fuko kb count                       # totals + breakdown by repo/source
-fuko kb list --repo owner/name --full
+fuko kb list --repo owner/name -q "glob" --full     # --include-expired to see expired ones
 fuko kb query owner/name --files path/to/changed.py --text "topic"
+fuko kb edit owner/name <uuid> --topic "Migrations" --globs "migrations/*.sql"
 fuko kb forget owner/name --id <uuid>
 ```
 

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from . import ingest as _ingest
 from . import retrieve as _retrieve
 from .fukoconfig import KnowledgeConfig
-from .models import IngestItem
+from .models import UNSET, IngestItem
 
 if TYPE_CHECKING:
     from .backends.base import Store
@@ -56,9 +56,43 @@ class PostgresStore:
         source: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        q: str | None = None,
+        include_expired: bool = False,
     ) -> tuple[list[dict], int]:
-        """Return a page of live learnings (newest-first) plus the total match count."""
-        return _retrieve.list_learnings(repo, source, limit, offset)
+        """Return a page of learnings (newest-first) plus the total match count."""
+        return _retrieve.list_learnings(repo, source, limit, offset, q, include_expired)
+
+    def get_learning(self, repo: str, id: str) -> dict | None:
+        """Return one learning (expired included), or ``None`` when absent from ``repo``."""
+        return _retrieve.get_learning(repo, id)
+
+    def update_learning(
+        self,
+        repo: str,
+        id: str,
+        *,
+        text: str = UNSET,
+        source: str = UNSET,
+        source_url: str | None = UNSET,
+        file_globs: list[str] = UNSET,
+        topic: str | None = UNSET,
+        expires_at: str | None = UNSET,
+    ) -> dict | None:
+        """Apply the supplied fields to one learning; re-embeds only on a text change."""
+        return _ingest.update(
+            repo,
+            id,
+            text=text,
+            source=source,
+            source_url=source_url,
+            file_globs=file_globs,
+            topic=topic,
+            expires_at=expires_at,
+        )
+
+    def repos(self) -> list[dict]:
+        """Return the per-repository footprint of live learnings."""
+        return _retrieve.repos()
 
 
 class UnknownStoreError(ValueError):

@@ -4,7 +4,12 @@ import pytest
 
 from sidecar import sqlite_store as ss
 from sidecar.fukoconfig import KnowledgeConfig, ObjectStoreConfig
-from sidecar.models import IngestItem
+from sidecar.models import (
+    DuplicateLearningError,
+    IngestItem,
+    InvalidLearningError,
+    UnknownSourceError,
+)
 from sidecar.objectstore import PreconditionFailed
 from sidecar.stores import get_store
 
@@ -319,3 +324,219 @@ def test_mutate_gives_up_after_max_retries(store):
     store._obj.fail_next_saves = 99
     with pytest.raises(PreconditionFailed):
         store.ingest("o/r", [IngestItem(text="auth", source="docs")])
+
+
+def _seed(store):
+    store.ingest(
+        "o/r",
+        [
+            IngestItem(text="auth login flow", source="remember", file_globs=["src/auth/**"]),
+            IngestItem(text="db migration notes", source="docs", topic="Migrations"),
+        ],
+    )
+    store.ingest("o/s", [IngestItem(text="ui spacing rule", source="docs")])
+    return {r["text"]: r for r in store.list_learnings(repo="o/r")[0]}
+
+
+def test_get_learning_is_repo_scoped(store):
+    rows = _seed(store)
+    lid = rows["auth login flow"]["id"]
+    assert store.get_learning("o/r", lid)["text"] == "auth login flow"
+    assert store.get_learning("o/s", lid) is None
+    assert store.get_learning("o/r", "no-such-id") is None
+
+
+def test_repos_counts_match_a_full_listing(store):
+    _seed(store)
+    summary = {e["repo"]: e for e in store.repos()}
+    assert [e["repo"] for e in store.repos()] == ["o/r", "o/s"]
+    assert summary["o/r"]["count"] == store.list_learnings(repo="o/r")[1]
+    assert summary["o/r"]["sources"] == {"remember": 1, "docs": 1}
+    assert summary["o/s"]["sources"] == {"docs": 1}
+
+
+def test_list_learnings_searches_text_and_topic_case_insensitively(store):
+    _seed(store)
+    assert [r["text"] for r in store.list_learnings(repo="o/r", q="LOGIN")[0]] == [
+        "auth login flow"
+    ]
+    assert [r["text"] for r in store.list_learnings(repo="o/r", q="migrations")[0]] == [
+        "db migration notes"
+    ]
+    assert store.list_learnings(repo="o/r", q="nothing here")[1] == 0
+
+
+def test_expired_learnings_are_hidden_unless_asked_for(store):
+    store.ingest(
+        "o/r",
+        [
+            IngestItem(text="auth still valid", source="docs"),
+            IngestItem(text="auth long gone", source="docs", expires_at="2020-01-01T00:00:00Z"),
+        ],
+    )
+    live, live_total = store.list_learnings(repo="o/r")
+    assert [r["text"] for r in live] == ["auth still valid"] and live_total == 1
+
+    everything, total = store.list_learnings(repo="o/r", include_expired=True)
+    assert {r["text"] for r in everything} == {"auth still valid", "auth long gone"}
+    assert total == 2
+
+    expired_id = next(r["id"] for r in everything if r["text"] == "auth long gone")
+    assert store.get_learning("o/r", expired_id)["text"] == "auth long gone"
+    assert store.repos()[0]["count"] == 1
+
+
+def test_update_writes_only_the_supplied_fields(store):
+    lid = _seed(store)["db migration notes"]["id"]
+    updated = store.update_learning("o/r", lid, topic="Schema", file_globs=["migrations/*.sql"])
+    assert updated["topic"] == "Schema"
+    assert updated["file_globs"] == ["migrations/*.sql"]
+    assert updated["text"] == "db migration notes"
+    assert updated["source"] == "docs"
+    assert store.get_learning("o/r", lid)["topic"] == "Schema"
+
+
+def test_update_can_clear_a_field(store):
+    lid = _seed(store)["db migration notes"]["id"]
+    assert store.update_learning("o/r", lid, topic=None)["topic"] is None
+    assert store.update_learning("o/r", lid, file_globs=[])["file_globs"] == []
+
+
+def test_update_re_embeds_only_on_a_text_change(store, monkeypatch):
+    lid = _seed(store)["auth login flow"]["id"]
+    embedded: list[str] = []
+
+    class _Counting(_FakeEmbedder):
+        def embed_one(self, text):
+            embedded.append(text)
+            return _vec(text)
+
+    monkeypatch.setattr(ss, "get_embedder", lambda: _Counting())
+
+    store.update_learning("o/r", lid, topic="Auth")
+    assert embedded == []
+
+    store.update_learning("o/r", lid, text="ui spacing instead")
+    assert embedded == ["ui spacing instead"]
+    hits = store.query("o/r", ["src/auth/login.py"], query_text="ui spacing")
+    assert hits[0]["text"] == "ui spacing instead"
+
+
+def test_update_rejects_an_unknown_source(store):
+    lid = _seed(store)["auth login flow"]["id"]
+    with pytest.raises(UnknownSourceError):
+        store.update_learning("o/r", lid, source="resolved_thread")
+    assert store.get_learning("o/r", lid)["source"] == "remember"
+
+
+def test_update_reports_a_unique_collision(store):
+    rows = _seed(store)
+    lid = rows["auth login flow"]["id"]
+    with pytest.raises(DuplicateLearningError):
+        store.update_learning("o/r", lid, text="db migration notes", source="docs")
+    assert store.get_learning("o/r", lid)["text"] == "auth login flow"
+
+
+def test_update_returns_none_for_a_missing_or_foreign_row(store):
+    lid = _seed(store)["auth login flow"]["id"]
+    assert store.update_learning("o/r", "no-such-id", topic="x") is None
+    assert store.update_learning("o/s", lid, topic="x") is None
+
+
+def test_update_with_nothing_supplied_is_a_read(store):
+    lid = _seed(store)["auth login flow"]["id"]
+    assert store.update_learning("o/r", lid) == store.get_learning("o/r", lid)
+
+
+def test_update_rejects_a_null_or_blank_text(store):
+    lid = _seed(store)["auth login flow"]["id"]
+    for bad in (None, "  "):
+        with pytest.raises(InvalidLearningError):
+            store.update_learning("o/r", lid, text=bad)
+    assert store.get_learning("o/r", lid)["text"] == "auth login flow"
+
+
+def test_update_embeds_once_across_lost_races(store, monkeypatch):
+    lid = _seed(store)["auth login flow"]["id"]
+    embedded: list[str] = []
+
+    class _Counting(_FakeEmbedder):
+        def embed_one(self, text):
+            embedded.append(text)
+            return _vec(text)
+
+    monkeypatch.setattr(ss, "get_embedder", lambda: _Counting())
+    store._obj.fail_next_saves = 2  # lose two races, then win
+
+    updated = store.update_learning("o/r", lid, text="db notes instead")
+    assert updated["text"] == "db notes instead"
+    assert embedded == ["db notes instead"]
+
+
+def test_update_reads_the_stored_text_inside_the_mutation(store, monkeypatch):
+    """A concurrent writer must not leave this write's text beside its embedding."""
+    lid = _seed(store)["auth login flow"]["id"]
+    seen: list[str] = []
+    real_open = store._open
+
+    def spy_open(path, dim):
+        conn, migrated = real_open(path, dim)
+        row = conn.execute("SELECT text FROM learnings WHERE lid = ?", (lid,)).fetchone()
+        if row:
+            seen.append(row[0])
+        return conn, migrated
+
+    monkeypatch.setattr(store, "_open", spy_open)
+    store.update_learning("o/r", lid, topic="Auth")
+    # exactly one connection is opened for the mutation: the decision cannot be
+    # based on a snapshot from an earlier, separate read
+    assert seen == ["auth login flow"]
+
+
+def test_search_treats_like_metacharacters_literally(store):
+    store.ingest(
+        "o/r",
+        [
+            IngestItem(text="auth coverage is 100% on this path", source="docs"),
+            IngestItem(text="auth coverage is 55 percent elsewhere", source="docs"),
+            IngestItem(text="db a_b naming convention", source="docs"),
+            IngestItem(text="db axb naming convention", source="docs"),
+        ],
+    )
+    hits, total = store.list_learnings(repo="o/r", q="100%")
+    assert total == 1 and hits[0]["text"].startswith("auth coverage is 100%")
+
+    hits, total = store.list_learnings(repo="o/r", q="a_b")
+    assert total == 1 and "a_b" in hits[0]["text"]
+
+    # a bare % must not become a match-everything wildcard
+    assert store.list_learnings(repo="o/r", q="%")[1] == 1
+
+
+def test_update_rejects_an_unparseable_expiry_instead_of_clearing_it(store):
+    lid = _seed(store)["auth login flow"]["id"]
+    store.update_learning("o/r", lid, expires_at="2099-01-01T00:00:00Z")
+    assert store.get_learning("o/r", lid)["expires_at"].startswith("2099-01-01")
+
+    with pytest.raises(InvalidLearningError):
+        store.update_learning("o/r", lid, expires_at="next tuesday")
+    assert store.get_learning("o/r", lid)["expires_at"].startswith("2099-01-01")
+
+
+def test_update_still_clears_an_expiry_with_an_empty_value(store):
+    lid = _seed(store)["auth login flow"]["id"]
+    store.update_learning("o/r", lid, expires_at="2099-01-01T00:00:00Z")
+    assert store.update_learning("o/r", lid, expires_at=None)["expires_at"] is None
+
+
+def test_search_is_case_insensitive_beyond_ascii(store):
+    store.ingest(
+        "o/r",
+        [
+            IngestItem(text="auth ÄPFEL naming in the German docs", source="docs"),
+            IngestItem(text="db STRASSE unrelated", source="docs"),
+        ],
+    )
+    hits, total = store.list_learnings(repo="o/r", q="äpfel")
+    assert total == 1 and "ÄPFEL" in hits[0]["text"]
+    assert store.list_learnings(repo="o/r", q="ÄPFEL")[1] == 1

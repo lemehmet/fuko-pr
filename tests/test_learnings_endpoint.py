@@ -52,8 +52,17 @@ def test_passes_filters_through(monkeypatch):
         seen.update(kw)
         return [], 0
 
-    _client(monkeypatch, fake).get("/learnings?repo=o/r&source=review_thread&limit=10&offset=20")
-    assert seen == {"repo": "o/r", "source": "review_thread", "limit": 10, "offset": 20}
+    _client(monkeypatch, fake).get(
+        "/learnings?repo=o/r&source=review_thread&limit=10&offset=20&q=glob&include_expired=true"
+    )
+    assert seen == {
+        "repo": "o/r",
+        "source": "review_thread",
+        "limit": 10,
+        "offset": 20,
+        "q": "glob",
+        "include_expired": True,
+    }
 
 
 def test_requires_auth(monkeypatch):

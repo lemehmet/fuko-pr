@@ -3,10 +3,20 @@
 from datetime import datetime
 from uuid import UUID
 
+from psycopg.errors import UniqueViolation
+
 from .db import db, vector_literal
 from .dedup import partition
 from .embed import get_embedder
-from .models import IngestItem
+from .models import (
+    UNSET,
+    DuplicateLearningError,
+    IngestItem,
+    InvalidLearningError,
+    check_source,
+    check_text,
+)
+from .retrieve import _ROW_COLUMNS, _row_to_dict, get_learning
 
 _INSERT_SQL = """
     INSERT INTO learnings
@@ -23,6 +33,23 @@ def _parse_dt(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def checked_expires(value: str | None) -> datetime | None:
+    """Parse an ``expires_at`` for a deliberate edit, rejecting a value that will not parse.
+
+    ``_parse_dt`` returns ``None`` for anything it cannot read, which on the
+    bulk ingest path is the right shape -- one malformed field should not fail a
+    whole swept batch. On an edit it is not: a typo would silently clear the
+    expiry rather than report itself, changing the row in a way the operator did
+    not ask for. Empty and ``None`` still mean "clear".
+    """
+    if not value:
+        return None
+    parsed = _parse_dt(value)
+    if parsed is None:
+        raise InvalidLearningError(f"expires_at is not an ISO-8601 timestamp: {value!r}")
+    return parsed
 
 
 def _existing_keys(repo: str, items: list[IngestItem]) -> set[tuple[str, str]]:
@@ -84,6 +111,91 @@ def ingest(repo: str, items: list[IngestItem], *, max_new: int | None = None) ->
             else:
                 skipped += 1
     return inserted, skipped
+
+
+_UPDATABLE = ("text", "source", "source_url", "file_globs", "topic", "expires_at")
+
+
+def update(
+    repo: str,
+    id: str,
+    *,
+    text: str = UNSET,
+    source: str = UNSET,
+    source_url: str | None = UNSET,
+    file_globs: list[str] = UNSET,
+    topic: str | None = UNSET,
+    expires_at: str | None = UNSET,
+) -> dict | None:
+    """Apply the supplied fields to one learning in ``repo`` and return the updated row.
+
+    Arguments left at :data:`~sidecar.models.UNSET` are not written, so clearing
+    a field and leaving it alone stay distinguishable. ``text`` is what gets
+    embedded, so changing it re-embeds and every other change skips the embedder
+    entirely -- a topic fix must not cost an embedding call.
+
+    The row is locked for the duration of the transaction, so the stored text
+    the re-embed decision is made against cannot change between reading it and
+    writing the update -- otherwise a concurrent writer could leave the row
+    holding one write's text and another write's embedding.
+
+    Returns ``None`` when ``id`` is not a learning in ``repo``.
+
+    Raises:
+        DuplicateLearningError: The result would collide with the
+            ``(repo, text, source)`` unique key.
+        UnknownSourceError: ``source`` is outside ``SOURCES``.
+        InvalidLearningError: ``text`` is null or blank, or ``expires_at`` will
+            not parse.
+    """
+    try:
+        UUID(id)
+    except ValueError:
+        return None
+    supplied = {
+        name: value
+        for name, value in zip(
+            _UPDATABLE, (text, source, source_url, file_globs, topic, expires_at), strict=True
+        )
+        if value is not UNSET
+    }
+    if "source" in supplied:
+        check_source(supplied["source"])
+    if "text" in supplied:
+        check_text(supplied["text"])
+    if "expires_at" in supplied:
+        supplied["expires_at"] = checked_expires(supplied["expires_at"])
+
+    if not supplied:
+        return get_learning(repo, id)
+
+    with db() as conn:
+        current = conn.execute(
+            "SELECT text FROM learnings WHERE repo = %s AND id = %s FOR UPDATE", (repo, id)
+        ).fetchone()
+        if current is None:
+            return None
+
+        assignments: list[str] = []
+        params: list = []
+        for name, value in supplied.items():
+            assignments.append(f"{name} = %s")
+            params.append(value)
+        if supplied.get("text", current[0]) != current[0]:
+            assignments.append("embedding = %s::vector")
+            params.append(vector_literal(get_embedder().embed_one(supplied["text"])))
+
+        try:
+            row = conn.execute(
+                f"UPDATE learnings SET {', '.join(assignments)} "
+                f"WHERE repo = %s AND id = %s RETURNING {_ROW_COLUMNS}",
+                (*params, repo, id),
+            ).fetchone()
+        except UniqueViolation as e:
+            raise DuplicateLearningError(
+                "another learning in this repo already has that (text, source)"
+            ) from e
+    return _row_to_dict(row) if row else None
 
 
 def forget(

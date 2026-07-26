@@ -1,6 +1,76 @@
-"""Pydantic request/response models for the sidecar API."""
+"""Pydantic request/response models and the shared knowledge-store vocabulary.
+
+Beyond the API bodies, this module holds the three things the store contract and
+the API layer both need and neither owns: the :data:`SOURCES` vocabulary, the
+:data:`UNSET` sentinel that lets a partial update distinguish "clear this field"
+from "leave it alone", and :class:`DuplicateLearningError`. It imports nothing
+from the rest of the package, so every layer can depend on it.
+"""
+
+from typing import Any
 
 from pydantic import BaseModel, Field
+
+SOURCES: tuple[str, ...] = ("remember", "review_thread", "docs")
+"""Where a learning came from.
+
+The same three values are pinned by the ``learnings_source_check`` CHECK
+constraint (``migrations/005_review_thread_source.sql``); changing one means
+changing both.
+"""
+
+
+class Unset:
+    """Type of the :data:`UNSET` sentinel."""
+
+    def __repr__(self) -> str:
+        """Render as ``UNSET`` so a signature default reads clearly."""
+        return "UNSET"
+
+
+UNSET: Any = Unset()
+"""Marks a partial-update argument the caller did not supply.
+
+``None`` cannot serve this role: clearing ``topic`` and leaving ``topic``
+untouched are different writes, and both would otherwise arrive as ``None``.
+"""
+
+
+class DuplicateLearningError(ValueError):
+    """Raised when a write would collide with the ``(repo, text, source)`` unique key."""
+
+
+class InvalidLearningError(ValueError):
+    """Raised when a write's field values are not storable."""
+
+
+class UnknownSourceError(InvalidLearningError):
+    """Raised when a write names a source outside :data:`SOURCES`."""
+
+
+def check_source(source: str) -> str:
+    """Return ``source`` if it is a known one, else raise :class:`UnknownSourceError`.
+
+    Validating in Python keeps the two stores' behaviour identical: Postgres has
+    a CHECK constraint and sqlite-vec has none, so without this the same bad
+    write would fail on one backend and silently succeed on the other.
+    """
+    if source not in SOURCES:
+        raise UnknownSourceError(f"unknown source '{source}'; known sources: {', '.join(SOURCES)}")
+    return source
+
+
+def check_text(text: object) -> str:
+    """Return ``text`` if it is storable as a learning body, else raise.
+
+    ``text`` is the column the embedding is derived from and it is ``NOT NULL``,
+    so a null or blank update is not a "clear this field" — it is a write with
+    nowhere to go. Rejecting it here stops a ``null`` reaching the embedder,
+    which would fail deep inside an HTTP call rather than at the request edge.
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise InvalidLearningError("text must be a non-empty string")
+    return text
 
 
 class IngestItem(BaseModel):
@@ -61,6 +131,43 @@ class StoredLearning(BaseModel):
     file_globs: list[str]
     topic: str | None
     created_at: str | None = None
+    expires_at: str | None = None
+
+
+class UpdateLearningRequest(BaseModel):
+    """Body of ``PATCH /learnings/{id}``: the fields to change, and nothing else.
+
+    Every field is optional and only the ones actually present in the request
+    are written -- ``model_fields_set`` is what separates "clear this field" from
+    "leave it alone", so sending ``{"topic": null}`` clears the topic while
+    omitting ``topic`` preserves it.
+    """
+
+    repo: str
+    text: str | None = None
+    source: str | None = None
+    source_url: str | None = None
+    file_globs: list[str] | None = None
+    topic: str | None = None
+    expires_at: str | None = None
+
+    def changes(self) -> dict:
+        """Return only the supplied fields, ready to splat into ``update_learning``."""
+        return {name: getattr(self, name) for name in self.model_fields_set if name != "repo"}
+
+
+class RepoSummary(BaseModel):
+    """One repository's knowledge-base footprint, as returned by ``GET /repos``."""
+
+    repo: str
+    count: int
+    sources: dict[str, int] = Field(default_factory=dict)
+
+
+class ReposResponse(BaseModel):
+    """Body returned by ``GET /repos``."""
+
+    repos: list[RepoSummary] = Field(default_factory=list)
 
 
 class ListLearningsResponse(BaseModel):

@@ -15,6 +15,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from .models import SOURCES
+
 _DIM = "\033[2m"
 _BOLD = "\033[1m"
 _CYAN = "\033[36m"
@@ -78,6 +80,8 @@ def _list(args) -> None:
             "source": args.source,
             "limit": args.limit,
             "offset": args.offset,
+            "q": args.q,
+            "include_expired": args.include_expired or None,
         },
     )
     items = resp["learnings"]
@@ -86,26 +90,52 @@ def _list(args) -> None:
         _print_learning(item, args.full)
 
 
+def _repos(args) -> None:
+    repos = _call("GET", "/repos")["repos"]
+    total = sum(r["count"] for r in repos)
+    print(_color(f"{len(repos)} repo(s) · {total} learnings\n", _BOLD))
+    for entry in repos:
+        breakdown = " ".join(f"{s}={n}" for s, n in sorted(entry["sources"].items()))
+        print(f"  {entry['repo']:28} {entry['count']:>6}  {_color(breakdown, _DIM)}")
+
+
 def _count(args) -> None:
-    buckets: dict[tuple[str, str], int] = {}
-    offset, total = 0, 0
-    while True:
-        resp = _call(
-            "GET",
-            "/learnings",
-            params={"repo": args.repo, "source": args.source, "limit": 500, "offset": offset},
-        )
-        items = resp["learnings"]
-        for item in items:
-            key = (item["repo"], item["source"])
-            buckets[key] = buckets.get(key, 0) + 1
-        total = resp["count"]
-        offset += len(items)
-        if not items or offset >= total:
-            break
-    print(_color(f"{total} total\n", _BOLD))
-    for (repo, source), n in sorted(buckets.items()):
+    repos = _call("GET", "/repos")["repos"]
+    if args.repo:
+        repos = [r for r in repos if r["repo"] == args.repo]
+    rows = [
+        (entry["repo"], source, n)
+        for entry in repos
+        for source, n in sorted(entry["sources"].items())
+        if not args.source or source == args.source
+    ]
+    print(_color(f"{sum(n for _, _, n in rows)} total\n", _BOLD))
+    for repo, source, n in sorted(rows):
         print(f"  {repo:24} {_color(f'{source:16}', _DIM)} {n}")
+
+
+_CLEARABLE = ("source_url", "topic", "expires_at")
+
+
+def _edit(args) -> None:
+    changes: dict = {}
+    for name, value in (
+        ("text", args.text),
+        ("source", args.source),
+        ("source_url", args.source_url),
+        ("topic", args.topic),
+        ("expires_at", args.expires_at),
+    ):
+        if value is None:
+            continue
+        changes[name] = None if (value == "" and name in _CLEARABLE) else value
+    if args.globs is not None:
+        changes["file_globs"] = args.globs
+    if not changes:
+        sys.exit("fuko kb: nothing to change; pass at least one field")
+    updated = _call("PATCH", f"/learnings/{args.id}", body={"repo": args.repo, **changes})
+    print(_color("updated", _BOLD))
+    _print_learning(updated, full=True)
 
 
 def _query(args) -> None:
@@ -144,13 +174,31 @@ def add_parser(sub) -> None:
     pl.add_argument("--source")
     pl.add_argument("--limit", type=int, default=100)
     pl.add_argument("--offset", type=int, default=0)
+    pl.add_argument("-q", "--query", dest="q", help="case-insensitive substring of text or topic")
+    pl.add_argument(
+        "--include-expired", dest="include_expired", action="store_true", help="show expired too"
+    )
     pl.add_argument("--full", action="store_true", help="print full text, id, and source url")
     pl.set_defaults(kb_fn=_list)
+
+    pr = kb.add_parser("repos", help="every repo with a knowledge base, and its source mix")
+    pr.set_defaults(kb_fn=_repos)
 
     pc = kb.add_parser("count", help="total plus a breakdown by repo and source")
     pc.add_argument("--repo")
     pc.add_argument("--source")
     pc.set_defaults(kb_fn=_count)
+
+    pe = kb.add_parser("edit", help="change fields of one stored learning")
+    pe.add_argument("repo")
+    pe.add_argument("id")
+    pe.add_argument("--text")
+    pe.add_argument("--source", choices=SOURCES)
+    pe.add_argument("--source-url", dest="source_url", help='pass "" to clear')
+    pe.add_argument("--topic", help='pass "" to clear')
+    pe.add_argument("--expires-at", dest="expires_at", help='pass "" to clear')
+    pe.add_argument("--globs", nargs="*", help="replace the file globs (pass none to clear)")
+    pe.set_defaults(kb_fn=_edit)
 
     pq = kb.add_parser("query", help="semantic, file-scoped retrieval (what a review sees)")
     pq.add_argument("repo")
