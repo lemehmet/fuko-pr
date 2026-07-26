@@ -1,4 +1,4 @@
-"""Tests for the unauthenticated metrics viewer page (issue #71)."""
+"""Tests for the unauthenticated metrics page under /ui (issues #71, #87)."""
 
 from fastapi.testclient import TestClient
 
@@ -67,7 +67,7 @@ def test_view_is_open_without_auth_and_renders_all_sections(monkeypatch):
         health=_HEALTH,
         cooldowns={"zai-coding": "2026-07-22T21:00:00+00:00"},
     )
-    resp = client.get("/metrics/view")
+    resp = client.get("/ui/metrics")
     assert resp.status_code == 200
     page = resp.text
     assert "x-ai/grok-4.5" in page and "25.1" in page
@@ -79,20 +79,20 @@ def test_view_is_open_without_auth_and_renders_all_sections(monkeypatch):
 
 def test_view_passes_filters_through(monkeypatch):
     seen, client = _wire(monkeypatch, summary=_SUMMARY)
-    resp = client.get("/metrics/view", params={"repo": "lemehmet/mepro", "days": "7"})
+    resp = client.get("/ui/metrics", params={"repo": "lemehmet/mepro", "days": "7"})
     assert resp.status_code == 200
     assert seen["summary"] == ("lemehmet/mepro", 7)
 
 
 def test_view_clamps_days(monkeypatch):
     seen, client = _wire(monkeypatch)
-    assert client.get("/metrics/view", params={"days": "999999"}).status_code == 200
+    assert client.get("/ui/metrics", params={"days": "999999"}).status_code == 200
     assert seen["summary"] == (None, 3650)
 
 
 def test_view_empty_data_renders_notices(monkeypatch):
     _, client = _wire(monkeypatch)
-    resp = client.get("/metrics/view")
+    resp = client.get("/ui/metrics")
     assert resp.status_code == 200
     assert "no runs in this window" in resp.text
     assert "no providers cooling down" in resp.text
@@ -101,7 +101,7 @@ def test_view_empty_data_renders_notices(monkeypatch):
 def test_view_without_database_renders_notice(monkeypatch):
     _, client = _wire(monkeypatch)
     monkeypatch.setattr(main.settings, "database_url", "")
-    resp = client.get("/metrics/view")
+    resp = client.get("/ui/metrics")
     assert resp.status_code == 200
     assert "No database configured" in resp.text
 
@@ -109,7 +109,7 @@ def test_view_without_database_renders_notice(monkeypatch):
 def test_view_escapes_db_sourced_strings(monkeypatch):
     evil = dict(_RECENT[0], repo='lemehmet/x"><script>alert(1)</script>')
     _, client = _wire(monkeypatch, recent=[evil])
-    page = client.get("/metrics/view").text
+    page = client.get("/ui/metrics").text
     assert "<script>alert(1)</script>" not in page
     assert "&lt;script&gt;" in page
 
@@ -128,7 +128,7 @@ def test_view_with_unreachable_database_renders_notice(monkeypatch):
         raise RuntimeError("connection refused")
 
     monkeypatch.setattr(run_metrics, "summary", boom)
-    resp = client.get("/metrics/view")
+    resp = client.get("/ui/metrics")
     assert resp.status_code == 200
     assert "Database unreachable" in resp.text
 
@@ -136,6 +136,6 @@ def test_view_with_unreachable_database_renders_notice(monkeypatch):
 def test_view_renders_dash_for_absent_pr(monkeypatch):
     row = dict(_RECENT[0], pr=None)
     _, client = _wire(monkeypatch, recent=[row])
-    resp = client.get("/metrics/view")
+    resp = client.get("/ui/metrics")
     assert resp.status_code == 200
     assert "/pull/" not in resp.text

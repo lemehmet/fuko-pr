@@ -25,6 +25,11 @@ endpoint (default: local Ollama `bge-m3`).
 - **Embeddings are provider-agnostic.** z.ai exposes no `/embeddings` endpoint, so
   embeddings always go through an OpenAI-compatible HTTP endpoint. Chat (PR-Agent)
   is configured separately.
+- **HTML lives in `sidecar/web/`.** Browser-facing pages are served under `/ui` by
+  that package; no other module builds HTML. Adding one is a registry entry plus a
+  module — the pattern and its conventions (route fetches and degrades, render
+  function is pure, everything escaped through `components`, no build step) are in
+  [`docs/web-ui.md`](docs/web-ui.md).
 
 ## Commands
 
