@@ -511,3 +511,19 @@ def test_search_treats_like_metacharacters_literally(store):
 
     # a bare % must not become a match-everything wildcard
     assert store.list_learnings(repo="o/r", q="%")[1] == 1
+
+
+def test_update_rejects_an_unparseable_expiry_instead_of_clearing_it(store):
+    lid = _seed(store)["auth login flow"]["id"]
+    store.update_learning("o/r", lid, expires_at="2099-01-01T00:00:00Z")
+    assert store.get_learning("o/r", lid)["expires_at"].startswith("2099-01-01")
+
+    with pytest.raises(InvalidLearningError):
+        store.update_learning("o/r", lid, expires_at="next tuesday")
+    assert store.get_learning("o/r", lid)["expires_at"].startswith("2099-01-01")
+
+
+def test_update_still_clears_an_expiry_with_an_empty_value(store):
+    lid = _seed(store)["auth login flow"]["id"]
+    store.update_learning("o/r", lid, expires_at="2099-01-01T00:00:00Z")
+    assert store.update_learning("o/r", lid, expires_at=None)["expires_at"] is None

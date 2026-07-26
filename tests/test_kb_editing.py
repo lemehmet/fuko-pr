@@ -381,3 +381,27 @@ def test_list_learnings_escapes_the_search_term_and_declares_an_escape_char(monk
     retrieve.list_learnings(repo="o/r", q="100%")
     assert "ESCAPE '\\'" in seen["sql"]
     assert seen["params"][1:] == [r"%100\%%", r"%100\%%"]
+
+
+def test_checked_expires_clears_on_empty_and_rejects_a_typo():
+    assert ingest.checked_expires(None) is None
+    assert ingest.checked_expires("") is None
+    assert ingest.checked_expires("2027-01-01T00:00:00Z").year == 2027
+    for bad in ("next tuesday", "2027-13-45", "01/01/2027"):
+        with pytest.raises(InvalidLearningError):
+            ingest.checked_expires(bad)
+
+
+def test_update_rejects_a_bad_expiry_before_locking_the_row(pg):
+    conn = pg([])
+    with pytest.raises(InvalidLearningError):
+        ingest.update("o/r", _ID, expires_at="not-a-date")
+    assert conn.statements == []
+
+
+def test_update_passes_a_parsed_expiry_through_to_the_write(pg):
+    conn = pg([("original text",), _row()])
+    ingest.update("o/r", _ID, expires_at="2027-01-01T00:00:00Z")
+    set_sql, params = conn.statements[1]
+    assert "SET expires_at = %s" in set_sql
+    assert params[0] == datetime(2027, 1, 1, tzinfo=timezone.utc)

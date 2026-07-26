@@ -27,7 +27,7 @@ from .config import settings
 from .dedup import partition
 from .embed import get_embedder
 from .fukoconfig import KnowledgeConfig
-from .ingest import _UPDATABLE, _parse_dt
+from .ingest import _UPDATABLE, _parse_dt, checked_expires
 from .models import UNSET, DuplicateLearningError, IngestItem, check_source, check_text
 from .objectstore import PreconditionFailed, make_object_store
 from .retrieve import _build_query, fold_repo_counts, like_escape
@@ -440,6 +440,9 @@ class SqliteVecStore:
             check_source(supplied["source"])
         if "text" in supplied:
             check_text(supplied["text"])
+        if "expires_at" in supplied:
+            parsed = checked_expires(supplied["expires_at"])
+            supplied["expires_at"] = parsed.isoformat() if parsed else None
         if not supplied:
             return self.get_learning(repo, id)
 
@@ -449,8 +452,6 @@ class SqliteVecStore:
             assignments.append(f"{name} = ?")
             if name == "file_globs":
                 params.append(json.dumps(value or []))
-            elif name == "expires_at":
-                params.append(_norm_expires(value))
             else:
                 params.append(value)
 
