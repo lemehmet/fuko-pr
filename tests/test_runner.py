@@ -694,7 +694,9 @@ def test_review_compare_runs_each_model_fresh_without_describe(monkeypatch, tmp_
 
     headers = []
     monkeypatch.setattr(
-        runner, "_post_branch_header", lambda pr, token, api, label: headers.append(label)
+        runner,
+        "_post_branch_header",
+        lambda pr, token, api, label, role="active": headers.append(label),
     )
 
     calls = []
@@ -977,6 +979,72 @@ def test_post_branch_header_posts_labelled_comment(monkeypatch):
     assert "anthropic/claude" in posted["body"]
 
 
+def test_post_branch_header_tags_non_active_role(monkeypatch):
+    posted = {}
+
+    def fake_post(url, json, headers, timeout):
+        posted["body"] = json["body"]
+        return _Resp({})
+
+    monkeypatch.setattr(runner.httpx, "post", fake_post)
+    # A trial branch carries a visible `· trial` tag so a header-scanning
+    # consumer can tell it apart from a gating active instance.
+    runner._post_branch_header(
+        PRRef("o/r", 8, "u"), "ghtok", "https://api.github.com", "openrouter/muse", "trial"
+    )
+    assert "· trial" in posted["body"]
+    # An active branch carries no role tag (unchanged legacy header).
+    runner._post_branch_header(
+        PRRef("o/r", 8, "u"), "ghtok", "https://api.github.com", "anthropic/claude", "active"
+    )
+    assert "·" not in posted["body"]
+
+
+def test_trial_model_runs_as_branch_and_flows_role(monkeypatch, tmp_path):
+    """A trial model runs as its own A/B branch alongside the active, and its
+    role reaches both the header and normalize_output so downstream can surface
+    it non-gating."""
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text(
+        '[review]\ntools = ["review"]\n'
+        '[[review.models]]\nprovider = "anthropic"\nname = "claude"\n'
+        '[[review.models]]\nprovider = "openrouter"\nname = "muse"\nrole = "trial"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GITHUB_TOKEN", "ghtok")
+    monkeypatch.setenv("ANTHROPIC_KEY", "k")
+    _stub_compare_io(monkeypatch)
+
+    headers = []
+    monkeypatch.setattr(
+        runner,
+        "_post_branch_header",
+        lambda pr, token, api, label, role="active": headers.append((label, role)),
+    )
+    seen = []
+
+    class FakeBackend:
+        def build_env(self, preset, model, knowledge, tools):
+            return {}
+
+        def invoke(self, pr, env, tools):
+            return InvokeResult(returncode=0)
+
+        def normalize_output(self, pr, model="", *, compare_label=None, role="active", **_kw):
+            seen.append((compare_label, role))
+            return []
+
+    monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
+    assert runner.review("https://github.com/o/r/pull/7", str(cfg)).returncode == 0
+    # Both models ran as branches; the trial is tagged trial in the header AND in
+    # the normalize call (so its marker/finding carries role="trial"), the active
+    # stays active/gating.
+    assert ("anthropic/claude", "active") in headers
+    assert ("openrouter/muse", "trial") in headers
+    assert ("anthropic/claude", "active") in seen
+    assert ("openrouter/muse", "trial") in seen
+
+
 # --- A/B concurrent (per-identity) mode -------------------------------------
 
 
@@ -1140,7 +1208,9 @@ def test_review_compare_runs_concurrently_under_per_branch_identity(monkeypatch,
 
     headers = []  # (label, token) the branch header posted under
     monkeypatch.setattr(
-        runner, "_post_branch_header", lambda pr, token, api, label: headers.append((label, token))
+        runner,
+        "_post_branch_header",
+        lambda pr, token, api, label, role="active": headers.append((label, token)),
     )
 
     seen = []  # one record per branch: the token it ran/normalized under
@@ -1153,7 +1223,15 @@ def test_review_compare_runs_concurrently_under_per_branch_identity(monkeypatch,
             return InvokeResult(returncode=0)
 
         def normalize_output(
-            self, pr, model="", *, compare_label=None, token=None, api_url=None, actor=None
+            self,
+            pr,
+            model="",
+            *,
+            compare_label=None,
+            token=None,
+            api_url=None,
+            actor=None,
+            role="active",
         ):
             seen.append({"model": model, "token": token, "label": compare_label})
             return []
@@ -1189,7 +1267,15 @@ def test_review_compare_concurrent_branch_gets_own_github_user_token(monkeypatch
             return InvokeResult(returncode=0)
 
         def normalize_output(
-            self, pr, model="", *, compare_label=None, token=None, api_url=None, actor=None
+            self,
+            pr,
+            model="",
+            *,
+            compare_label=None,
+            token=None,
+            api_url=None,
+            actor=None,
+            role="active",
         ):
             return []
 
@@ -1210,7 +1296,9 @@ def test_review_compare_falls_back_to_sequential_shared_token(monkeypatch, tmp_p
 
     header_tokens = []
     monkeypatch.setattr(
-        runner, "_post_branch_header", lambda pr, token, api, label: header_tokens.append(token)
+        runner,
+        "_post_branch_header",
+        lambda pr, token, api, label, role="active": header_tokens.append(token),
     )
 
     invoke_tokens = []
@@ -1224,7 +1312,15 @@ def test_review_compare_falls_back_to_sequential_shared_token(monkeypatch, tmp_p
             return InvokeResult(returncode=0)
 
         def normalize_output(
-            self, pr, model="", *, compare_label=None, token=None, api_url=None, actor=None
+            self,
+            pr,
+            model="",
+            *,
+            compare_label=None,
+            token=None,
+            api_url=None,
+            actor=None,
+            role="active",
         ):
             return []
 
@@ -1257,7 +1353,15 @@ def test_review_compare_concurrent_branch_failure_is_isolated(monkeypatch, tmp_p
             return InvokeResult(returncode=0)
 
         def normalize_output(
-            self, pr, model="", *, compare_label=None, token=None, api_url=None, actor=None
+            self,
+            pr,
+            model="",
+            *,
+            compare_label=None,
+            token=None,
+            api_url=None,
+            actor=None,
+            role="active",
         ):
             return []
 
@@ -1406,7 +1510,9 @@ def test_compare_branch_threads_actor_to_normalize(monkeypatch, tmp_path):
     monkeypatch.setenv("ANTHROPIC_KEY", "k")
     _stub_compare_io(monkeypatch)
     monkeypatch.setattr(
-        runner, "_post_branch_header", lambda pr, token, api, label: f"actor-of-{token}"
+        runner,
+        "_post_branch_header",
+        lambda pr, token, api, label, role="active": f"actor-of-{token}",
     )
 
     seen = []
@@ -1419,7 +1525,15 @@ def test_compare_branch_threads_actor_to_normalize(monkeypatch, tmp_path):
             return InvokeResult(returncode=0)
 
         def normalize_output(
-            self, pr, model="", *, compare_label=None, token=None, api_url=None, actor=None
+            self,
+            pr,
+            model="",
+            *,
+            compare_label=None,
+            token=None,
+            api_url=None,
+            actor=None,
+            role="active",
         ):
             seen.append({"token": token, "actor": actor})
             return []

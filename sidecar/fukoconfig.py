@@ -61,16 +61,26 @@ class CompareModel(ModelConfig):
 class ReviewModel(CompareModel):
     """One entry of the unified ``[[review.models]]`` list.
 
-    ``role`` decides when the model runs. Every ``"active"`` entry reviews the
-    PR on every run: one active is a plain solo review, two or more actives
-    each review as their own A/B branch. A ``"backup"`` entry never starts a
-    review of its own -- it is a shared failover target every active branch may
-    fall back to when its own provider throttles or is cooling. Backups need no
-    ``token_env``: a promoted backup posts under the identity of the branch it
-    rescued, and the visible model label keeps the output attributable.
+    ``role`` decides when the model runs and whether consumers gate on it.
+
+    - ``"active"`` reviews the PR on every run and is a **gating** reviewer:
+      one active is a plain solo review, two or more actives each review as
+      their own A/B branch. Downstream tooling (e.g. the review-loop skill)
+      waits on and gates merge against active instances.
+    - ``"trial"`` runs on every PR **exactly like an active branch** (its own
+      A/B branch, its own header, its findings marked and surfaced) but is
+      **non-gating**: consumers evaluate its output without blocking the loop
+      on it. It is the on-ramp for vetting a new candidate model alongside the
+      actives before promoting it. Like an active it wants a ``token_env`` for
+      a distinct identity / concurrent run.
+    - ``"backup"`` never starts a review of its own -- it is a shared failover
+      target every active/trial branch may fall back to when its own provider
+      throttles or is cooling. Backups need no ``token_env``: a promoted
+      backup posts under the identity of the branch it rescued, and the
+      visible model label keeps the output attributable.
     """
 
-    role: Literal["active", "backup"] = "active"
+    role: Literal["active", "backup", "trial"] = "active"
 
 
 class ReviewConfig(BaseModel):

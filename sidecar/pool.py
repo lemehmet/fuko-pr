@@ -38,12 +38,19 @@ def resolve_models(review: ReviewConfig) -> list[ReviewModel]:
 
 def partition_roles(
     models: Iterable[ReviewModel],
-) -> tuple[list[ReviewModel], list[ReviewModel]]:
-    """Split ``models`` into ``(actives, backups)``, preserving config order."""
+) -> tuple[list[ReviewModel], list[ReviewModel], list[ReviewModel]]:
+    """Split ``models`` into ``(actives, backups, trials)``, preserving config order.
+
+    Actives and trials both start a review branch each run (the caller runs
+    ``actives + trials`` as branches); backups are the shared failover pool.
+    The active/trial distinction is carried per-branch by ``ReviewModel.role``
+    so downstream can gate on actives while surfacing trials non-gating.
+    """
     materialized = list(models)
     actives = [m for m in materialized if m.role == "active"]
     backups = [m for m in materialized if m.role == "backup"]
-    return actives, backups
+    trials = [m for m in materialized if m.role == "trial"]
+    return actives, backups, trials
 
 
 def order_pool(

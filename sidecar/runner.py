@@ -472,6 +472,7 @@ def _normalize(
     token: str | None = None,
     api_url: str | None = None,
     actor: str | None = None,
+    role: str = "active",
 ) -> int | None:
     """Map the posted review into Review Signals for the winning provider's model.
 
@@ -505,6 +506,7 @@ def _normalize(
             token=token,
             api_url=api_url,
             actor=actor,
+            role=role,
         )
         print(f"fuko: normalized {len(signals)} review signals", file=sys.stderr)
         return len(signals)
@@ -541,11 +543,16 @@ _FRESH_COMMENT_ENV = {
 }
 
 
-def _post_branch_header(pr: PRRef, token: str, api_url: str, label: str) -> str | None:
+def _post_branch_header(
+    pr: PRRef, token: str, api_url: str, label: str, role: str = "active"
+) -> str | None:
     """Post a model-labelled header issue comment for one A/B branch (best-effort).
 
     It gives a human a visible anchor for which model produced the summary that
-    follows; a failure here must never abort the branch, so it only logs.
+    follows; a failure here must never abort the branch, so it only logs. When
+    ``role`` is not ``"active"`` the header carries a visible ``· <role>`` tag
+    (e.g. ``· trial``) so a consumer enumerating the branch headers can tell a
+    gating (active) instance from a non-gating (trial) one.
 
     Returns the posting identity's user id as reported by the create-comment
     response -- the one identity probe that works for App installation tokens
@@ -557,6 +564,8 @@ def _post_branch_header(pr: PRRef, token: str, api_url: str, label: str) -> str 
         return None
     base = api_url.rstrip("/")
     body = f"🤖 **fuko A/B** — model `{label}`"
+    if role != "active":
+        body += f" · {role}"
     try:
         resp = httpx.post(
             f"{base}/repos/{pr.repo}/issues/{pr.number}/comments",
@@ -589,6 +598,7 @@ def _run_pool(
     api_url: str | None = None,
     actor: str | None = None,
     slot: str | None = None,
+    role: str = "active",
 ) -> InvokeResult:
     """Run one review over ``pool`` with failover, normalizing the winner's output.
 
@@ -633,7 +643,14 @@ def _run_pool(
             findings = None
             if result.returncode == 0:
                 findings = _normalize(
-                    backend, pr, model, compare=compare, token=token, api_url=api_url, actor=actor
+                    backend,
+                    pr,
+                    model,
+                    compare=compare,
+                    token=token,
+                    api_url=api_url,
+                    actor=actor,
+                    role=role,
                 )
             _record_run(
                 pr,
@@ -727,7 +744,7 @@ def _run_compare_branch(
     """
     label = f"{entry.provider}/{entry.name}"
     try:
-        actor = _post_branch_header(pr, token, api_url, label)
+        actor = _post_branch_header(pr, token, api_url, label, entry.role)
         result = _run_pool(
             backend,
             pr,
@@ -744,6 +761,7 @@ def _run_compare_branch(
             api_url=api_url,
             actor=actor,
             slot=_slot_of(entry),
+            role=entry.role,
         )
     except Exception as e:
         print(f"fuko: A/B branch {label} failed in isolation: {e}", file=sys.stderr)
@@ -757,14 +775,18 @@ def _review_compare(
     knowledge: str,
     gh_env: dict[str, str],
     review: ReviewConfig,
-    actives: list[ReviewModel],
+    reviewers: list[ReviewModel],
     backups: list[ReviewModel],
     token: str,
     api_url: str,
     cooled: set[str],
     required: int | None,
 ) -> InvokeResult:
-    """Review ``pr`` once per active model for an A/B comparison.
+    """Review ``pr`` once per reviewer (active + trial) model for an A/B comparison.
+
+    ``reviewers`` is ``actives + trials``: both roles start a branch each run.
+    Each branch carries its own :attr:`ReviewModel.role`, so a trial branch's
+    header and findings are tagged non-gating while running identically.
 
     Two execution modes, auto-selected by :func:`_resolve_branch_identities`:
 
@@ -798,14 +820,14 @@ def _review_compare(
             detail="A/B compare disables 'describe'; configure at least one non-describe tool",
         )
 
-    identities = _resolve_branch_identities(actives, api_url)
+    identities = _resolve_branch_identities(reviewers, api_url)
     if identities is not None:
         print(
-            f"fuko: A/B compare mode — running {len(actives)} branches concurrently "
+            f"fuko: A/B compare mode — running {len(reviewers)} branches concurrently "
             "under per-branch identities",
             file=sys.stderr,
         )
-        with ThreadPoolExecutor(max_workers=len(actives)) as pool:
+        with ThreadPoolExecutor(max_workers=len(reviewers)) as pool:
             futures = [
                 pool.submit(
                     _run_compare_branch,
@@ -821,15 +843,15 @@ def _review_compare(
                     api_url,
                     branch_token,
                 )
-                for entry, branch_token in zip(actives, identities)
+                for entry, branch_token in zip(reviewers, identities)
             ]
             outcomes = [f.result() for f in futures]
     else:
         outcomes = []
-        for index, entry in enumerate(actives):
+        for index, entry in enumerate(reviewers):
             label = f"{entry.provider}/{entry.name}"
-            print(f"fuko: A/B branch {index + 1}/{len(actives)}: {label}", file=sys.stderr)
-            actor = _post_branch_header(pr, token, api_url, label)
+            print(f"fuko: A/B branch {index + 1}/{len(reviewers)}: {label}", file=sys.stderr)
+            actor = _post_branch_header(pr, token, api_url, label, entry.role)
             result = _run_pool(
                 backend,
                 pr,
@@ -846,6 +868,7 @@ def _review_compare(
                 api_url=api_url,
                 actor=actor,
                 slot=_slot_of(entry),
+                role=entry.role,
             )
             outcomes.append((label, result))
 
@@ -891,11 +914,14 @@ def _warn_legacy_config(review: ReviewConfig) -> None:
 def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
     """Run a full review for ``pr_url`` through the configured backend.
 
-    The unified ``[[review.models]]`` list drives the run: with one active entry
-    the PR is reviewed once, failing over across the backups on throttling; with
-    several actives the PR is A/B'd once per active, each branch sharing the same
-    backups (see :func:`_review_compare`). Deprecated sections are mapped onto
-    the unified list by :func:`sidecar.pool.resolve_models`.
+    The unified ``[[review.models]]`` list drives the run: with a single reviewer
+    (one active, no trials) the PR is reviewed once, failing over across the
+    backups on throttling; with several reviewers (``actives + trials``) the PR is
+    A/B'd once per reviewer, each branch sharing the same backups (see
+    :func:`_review_compare`). Trials run identically to actives but carry
+    ``role = "trial"`` on their header and findings so consumers surface them
+    non-gating. Deprecated sections are mapped onto the unified list by
+    :func:`sidecar.pool.resolve_models`.
 
     Next-round escalation: when the previous round observed an external reviewer
     in a degraded state (:func:`sidecar.status.escalation_needed` over the
@@ -921,7 +947,7 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
     required = _estimate_required_context(pr, token, api_url, knowledge)
 
     _warn_legacy_config(cfg.review)
-    actives, backups = partition_roles(resolve_models(cfg.review))
+    actives, backups, trials = partition_roles(resolve_models(cfg.review))
 
     if backups and escalation_needed(_rh_states(pr.repo)):
         promoted = ", ".join(f"{m.provider}/{m.name}" for m in backups)
@@ -930,16 +956,19 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
             f"model(s) to active for this round: {promoted}",
             file=sys.stderr,
         )
-        actives, backups = [*actives, *backups], []
+        actives = [*actives, *(m.model_copy(update={"role": "active"}) for m in backups)]
+        backups = []
 
-    if len(actives) > 1:
+    reviewers = [*actives, *trials]
+
+    if len(reviewers) > 1:
         result = _review_compare(
             backend,
             pr,
             knowledge,
             gh_env,
             cfg.review,
-            actives,
+            reviewers,
             backups,
             token,
             api_url,
@@ -953,10 +982,11 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
             knowledge,
             gh_env,
             cfg.review,
-            [*actives, *backups],
+            [*reviewers, *backups],
             cooled,
             required,
-            slot=_slot_of(actives[0]) if actives else None,
+            role=reviewers[0].role if reviewers else "active",
+            slot=_slot_of(reviewers[0]) if reviewers else None,
         )
 
     _observe_reviewer_health(pr, token, api_url)

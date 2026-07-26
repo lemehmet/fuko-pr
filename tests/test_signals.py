@@ -58,6 +58,23 @@ def test_marker_round_trips_machine_fields():
     assert got.kb_refs == ["review_thread:9"]
 
 
+def test_role_defaults_to_active_and_round_trips():
+    # Default keeps external reviewers + pre-role markers gating.
+    assert _signal().role == "active"
+    sig = _signal(role="trial")
+    [got] = extract_markers(with_marker("A trial finding.", sig))
+    assert got.role == "trial"
+
+
+def test_pre_role_marker_decodes_as_active():
+    # A marker written before the `role` field existed has no `role` key; it must
+    # decode as "active" (gating) so old PRs don't silently become non-gating.
+    body = with_marker("Legacy finding.", _signal())
+    body = body.replace(',"role":"active"', "")
+    [got] = extract_markers(body)
+    assert got.role == "active"
+
+
 def test_marker_excludes_human_text():
     marker = encode_marker(_signal())
     assert "SQL injection" not in marker

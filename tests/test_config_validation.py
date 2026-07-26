@@ -72,6 +72,32 @@ def test_models_all_backup_is_rejected():
         ReviewConfig(models=[ReviewModel(provider="ollama", name="x", role="backup")])
 
 
+def test_models_trial_role_parses(tmp_path):
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text(
+        "[[review.models]]\n"
+        'provider = "zai-coding"\n'
+        'name = "glm-5.2"\n'
+        "[[review.models]]\n"
+        'provider = "openrouter"\n'
+        'name = "meta/muse-spark-1.1"\n'
+        'role = "trial"\n',
+        encoding="utf-8",
+    )
+    loaded = load_config(cfg)
+    assert [(m.provider, m.role) for m in loaded.review.models] == [
+        ("zai-coding", "active"),
+        ("openrouter", "trial"),
+    ]
+
+
+def test_models_trial_only_is_rejected():
+    # A trial is non-gating, so a config with no active has nothing that gates —
+    # the same "needs an active" rule that rejects all-backup rejects all-trial.
+    with pytest.raises(ValidationError):
+        ReviewConfig(models=[ReviewModel(provider="ollama", name="x", role="trial")])
+
+
 def test_compare_entries_parse_with_token_env(tmp_path):
     cfg = tmp_path / ".fuko.toml"
     cfg.write_text(

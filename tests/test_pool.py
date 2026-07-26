@@ -75,9 +75,23 @@ def test_partition_roles_preserves_config_order():
         ReviewModel(provider="c", role="active"),
         ReviewModel(provider="d", role="backup"),
     ]
-    actives, backups = partition_roles(models)
+    actives, backups, trials = partition_roles(models)
     assert [m.provider for m in actives] == ["a", "c"]
     assert [m.provider for m in backups] == ["b", "d"]
+    assert trials == []
+
+
+def test_partition_roles_splits_out_trials_in_config_order():
+    models = [
+        ReviewModel(provider="a", role="active"),
+        ReviewModel(provider="t1", role="trial"),
+        ReviewModel(provider="b", role="backup"),
+        ReviewModel(provider="t2", role="trial"),
+    ]
+    actives, backups, trials = partition_roles(models)
+    assert [m.provider for m in actives] == ["a"]
+    assert [m.provider for m in backups] == ["b"]
+    assert [m.provider for m in trials] == ["t1", "t2"]
 
 
 def test_order_pool_priority_when_nothing_cooled():
