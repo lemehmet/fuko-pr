@@ -527,3 +527,16 @@ def test_update_still_clears_an_expiry_with_an_empty_value(store):
     lid = _seed(store)["auth login flow"]["id"]
     store.update_learning("o/r", lid, expires_at="2099-01-01T00:00:00Z")
     assert store.update_learning("o/r", lid, expires_at=None)["expires_at"] is None
+
+
+def test_search_is_case_insensitive_beyond_ascii(store):
+    store.ingest(
+        "o/r",
+        [
+            IngestItem(text="auth ÄPFEL naming in the German docs", source="docs"),
+            IngestItem(text="db STRASSE unrelated", source="docs"),
+        ],
+    )
+    hits, total = store.list_learnings(repo="o/r", q="äpfel")
+    assert total == 1 and "ÄPFEL" in hits[0]["text"]
+    assert store.list_learnings(repo="o/r", q="ÄPFEL")[1] == 1

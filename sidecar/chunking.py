@@ -55,4 +55,7 @@ def chunk_markdown(text: str, max_len: int = 1500) -> list[tuple[str, str]]:
         else:
             buf.append(line)
     flush()
-    return chunks or [(text.strip()[:max_len], "")]
+    if chunks:
+        return chunks
+    body = text.strip()
+    return [(body[:max_len], "")] if body else []

@@ -61,3 +61,9 @@ def test_chunk_markdown_does_not_drop_an_oversized_section():
     body = "b" * 3000
     chunks = chunk_markdown(f"# Title\n\n{body}", max_len=1000)
     assert body in "".join(text for text, _ in chunks)
+
+
+def test_chunk_markdown_emits_nothing_for_empty_input():
+    assert chunk_markdown("") == []
+    assert chunk_markdown("   \n\n \t ") == []
+    assert chunk_markdown("real content") != []

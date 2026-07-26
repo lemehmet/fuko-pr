@@ -59,6 +59,17 @@ def _row_to_dict(row: tuple) -> dict:
     }
 
 
+def _unicode_lower(value):
+    """Case-fold with Python's Unicode rules, overriding sqlite's ASCII-only ``lower``.
+
+    Both sqlite's ``LIKE`` and its built-in ``lower()`` fold ASCII only, so
+    ``'ÄPFEL'`` never matches a search for ``'äpfel'`` -- while Postgres ``ILIKE``
+    does match it. Registering this keeps the two stores' search agreeing on text
+    that is not plain ASCII, without needing an ICU-enabled sqlite build.
+    """
+    return value.lower() if isinstance(value, str) else value
+
+
 def _pack(vec: list[float]) -> bytes:
     """Pack a vector as little-endian float32 (sqlite-vec's portable wire format)."""
     return struct.pack(f"<{len(vec)}f", *vec)
@@ -107,6 +118,7 @@ class SqliteVecStore:
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
+        conn.create_function("lower", 1, _unicode_lower, deterministic=True)
         conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS learnings("
@@ -377,8 +389,10 @@ class SqliteVecStore:
             where.append("source = ?")
             params.append(source)
         if q:
-            where.append(r"(text LIKE ? ESCAPE '\' OR coalesce(topic, '') LIKE ? ESCAPE '\')")
-            pattern = f"%{like_escape(q)}%"
+            where.append(
+                r"(lower(text) LIKE ? ESCAPE '\' OR lower(coalesce(topic, '')) LIKE ? ESCAPE '\')"
+            )
+            pattern = f"%{like_escape(q.lower())}%"
             params.extend([pattern, pattern])
         clause = " AND ".join(where) if where else "1"
         page_sql = (
