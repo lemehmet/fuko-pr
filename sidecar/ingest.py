@@ -8,7 +8,7 @@ from psycopg.errors import UniqueViolation
 from .db import db, vector_literal
 from .dedup import partition
 from .embed import get_embedder
-from .models import UNSET, DuplicateLearningError, IngestItem, check_source
+from .models import UNSET, DuplicateLearningError, IngestItem, check_source, check_text
 from .retrieve import _ROW_COLUMNS, _row_to_dict, get_learning
 
 _INSERT_SQL = """
@@ -110,12 +110,18 @@ def update(
     embedded, so changing it re-embeds and every other change skips the embedder
     entirely -- a topic fix must not cost an embedding call.
 
+    The row is locked for the duration of the transaction, so the stored text
+    the re-embed decision is made against cannot change between reading it and
+    writing the update -- otherwise a concurrent writer could leave the row
+    holding one write's text and another write's embedding.
+
     Returns ``None`` when ``id`` is not a learning in ``repo``.
 
     Raises:
         DuplicateLearningError: The result would collide with the
             ``(repo, text, source)`` unique key.
         UnknownSourceError: ``source`` is outside ``SOURCES``.
+        InvalidLearningError: ``text`` is null or blank.
     """
     try:
         UUID(id)
@@ -130,13 +136,15 @@ def update(
     }
     if "source" in supplied:
         check_source(supplied["source"])
+    if "text" in supplied:
+        check_text(supplied["text"])
 
     if not supplied:
         return get_learning(repo, id)
 
     with db() as conn:
         current = conn.execute(
-            "SELECT text FROM learnings WHERE repo = %s AND id = %s", (repo, id)
+            "SELECT text FROM learnings WHERE repo = %s AND id = %s FOR UPDATE", (repo, id)
         ).fetchone()
         if current is None:
             return None

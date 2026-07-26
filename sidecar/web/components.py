@@ -56,9 +56,38 @@ def raw_cell(html: str, *, numeric: bool = False, css: str = "") -> str:
     return f"<td{attrs(class_=classes or None)}>{html}</td>"
 
 
-def link(href: str, text: object, **kwargs: object) -> str:
-    """Render an escaped anchor."""
-    return f"<a{attrs(href=href, **kwargs)}>{esc(text)}</a>"
+_SAFE_SCHEMES = frozenset({"http", "https", "mailto"})
+
+
+def safe_href(href: object) -> str | None:
+    """Return ``href`` if it is safe to place in an anchor, else ``None``.
+
+    Escaping stops a URL breaking out of the attribute, but it does not stop
+    ``javascript:`` -- an escaped ``javascript:alert(1)`` is still a working XSS
+    gadget once clicked. Stored URLs are attacker-influenced (``source_url``
+    arrives from ``/ingest`` and from the console form), so schemes are
+    allow-listed rather than deny-listed.
+
+    Non-printing characters are stripped before parsing, because browsers strip
+    tabs and newlines from URLs and would resolve ``java&#9;script:`` back to a
+    scheme this function must already have rejected. A URL with no scheme (a
+    relative path) is always allowed -- that is every internal link.
+    """
+    cleaned = "".join(ch for ch in str(href) if ch.isprintable()).strip()
+    scheme, _, _ = cleaned.partition(":")
+    if "/" in scheme or "?" in scheme or "#" in scheme:
+        return cleaned
+    if ":" in cleaned and scheme.lower() not in _SAFE_SCHEMES:
+        return None
+    return cleaned
+
+
+def link(href: object, text: object, **kwargs: object) -> str:
+    """Render an escaped anchor, degrading to inert text for an unsafe scheme."""
+    target = safe_href(href)
+    if target is None:
+        return f'<span class="muted">{esc(text)}</span>'
+    return f"<a{attrs(href=target, **kwargs)}>{esc(text)}</a>"
 
 
 def badge(text: object, *, css: str = "") -> str:
@@ -92,22 +121,33 @@ def notice(text: str, *, kind: str = "info") -> str:
     return f'<p class="notice {escape(kind, quote=True)}">{esc(text)}</p>'
 
 
+def form_value(value: object) -> str:
+    """Render ``value`` for a form control: only ``None`` becomes empty.
+
+    Every form helper routes through this rather than testing ``value or ""``,
+    which would blank out a legitimate ``0`` or ``False`` and silently drop it
+    from the round-trip.
+    """
+    return "" if value is None else str(value)
+
+
 def field(label: str, name: str, value: object = "", **kwargs: object) -> str:
     """Render a labelled ``<input>``."""
-    tag = attrs(name=name, value="" if value is None else value, **kwargs)
+    tag = attrs(name=name, value=form_value(value), **kwargs)
     return f"<label>{esc(label)}<input{tag}></label>"
 
 
 def textarea(label: str, name: str, value: object = "", **kwargs: object) -> str:
     """Render a labelled ``<textarea>``."""
     tag = attrs(name=name, **kwargs)
-    return f"<label>{esc(label)}<textarea{tag}>{esc(value or '')}</textarea></label>"
+    return f"<label>{esc(label)}<textarea{tag}>{esc(form_value(value))}</textarea></label>"
 
 
 def select(label: str, name: str, options: list[tuple[str, str]], value: object = "") -> str:
     """Render a labelled ``<select>`` from ``(value, label)`` pairs, marking the match."""
+    selected = form_value(value)
     opts = "".join(
-        f"<option{attrs(value=opt_value, selected=(str(value or '') == opt_value))}>"
+        f"<option{attrs(value=opt_value, selected=(selected == opt_value))}>"
         f"{esc(opt_label)}</option>"
         for opt_value, opt_label in options
     )

@@ -4,7 +4,12 @@ import pytest
 
 from sidecar import sqlite_store as ss
 from sidecar.fukoconfig import KnowledgeConfig, ObjectStoreConfig
-from sidecar.models import DuplicateLearningError, IngestItem, UnknownSourceError
+from sidecar.models import (
+    DuplicateLearningError,
+    IngestItem,
+    InvalidLearningError,
+    UnknownSourceError,
+)
 from sidecar.objectstore import PreconditionFailed
 from sidecar.stores import get_store
 
@@ -441,3 +446,48 @@ def test_update_returns_none_for_a_missing_or_foreign_row(store):
 def test_update_with_nothing_supplied_is_a_read(store):
     lid = _seed(store)["auth login flow"]["id"]
     assert store.update_learning("o/r", lid) == store.get_learning("o/r", lid)
+
+
+def test_update_rejects_a_null_or_blank_text(store):
+    lid = _seed(store)["auth login flow"]["id"]
+    for bad in (None, "  "):
+        with pytest.raises(InvalidLearningError):
+            store.update_learning("o/r", lid, text=bad)
+    assert store.get_learning("o/r", lid)["text"] == "auth login flow"
+
+
+def test_update_embeds_once_across_lost_races(store, monkeypatch):
+    lid = _seed(store)["auth login flow"]["id"]
+    embedded: list[str] = []
+
+    class _Counting(_FakeEmbedder):
+        def embed_one(self, text):
+            embedded.append(text)
+            return _vec(text)
+
+    monkeypatch.setattr(ss, "get_embedder", lambda: _Counting())
+    store._obj.fail_next_saves = 2  # lose two races, then win
+
+    updated = store.update_learning("o/r", lid, text="db notes instead")
+    assert updated["text"] == "db notes instead"
+    assert embedded == ["db notes instead"]
+
+
+def test_update_reads_the_stored_text_inside_the_mutation(store, monkeypatch):
+    """A concurrent writer must not leave this write's text beside its embedding."""
+    lid = _seed(store)["auth login flow"]["id"]
+    seen: list[str] = []
+    real_open = store._open
+
+    def spy_open(path, dim):
+        conn, migrated = real_open(path, dim)
+        row = conn.execute("SELECT text FROM learnings WHERE lid = ?", (lid,)).fetchone()
+        if row:
+            seen.append(row[0])
+        return conn, migrated
+
+    monkeypatch.setattr(store, "_open", spy_open)
+    store.update_learning("o/r", lid, topic="Auth")
+    # exactly one connection is opened for the mutation: the decision cannot be
+    # based on a snapshot from an earlier, separate read
+    assert seen == ["auth login flow"]
