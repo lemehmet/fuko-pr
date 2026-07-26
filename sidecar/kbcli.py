@@ -114,18 +114,21 @@ def _count(args) -> None:
         print(f"  {repo:24} {_color(f'{source:16}', _DIM)} {n}")
 
 
+_CLEARABLE = ("source_url", "topic", "expires_at")
+
+
 def _edit(args) -> None:
-    changes = {
-        name: value
-        for name, value in (
-            ("text", args.text),
-            ("source", args.source),
-            ("source_url", args.source_url),
-            ("topic", args.topic),
-            ("expires_at", args.expires_at),
-        )
-        if value is not None
-    }
+    changes: dict = {}
+    for name, value in (
+        ("text", args.text),
+        ("source", args.source),
+        ("source_url", args.source_url),
+        ("topic", args.topic),
+        ("expires_at", args.expires_at),
+    ):
+        if value is None:
+            continue
+        changes[name] = None if (value == "" and name in _CLEARABLE) else value
     if args.globs is not None:
         changes["file_globs"] = args.globs
     if not changes:
@@ -191,9 +194,9 @@ def add_parser(sub) -> None:
     pe.add_argument("id")
     pe.add_argument("--text")
     pe.add_argument("--source", choices=SOURCES)
-    pe.add_argument("--source-url", dest="source_url")
-    pe.add_argument("--topic")
-    pe.add_argument("--expires-at", dest="expires_at")
+    pe.add_argument("--source-url", dest="source_url", help='pass "" to clear')
+    pe.add_argument("--topic", help='pass "" to clear')
+    pe.add_argument("--expires-at", dest="expires_at", help='pass "" to clear')
     pe.add_argument("--globs", nargs="*", help="replace the file globs (pass none to clear)")
     pe.set_defaults(kb_fn=_edit)
 

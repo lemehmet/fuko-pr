@@ -491,3 +491,23 @@ def test_update_reads_the_stored_text_inside_the_mutation(store, monkeypatch):
     # exactly one connection is opened for the mutation: the decision cannot be
     # based on a snapshot from an earlier, separate read
     assert seen == ["auth login flow"]
+
+
+def test_search_treats_like_metacharacters_literally(store):
+    store.ingest(
+        "o/r",
+        [
+            IngestItem(text="auth coverage is 100% on this path", source="docs"),
+            IngestItem(text="auth coverage is 55 percent elsewhere", source="docs"),
+            IngestItem(text="db a_b naming convention", source="docs"),
+            IngestItem(text="db axb naming convention", source="docs"),
+        ],
+    )
+    hits, total = store.list_learnings(repo="o/r", q="100%")
+    assert total == 1 and hits[0]["text"].startswith("auth coverage is 100%")
+
+    hits, total = store.list_learnings(repo="o/r", q="a_b")
+    assert total == 1 and "a_b" in hits[0]["text"]
+
+    # a bare % must not become a match-everything wildcard
+    assert store.list_learnings(repo="o/r", q="%")[1] == 1

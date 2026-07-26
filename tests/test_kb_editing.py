@@ -348,3 +348,36 @@ def test_patch_422s_on_a_null_text(api):
     resp = client.patch(f"/learnings/{_ID}", json={"repo": "o/r", "text": None})
     assert resp.status_code == 422
     assert "non-empty" in resp.json()["detail"]
+
+
+def test_like_escape_neutralizes_pattern_syntax():
+    assert retrieve.like_escape("100%") == r"100\%"
+    assert retrieve.like_escape("a_b") == r"a\_b"
+    assert retrieve.like_escape("back\\slash") == "back\\\\slash"
+    assert retrieve.like_escape("plain") == "plain"
+
+
+def test_list_learnings_escapes_the_search_term_and_declares_an_escape_char(monkeypatch):
+    seen = {}
+
+    class _Cursor:
+        def fetchone(self):
+            return (0,)
+
+        def fetchall(self):
+            return []
+
+    class _Conn:
+        def execute(self, sql, params=()):
+            seen.setdefault("sql", " ".join(sql.split()))
+            seen.setdefault("params", list(params))
+            return _Cursor()
+
+    @contextmanager
+    def fake_db():
+        yield _Conn()
+
+    monkeypatch.setattr(retrieve, "db", fake_db)
+    retrieve.list_learnings(repo="o/r", q="100%")
+    assert "ESCAPE '\\'" in seen["sql"]
+    assert seen["params"][1:] == [r"%100\%%", r"%100\%%"]

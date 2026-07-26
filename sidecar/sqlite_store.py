@@ -30,7 +30,7 @@ from .fukoconfig import KnowledgeConfig
 from .ingest import _UPDATABLE, _parse_dt
 from .models import UNSET, DuplicateLearningError, IngestItem, check_source, check_text
 from .objectstore import PreconditionFailed, make_object_store
-from .retrieve import _build_query, fold_repo_counts
+from .retrieve import _build_query, fold_repo_counts, like_escape
 
 _MAX_RETRIES = 5
 
@@ -377,10 +377,9 @@ class SqliteVecStore:
             where.append("source = ?")
             params.append(source)
         if q:
-            where.append(
-                "(text LIKE ? COLLATE NOCASE OR coalesce(topic, '') LIKE ? COLLATE NOCASE)"
-            )
-            params.extend([f"%{q}%", f"%{q}%"])
+            where.append(r"(text LIKE ? ESCAPE '\' OR coalesce(topic, '') LIKE ? ESCAPE '\')")
+            pattern = f"%{like_escape(q)}%"
+            params.extend([pattern, pattern])
         clause = " AND ".join(where) if where else "1"
         page_sql = (
             f"SELECT {_ROW_COLUMNS} "
