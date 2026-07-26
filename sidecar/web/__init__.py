@@ -4,7 +4,11 @@ Adding a utility page is two edits and no framework work: declare it in
 :data:`sidecar.web.layout.PAGES`, then write a module here that exposes
 ``router`` and list it in :data:`_MODULES`. Shared chrome, navigation, escaping,
 and the degrade-on-database-error convention come from :mod:`.layout` and
-:mod:`.components`. See ``docs/web-ui.md``.
+:mod:`.components`; a page that mutates anything gates those routes with
+:mod:`.security`. See ``docs/web-ui.md``.
+
+:mod:`.security` carries no ``Page`` entry -- its login and logout routes are
+chrome, not a destination, so they are mounted without appearing in the nav.
 
 :mod:`sidecar.main` mounts the result once with ``app.include_router(web.router)``.
 """
@@ -14,10 +18,10 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
 
-from . import metrics
+from . import kb, metrics, security
 from .layout import PAGES, PREFIX
 
-_MODULES = (metrics,)
+_MODULES = (metrics, kb, security)
 
 router = APIRouter()
 for _module in _MODULES:

@@ -38,6 +38,7 @@ PREFIX = "/ui"
 
 PAGES: tuple[Page, ...] = (
     Page(slug="metrics", title="Metrics", path=f"{PREFIX}/metrics", order=10),
+    Page(slug="kb", title="Knowledge base", path=f"{PREFIX}/kb", order=20),
 )
 
 
@@ -86,10 +87,19 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
          background: var(--fill); font-size: 0.8rem; }
 form { margin: 1rem 0; display: flex; gap: 0.6rem; align-items: flex-end; flex-wrap: wrap; }
 form.stacked { display: block; }
+form.inline { display: inline; margin: 0; }
+.fields { display: flex; gap: 0.6rem; align-items: flex-end; flex-wrap: wrap; margin: 0.6rem 0; }
 label { display: inline-flex; flex-direction: column; gap: 0.2rem; font-size: 0.85rem; }
+label.row { flex-direction: row; gap: 0.3rem; align-items: center; }
+form.stacked > label { display: flex; }
+.nowrap { white-space: nowrap; }
 input, select, textarea { font: inherit; font-size: 0.9rem; padding: 0.2rem 0.4rem; }
 textarea { width: 100%; min-height: 9rem; font-family: ui-monospace, monospace; }
 button { font: inherit; padding: 0.25rem 0.8rem; }
+details summary { cursor: pointer; }
+pre, code { font-family: ui-monospace, monospace; font-size: 0.85rem; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--fill);
+      padding: 0.6rem 0.8rem; border-radius: 6px; margin: 0.4rem 0; }
 .pager { display: flex; gap: 1rem; align-items: baseline; font-size: 0.9rem; }
 footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line);
          font-size: 0.8rem; opacity: 0.6; }
