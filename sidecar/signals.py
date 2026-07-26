@@ -44,12 +44,18 @@ class ReviewSignal(BaseModel):
     thread_url: str | None = None
     backend: str = ""
     model: str = ""
-    # The role of the fuko branch that produced this finding: "active" (gating),
-    # "trial" (runs + surfaced but NON-gating), or "backup" (a promoted failover
-    # running under a branch — inherits that branch's role, so this is rarely
-    # "backup" in practice). Defaults to "active" so external reviewers
-    # (coderabbit/copilot) and pre-role markers decode as gating, unchanged.
-    role: str = "active"
+    role: str = Field(
+        default="active",
+        description=(
+            "Producing fuko branch role: 'active' (gating), 'trial' (surfaced but "
+            "non-gating), or 'backup' (a promoted failover, inheriting its branch's "
+            "role). Defaults to 'active' so external reviewers and pre-role markers "
+            "decode as gating. Kept a plain str, not a Literal, so a future role "
+            "value still round-trips through the marker instead of failing decode; "
+            "values only ever come from the config-validated role, and consumers "
+            "fail toward gating (anything != 'trial' gates)."
+        ),
+    )
     kb_refs: list[str] = Field(default_factory=list)
 
 

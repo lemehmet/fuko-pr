@@ -44,11 +44,13 @@ tools = ["review", "improve"]   # PR-Agent tools to run
 # OpenAI-compatible, no real auth — set LEMONADE_API_KEY to any non-empty
 # value and point base_url at the host.)
 #
-# Concurrent A/B (per-branch identities): give EVERY active a `token_env` whose
-# env var resolves to a distinct GitHub actor (e.g. two GitHub Apps), and the
+# Concurrent A/B (per-branch identities): give EVERY branch that runs — every
+# active AND every trial (both start a branch) — a `token_env` whose env var
+# resolves to a distinct GitHub actor (e.g. separate GitHub Apps), and the
 # branches run concurrently — each posts and edits its own comments under its
-# own token (distinct throttle buckets, author separation). If any active lacks
-# a distinct token the whole run falls back to sequential under the base token.
+# own token (distinct throttle buckets, author separation). If any active or
+# trial lacks a distinct token the whole run falls back to sequential under the
+# base token.
 # Wire the tokens in the workflow (one `create-github-app-token` step per App).
 #
 # A provider whose max_context can't hold the job (diff + knowledge estimate) is

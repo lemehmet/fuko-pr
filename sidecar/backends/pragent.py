@@ -346,9 +346,7 @@ class PrAgentBackend:
             return []
 
         pairs = pragent_signals(comments, model)
-        # Stamp the producing branch's role onto every signal BEFORE the markers
-        # are injected, so the persisted marker (and thus `fuko signals`) carries
-        # it. A trial branch's findings are then self-identifying as non-gating.
+        # Stamp role BEFORE marker injection so it lands in the persisted marker.
         for p in pairs:
             p["signal"].role = role
         self._inject_markers(api, pr, headers, pairs, label=compare_label, actor=actor)

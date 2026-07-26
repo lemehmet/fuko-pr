@@ -956,11 +956,9 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
             f"model(s) to active for this round: {promoted}",
             file=sys.stderr,
         )
-        actives, backups = [*actives, *backups], []
+        actives = [*actives, *(m.model_copy(update={"role": "active"}) for m in backups)]
+        backups = []
 
-    # Actives AND trials each run as their own branch; the branch's role travels
-    # with it (header tag + signal marker) so a trial's output is surfaced but
-    # non-gating downstream. Backups stay the shared failover pool for both.
     reviewers = [*actives, *trials]
 
     if len(reviewers) > 1:

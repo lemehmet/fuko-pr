@@ -16,7 +16,12 @@ endpoint (default: local Ollama `bge-m3`).
 - **Docstrings are mandatory.** Every module, class, and public function/method has a
   docstring (Google convention). Enforced by `ruff check` (pydocstyle `D` rules).
   Private helpers (leading underscore) and code under `tests/` are exempt.
-- **No inline comments** unless explicitly requested. Prefer self-documenting code.
+- **Prefer self-documenting code; comment the non-obvious _why_.** Don't narrate
+  _what_ the code does (that's redundant with readable code) — but a short comment
+  is welcome where it captures a non-obvious rationale the code can't: an ordering
+  constraint, a subtle invariant, a fail-safe direction, or a "looks wrong but
+  isn't". When the explanation is really about a data field's meaning, prefer a
+  `Field(description=...)` (structured, shows up in the schema) over a loose comment.
 - **Stdlib-first.** Only add a dependency when the stdlib genuinely cannot do it.
 - **Embedding-dimension changes are handled automatically.** If the embedding model's
   dimension changes, the store re-embeds every learning and rebuilds the vector
