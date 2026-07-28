@@ -89,6 +89,17 @@ def test_build_env_prodia_rented_host(monkeypatch):
     assert env["CONFIG__AI_TIMEOUT"] == "300"
 
 
+def test_build_env_prodia_without_base_url_fails_fast(monkeypatch):
+    monkeypatch.setenv("PRODIA_KEY", "pr-secret")
+    with pytest.raises(ValueError, match="base_url"):
+        PrAgentBackend().build_env(
+            get_preset("prodia"),
+            ModelConfig(provider="prodia", name="moonshotai/Kimi-K3"),
+            knowledge="",
+            tools=["review"],
+        )
+
+
 def test_build_env_enables_live_verbosity():
     from sidecar.fukoconfig import ModelConfig
     from sidecar.presets import get_preset

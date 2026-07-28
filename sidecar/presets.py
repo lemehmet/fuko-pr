@@ -10,12 +10,20 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class ProviderPreset:
-    """Connection details and quirks for one model provider."""
+    """Connection details and quirks for one model provider.
+
+    ``requires_base_url`` marks presets with no meaningful default endpoint
+    (e.g. rented GPU boxes, whose address changes per rental): the model entry
+    in ``.fuko.toml`` must supply ``base_url``, and a backend fails fast if it
+    doesn't — otherwise the preset's key would silently go to the SDK's
+    default endpoint.
+    """
 
     litellm_prefix: str
     base_url: str | None = None
     key_env: str | None = None
     quirks: dict[str, object] = field(default_factory=dict)
+    requires_base_url: bool = False
 
 
 PRESETS: dict[str, ProviderPreset] = {
@@ -64,9 +72,6 @@ PRESETS: dict[str, ProviderPreset] = {
         },
     ),
     "prodia": ProviderPreset(
-        # Rented GPU boxes (e.g. Prodia) expose a plain OpenAI-compatible
-        # endpoint at a per-rental address, so there is no meaningful default
-        # base_url — each model entry must set `base_url` in .fuko.toml.
         litellm_prefix="openai/",
         key_env="PRODIA_KEY",
         quirks={
@@ -74,6 +79,7 @@ PRESETS: dict[str, ProviderPreset] = {
             "max_model_tokens": 512000,
             "ai_timeout": 300,
         },
+        requires_base_url=True,
     ),
     "openai": ProviderPreset(
         litellm_prefix="openai/",

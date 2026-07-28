@@ -100,6 +100,13 @@ class PrAgentBackend:
         base_url = model.base_url or preset.base_url
         if base_url:
             env[f"{family}__API_BASE"] = base_url
+        elif preset.requires_base_url:
+            # Without this the preset's key would silently go to the SDK's
+            # default endpoint (e.g. api.openai.com).
+            raise ValueError(
+                f"provider '{model.provider}' has no default endpoint; set "
+                f"base_url on its [[review.models]] entry in .fuko.toml"
+            )
         if preset.key_env:
             key = os.environ.get(preset.key_env)
             if key:
