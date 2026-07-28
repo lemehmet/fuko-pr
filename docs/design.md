@@ -157,6 +157,7 @@ class ProviderPreset:
     base_url: str | None           # provider endpoint, or None for SDK default
     key_env: str | None            # env var holding the API key, or None (local)
     quirks: dict[str, object]      # e.g. {"custom_model_max_tokens": 1000000, "ai_timeout": 300}
+    requires_base_url: bool        # no default endpoint: the model entry MUST set base_url (fail fast)
 ```
 
 Initial presets (the ones we actually use):
@@ -167,6 +168,7 @@ Initial presets (the ones we actually use):
 | `ollama`       | `ollama/`      | `http://localhost:11434`                  | —               | —                                |
 | `ollama-cloud` | `openai/`      | `https://ollama.com/v1`                   | `OLLAMA_API_KEY`| custom_model_max_tokens 976000, max_model_tokens 512000, ai_timeout 300 |
 | `openrouter`   | `openai/`      | `https://openrouter.ai/api/v1`            | `OPENROUTER_KEY`| custom_model_max_tokens 1048576, max_model_tokens 512000, ai_timeout 300 |
+| `prodia`       | `openai/`      | (none — per-rental, set on the model entry) | `PRODIA_KEY`  | custom_model_max_tokens 1048576, max_model_tokens 512000, ai_timeout 300 |
 | `openai`       | `openai/`      | (SDK default)                             | `OPENAI_KEY`    | —                                |
 | `anthropic`    | `anthropic/`   | (SDK default)                             | `ANTHROPIC_KEY` | —                                |
 
