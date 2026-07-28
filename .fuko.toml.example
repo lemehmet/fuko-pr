@@ -40,9 +40,11 @@ tools = ["review", "improve"]   # PR-Agent tools to run
 # so a config with none would have nothing that gates).
 #
 # Known presets: zai-coding, ollama, ollama-cloud, lemonade, openrouter,
-# anthropic, openai. (lemonade = any Lemonade server, e.g. a LAN AMD box;
-# OpenAI-compatible, no real auth — set LEMONADE_API_KEY to any non-empty
-# value and point base_url at the host.)
+# prodia, anthropic, openai. (lemonade = any Lemonade server, e.g. a LAN AMD
+# box; OpenAI-compatible, no real auth — set LEMONADE_API_KEY to any non-empty
+# value and point base_url at the host. prodia = a rented OpenAI-compatible
+# GPU box, key from PRODIA_KEY; it has no default base_url, so each model
+# entry must set base_url to the rental's endpoint.)
 #
 # Concurrent A/B (per-branch identities): give EVERY branch that runs — every
 # active AND every trial (both start a branch) — a `token_env` whose env var

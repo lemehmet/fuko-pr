@@ -63,6 +63,18 @@ PRESETS: dict[str, ProviderPreset] = {
             "ai_timeout": 300,
         },
     ),
+    "prodia": ProviderPreset(
+        # Rented GPU boxes (e.g. Prodia) expose a plain OpenAI-compatible
+        # endpoint at a per-rental address, so there is no meaningful default
+        # base_url — each model entry must set `base_url` in .fuko.toml.
+        litellm_prefix="openai/",
+        key_env="PRODIA_KEY",
+        quirks={
+            "custom_model_max_tokens": 1048576,
+            "max_model_tokens": 512000,
+            "ai_timeout": 300,
+        },
+    ),
     "openai": ProviderPreset(
         litellm_prefix="openai/",
         key_env="OPENAI_KEY",
