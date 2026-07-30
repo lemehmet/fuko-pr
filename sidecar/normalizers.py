@@ -15,9 +15,19 @@ from __future__ import annotations
 import html
 import re
 
-from .signals import Category, ReviewSignal, extract_markers, make_id
+from .signals import (
+    Category,
+    ReviewSignal,
+    extract_markers,
+    make_id,
+    strip_markers,
+    strip_visible_label,
+)
 
 _PRAGENT_PREFIX = "**Suggestion:**"
+# Start of any line, but NOT inside a blockquote: `> **Suggestion:**` is someone
+# quoting a finding (a reply, a summary), not posting one.
+_PRAGENT_ANCHOR_RE = re.compile(rf"^[ \t]*{re.escape(_PRAGENT_PREFIX)}", re.MULTILINE)
 _LABEL_RE = re.compile(r"\[([^,\]]+),\s*importance:\s*(\d+)\]")
 
 _PRAGENT_CATEGORY: dict[str, Category] = {
@@ -45,8 +55,14 @@ def _severity_from_importance(n: int) -> str:
 
 
 def is_pragent_comment(body: str) -> bool:
-    """Return whether ``body`` looks like a PR-Agent inline suggestion."""
-    return (body or "").lstrip().startswith(_PRAGENT_PREFIX)
+    """Return whether ``body`` looks like a PR-Agent inline suggestion.
+
+    The prefix is matched at the start of any *line*, not only at the start of the
+    body. Publishers decorate comments before posting -- fuko prepends a visible
+    model label to every comment it writes -- and anchoring at position 0 rejected
+    every one of those, silently.
+    """
+    return bool(_PRAGENT_ANCHOR_RE.search(body or ""))
 
 
 def pragent_signal(comment: dict, model: str = "") -> ReviewSignal:
@@ -356,28 +372,103 @@ def _prefer_marker(base: ReviewSignal, body: str) -> ReviewSignal:
     marked = markers[0]
     marked.title = base.title
     marked.body = base.body
+    if not marked.thread_url:
+        marked.thread_url = base.thread_url
     return marked
+
+
+def _marker_only_signal(comment: dict, body: str) -> ReviewSignal | None:
+    """Admit a comment on its embedded marker alone, when no prose recognizer claimed it.
+
+    The marker is machine-written at review time and is the authoritative record that
+    this comment *is* a finding. Gating admission on prose shape alone made the entire
+    set vanish the moment the published format drifted -- a prepended model label was
+    enough -- and it failed closed and silent. This mirrors the admission policy of
+    :func:`collect_issue_comment_signals`, which has always been marker-driven.
+
+    Markers carry no ``title``/``body`` (they are excluded from the encoding), so the
+    human-facing text is rehydrated from the comment itself.
+    """
+    markers = extract_markers(body)
+    if not markers:
+        return None
+    signal = markers[0]
+    text = strip_visible_label(strip_markers(body)).strip()
+    signal.body = text
+    signal.title = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")[:200]
+    if not signal.thread_url:
+        signal.thread_url = comment.get("html_url")
+    return signal
+
+
+def normalize_inline_comment(comment: dict, model: str = "") -> ReviewSignal | None:
+    """Normalize one inline review comment, or return ``None`` if it carries no finding.
+
+    Author-based recognizers run first because identity is a stronger signal than
+    prose shape, and the PR-Agent format check is deliberately loose enough to match
+    decorated bodies. A comment that no recognizer claims is still admitted when it
+    carries a fuko-signal marker.
+    """
+    body = comment.get("body", "") or ""
+    if is_copilot_comment(comment):
+        return _prefer_marker(copilot_signal(comment), body)
+    if is_coderabbit_comment(comment):
+        # CodeRabbit chat replies and rate-limit notices are not findings.
+        if not is_coderabbit_finding(body):
+            return None
+        return _prefer_marker(coderabbit_signal(comment), body)
+    if is_pragent_comment(body):
+        return _prefer_marker(pragent_signal(comment, model), body)
+    return _marker_only_signal(comment, body)
+
+
+def is_recognized_author(comment: dict) -> bool:
+    """Return whether some recognizer *claims* ``comment``, finding or not.
+
+    Distinct from "yields a signal": CodeRabbit chat and rate-limit notices are
+    claimed here and then deliberately dropped as non-findings. Callers reporting
+    on unreadable comments need that distinction -- a recognized-and-skipped
+    comment is working as designed, an unclaimed one is the blind spot.
+    """
+    return is_copilot_comment(comment) or is_coderabbit_comment(comment)
 
 
 def collect_signals(comments: list[dict], model: str = "") -> list[ReviewSignal]:
     """Normalize a PR's comments across every recognized reviewer into one list.
 
-    Dispatch is per comment: PR-Agent by format, Copilot by author, CodeRabbit by
-    author *and* the presence of a finding classification (its chat replies and
-    rate-limit notices are skipped). Unrecognized comments are skipped. When a
-    comment carries a fuko-signal marker, its review-time fields take precedence
-    (see :func:`_prefer_marker`).
+    Replies are skipped: they are conversation, not findings. This matters now
+    that markers admit a comment on their own -- a reply quoting the body of a
+    finding carries that finding's marker verbatim, and would otherwise be
+    collected a second time as a duplicate signal.
+
+    See :func:`normalize_inline_comment` for the per-comment dispatch. Use
+    :func:`unrecognized_comments` to find out what this dropped.
     """
     out: list[ReviewSignal] = []
     for c in comments:
-        body = c.get("body", "") or ""
-        if is_pragent_comment(body):
-            out.append(_prefer_marker(pragent_signal(c, model), body))
-        elif is_copilot_comment(c):
-            out.append(_prefer_marker(copilot_signal(c), body))
-        elif is_coderabbit_comment(c) and is_coderabbit_finding(body):
-            out.append(_prefer_marker(coderabbit_signal(c), body))
+        if c.get("in_reply_to_id"):
+            continue
+        signal = normalize_inline_comment(c, model)
+        if signal is not None:
+            out.append(signal)
     return out
+
+
+def unrecognized_comments(comments: list[dict], model: str = "") -> list[dict]:
+    """Return the top-level inline comments no recognizer could read at all.
+
+    A tool that can silently return a subset of the findings must be able to say so.
+    Two exclusions, both "dropped by design rather than by failure": replies are
+    conversation, and a comment whose author *is* recognized (CodeRabbit chat, a
+    rate-limit notice) was understood and then deliberately skipped.
+    """
+    return [
+        c
+        for c in comments
+        if not c.get("in_reply_to_id")
+        and not is_recognized_author(c)
+        and normalize_inline_comment(c, model) is None
+    ]
 
 
 def collect_issue_comment_signals(comments: list[dict], model: str = "") -> list[ReviewSignal]:

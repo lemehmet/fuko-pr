@@ -120,7 +120,53 @@ def _cmd_signals(args) -> None:
     signals = collect_signals(comments, model) + collect_issue_comment_signals(
         issue_comments, model
     )
+    _warn_on_dropped_comments(comments, model)
     print(json.dumps([s.model_dump() for s in signals], indent=2))
+
+
+def _is_bot_author(comment: dict) -> bool:
+    """Return whether ``comment`` was posted by a bot rather than a person.
+
+    ``user.type`` is authoritative when GitHub sends it; the login suffix is the
+    fallback for trimmed payloads and fixtures.
+    """
+    user = comment.get("user") or {}
+    return (user.get("type") or "").lower() == "bot" or str(user.get("login", "")).endswith("[bot]")
+
+
+def _warn_on_dropped_comments(comments: list[dict], model: str) -> None:
+    """Warn on stderr when inline comments produced no signal, naming their authors.
+
+    Consumers triage from this output, so a silent shortfall reads as "no findings"
+    rather than "findings not recognized" -- the failure mode this warning exists to
+    make impossible.
+
+    Scoped to bot authors on purpose. A human's inline note is legitimately not a
+    finding, and warning about those every run would train the reader to skip the
+    line -- which is the same silence, just louder. A *bot* comment that no
+    recognizer can read is the thing that must never pass unnoticed. Reports rather
+    than fails: not every bot comment is a finding either.
+
+    ``unrecognized_comments`` already excludes comments a recognizer claimed and
+    then deliberately skipped (CodeRabbit chat, rate-limit notices), so those never
+    reach this warning -- they were understood, not missed.
+    """
+    from collections import Counter
+
+    from .normalizers import unrecognized_comments
+
+    dropped = [c for c in unrecognized_comments(comments, model) if _is_bot_author(c)]
+    if not dropped:
+        return
+    by_author = Counter((c.get("user") or {}).get("login", "?") for c in dropped)
+    breakdown = ", ".join(f"{login}: {n}" for login, n in sorted(by_author.items()))
+    print(
+        f"fuko: warning: {len(dropped)} bot inline comment(s) matched no reviewer "
+        f"format and carried no fuko-signal marker, so they are NOT in the output "
+        f"({breakdown}). Read the raw comment list before concluding they are not "
+        f"findings.",
+        file=sys.stderr,
+    )
 
 
 def _exit_on_auth_error(exc, pr, token: str) -> None:

@@ -119,6 +119,15 @@ def visible_label(label: str) -> str:
     return f"🤖 `{label}`"
 
 
+def strip_visible_label(text: str) -> str:
+    """Remove a leading visible model tag from ``text``, if present.
+
+    Anchored like :data:`_VISIBLE_LABEL_RE` itself: only a tag at the very start is
+    publisher decoration; one appearing later is content.
+    """
+    return _VISIBLE_LABEL_RE.sub("", (text or "").lstrip("\n"))
+
+
 def with_visible_label(body: str, label: str, signal: ReviewSignal) -> str:
     """Return ``body`` tagged with a visible ``label`` and ``signal``'s invisible marker.
 
