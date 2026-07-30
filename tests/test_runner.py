@@ -396,6 +396,50 @@ def test_cmd_signals_merges_issue_comment_markers(monkeypatch, tmp_path, capsys)
     assert out[1]["model"] == "openai/glm"  # marker attribution, not local config
 
 
+def test_cmd_signals_warns_about_unreadable_bot_comments(monkeypatch, tmp_path, capsys):
+    import argparse
+    import json
+
+    from sidecar import cli
+
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text('[review.model]\nprovider = "anthropic"\nname = "claude"\n', encoding="utf-8")
+    inline = [
+        {"user": {"login": "Copilot"}, "body": "Use strict equality.", "path": "a.ts", "line": 3},
+        # a bot we cannot parse and that carries no marker -- the #1629 shape
+        {"user": {"login": "some-bot[bot]", "type": "Bot"}, "body": "novel format", "path": "b.ts"},
+        # a human note is NOT a finding; warning about it every run trains readers
+        # to ignore the line, so it must stay quiet
+        {"user": {"login": "lemehmet", "type": "User"}, "body": "nice", "path": "c.ts"},
+    ]
+    monkeypatch.setattr(runner, "fetch_inline_comments", lambda pr, token, api: inline)
+    monkeypatch.setattr(runner, "fetch_issue_comments", lambda pr, token, api: [])
+    cli._cmd_signals(argparse.Namespace(pr_url="https://github.com/o/r/pull/8", config=str(cfg)))
+
+    captured = capsys.readouterr()
+    assert len(json.loads(captured.out)) == 1  # only Copilot parsed
+    assert "1 bot inline comment(s)" in captured.err
+    assert "some-bot[bot]: 1" in captured.err
+    assert "lemehmet" not in captured.err
+
+
+def test_cmd_signals_is_quiet_when_every_bot_comment_is_read(monkeypatch, tmp_path, capsys):
+    import argparse
+
+    from sidecar import cli
+
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text('[review.model]\nprovider = "anthropic"\nname = "claude"\n', encoding="utf-8")
+    inline = [
+        {"user": {"login": "Copilot"}, "body": "Use strict equality.", "path": "a.ts", "line": 3},
+    ]
+    monkeypatch.setattr(runner, "fetch_inline_comments", lambda pr, token, api: inline)
+    monkeypatch.setattr(runner, "fetch_issue_comments", lambda pr, token, api: [])
+    cli._cmd_signals(argparse.Namespace(pr_url="https://github.com/o/r/pull/8", config=str(cfg)))
+
+    assert capsys.readouterr().err == ""
+
+
 def _http_error(status):
     req = httpx.Request("GET", "https://api.github.com/x")
     return httpx.HTTPStatusError("e", request=req, response=httpx.Response(status, request=req))

@@ -22,8 +22,15 @@ from sidecar.normalizers import (
     is_pragent_comment,
     pragent_signal,
     pragent_signals,
+    unrecognized_comments,
 )
-from sidecar.signals import ReviewSignal, encode_marker, make_id, with_markers
+from sidecar.signals import (
+    ReviewSignal,
+    encode_marker,
+    make_id,
+    with_markers,
+    with_visible_label,
+)
 
 PRAGENT = {
     "id": 111,
@@ -260,6 +267,90 @@ def test_collect_signals_without_marker_uses_local_model():
     assert sig.model == "anthropic/claude"
 
 
+def _published(body: str, signal: ReviewSignal, label: str = "openrouter/x-ai/grok-4.5") -> dict:
+    """Build a comment exactly as fuko publishes it: visible label + marker."""
+    return {
+        "path": signal.file,
+        "line": signal.line,
+        "html_url": "https://github.com/o/r/pull/8#discussion_r999",
+        "user": {"login": "fuko-sybil[bot]"},
+        "body": with_visible_label(body, label, signal),
+    }
+
+
+REVIEW_TIME = ReviewSignal(
+    id="fk_published",
+    file="x.py",
+    line=10,
+    severity="high",
+    severity_source="declared",
+    category="security",
+    backend="pr-agent",
+    model="openrouter/x-ai/grok-4.5",
+)
+
+
+def test_is_pragent_comment_tolerates_publisher_decoration():
+    # fuko prepends a visible model label before posting; the suggestion is no longer
+    # at position 0. Anchoring there dropped 39/39 of fuko's own findings in mepro #1629.
+    decorated = with_visible_label(PRAGENT["body"], "openrouter/x-ai/grok-4.5", REVIEW_TIME)
+    assert not decorated.lstrip().startswith("**Suggestion:**")  # the shape that broke it
+    assert is_pragent_comment(decorated)
+
+
+def test_collect_signals_admits_published_fuko_comment():
+    c = _published(PRAGENT["body"], REVIEW_TIME)
+    [sig] = collect_signals([c], model="ollama/qwen2.5-coder")
+    assert sig.id == "fk_published"
+    assert sig.model == "openrouter/x-ai/grok-4.5"  # marker wins over local config
+    assert sig.severity == "high"
+    assert "modulo condition" in sig.body
+
+
+def test_collect_signals_admits_marker_with_unrecognizable_prose():
+    # The whole point of the marker: prose format may drift arbitrarily, but a
+    # comment fuko wrote must never silently vanish from the signal set.
+    c = _published("Completely unrecognizable prose in a future format.", REVIEW_TIME)
+    [sig] = collect_signals([c], model="ollama/qwen2.5-coder")
+    assert sig.id == "fk_published"
+    assert sig.severity == "high"
+    assert sig.category == "security"
+    assert sig.title == "Completely unrecognizable prose in a future format."
+    assert "fuko-signal" not in sig.body  # marker stripped from the human-facing text
+    assert sig.thread_url == "https://github.com/o/r/pull/8#discussion_r999"
+
+
+def test_collect_signals_marker_admission_does_not_resurrect_coderabbit_chat():
+    # CodeRabbit chat is dropped by design, not by recognizer failure — it stays dropped.
+    assert collect_signals([CODERABBIT_CHAT], model="m") == []
+
+
+def test_prefer_marker_keeps_thread_url_when_marker_lacks_one():
+    bare = REVIEW_TIME.model_copy(update={"thread_url": None})
+    c = _published(PRAGENT["body"], bare)
+    [sig] = collect_signals([c], model="m")
+    assert sig.thread_url == "https://github.com/o/r/pull/8#discussion_r999"
+
+
+def test_unrecognized_comments_reports_only_unclaimed_top_level():
+    human = {
+        "id": 900,
+        "html_url": "u",
+        "user": {"login": "lemehmet"},
+        "body": "looks good to me",
+    }
+    reply = {
+        "id": 901,
+        "in_reply_to_id": 900,
+        "user": {"login": "lemehmet"},
+        "body": "agreed",
+    }
+    dropped = unrecognized_comments(
+        [PRAGENT, COPILOT, _published(PRAGENT["body"], REVIEW_TIME), human, reply], model="m"
+    )
+    assert [c["id"] for c in dropped] == [900]
+
+
 def test_normalize_output_returns_only_pragent_signals(monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "ghtok")
     monkeypatch.setattr(
@@ -277,6 +368,25 @@ def test_normalize_output_returns_only_pragent_signals(monkeypatch):
     assert len(injected) == 1
     assert len(injected[0][0]) == 1
     assert injected[0][1] is None
+
+
+def test_normalize_output_excludes_comments_an_earlier_round_already_marked(monkeypatch):
+    # `findings` from normalize_output feeds the per-run review_runs metric, so a
+    # comment this branch posted AND marked on a previous round must not be counted
+    # again. Before #1629 the strict `**Suggestion:**` anchor excluded these by
+    # accident (a marked comment also carries a visible label); now it is explicit.
+    already_marked = _published(PRAGENT["body"], REVIEW_TIME)
+    fresh = dict(PRAGENT)
+    monkeypatch.setenv("GITHUB_TOKEN", "ghtok")
+    monkeypatch.setattr(
+        PrAgentBackend, "_fetch_review_comments", lambda self, a, p, h: [already_marked, fresh]
+    )
+    monkeypatch.setattr(PrAgentBackend, "_fetch_issue_comments", lambda self, a, p, h: [])
+    monkeypatch.setattr(
+        PrAgentBackend, "_inject_markers", lambda self, a, p, h, pairs, label=None, actor=None: None
+    )
+    sigs = PrAgentBackend().normalize_output(PRRef("o/r", 8, "u"), model="anthropic/claude")
+    assert len(sigs) == 1  # only the fresh one; the marked one is a previous round's
 
 
 def test_normalize_output_degrades_when_fetch_fails(monkeypatch):

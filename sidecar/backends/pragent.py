@@ -352,7 +352,19 @@ class PrAgentBackend:
             print(f"fuko: could not read comments for normalization: {e}", file=sys.stderr)
             return []
 
-        pairs = pragent_signals(comments, model)
+        # Only comments this run produced. A fetched body that ALREADY carries a
+        # fuko marker was written and stamped by an earlier round, so counting it
+        # again would inflate this run's `findings` metric cumulatively. (Before
+        # the #1629 anchor fix, `is_pragent_comment` excluded these by accident,
+        # because a previously-marked comment also carries a visible label that
+        # pushed `**Suggestion:**` off position 0. This makes the intent explicit
+        # rather than a side effect of a bug.) `_inject_markers` applies the same
+        # skip independently, so idempotency does not depend on this filter.
+        pairs = [
+            p
+            for p in pragent_signals(comments, model)
+            if not extract_markers(p["comment"].get("body") or "")
+        ]
         # Stamp role BEFORE marker injection so it lands in the persisted marker.
         for p in pairs:
             p["signal"].role = role
