@@ -332,6 +332,32 @@ def test_prefer_marker_keeps_thread_url_when_marker_lacks_one():
     assert sig.thread_url == "https://github.com/o/r/pull/8#discussion_r999"
 
 
+def test_collect_signals_skips_replies_that_quote_a_finding():
+    # Marker admission makes this reachable: a reply quoting a finding's body carries
+    # that finding's marker verbatim, and would be collected a second time.
+    original = _published(PRAGENT["body"], REVIEW_TIME)
+    quoting_reply = {
+        "id": 777,
+        "in_reply_to_id": 999,
+        "user": {"login": "lemehmet"},
+        "body": "> " + original["body"].replace("\n", "\n> ") + "\n\nFixed in abc1234.",
+    }
+    assert len(collect_signals([original, quoting_reply], model="m")) == 1
+
+
+def test_is_pragent_comment_ignores_a_blockquoted_suggestion():
+    # Quoting a finding is not posting one. Matching inside a blockquote is what
+    # made the duplicate-reply case reachable in the first place.
+    assert not is_pragent_comment("> **Suggestion:** quoted from someone else\n\nmy reply")
+    assert is_pragent_comment("🤖 `m`\n\n**Suggestion:** a real one")
+
+
+def test_unrecognized_comments_excludes_recognized_but_skipped_coderabbit_chat():
+    # CR chat/rate-limit notices are claimed by a recognizer and then dropped on
+    # purpose. Reporting them as unreadable is inaccurate and makes the warning noise.
+    assert unrecognized_comments([CODERABBIT_CHAT], model="m") == []
+
+
 def test_unrecognized_comments_reports_only_unclaimed_top_level():
     human = {
         "id": 900,

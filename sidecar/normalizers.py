@@ -25,7 +25,9 @@ from .signals import (
 )
 
 _PRAGENT_PREFIX = "**Suggestion:**"
-_PRAGENT_ANCHOR_RE = re.compile(rf"^[ \t>]*{re.escape(_PRAGENT_PREFIX)}", re.MULTILINE)
+# Start of any line, but NOT inside a blockquote: `> **Suggestion:**` is someone
+# quoting a finding (a reply, a summary), not posting one.
+_PRAGENT_ANCHOR_RE = re.compile(rf"^[ \t]*{re.escape(_PRAGENT_PREFIX)}", re.MULTILINE)
 _LABEL_RE = re.compile(r"\[([^,\]]+),\s*importance:\s*(\d+)\]")
 
 _PRAGENT_CATEGORY: dict[str, Category] = {
@@ -420,14 +422,32 @@ def normalize_inline_comment(comment: dict, model: str = "") -> ReviewSignal | N
     return _marker_only_signal(comment, body)
 
 
+def is_recognized_author(comment: dict) -> bool:
+    """Return whether some recognizer *claims* ``comment``, finding or not.
+
+    Distinct from "yields a signal": CodeRabbit chat and rate-limit notices are
+    claimed here and then deliberately dropped as non-findings. Callers reporting
+    on unreadable comments need that distinction -- a recognized-and-skipped
+    comment is working as designed, an unclaimed one is the blind spot.
+    """
+    return is_copilot_comment(comment) or is_coderabbit_comment(comment)
+
+
 def collect_signals(comments: list[dict], model: str = "") -> list[ReviewSignal]:
     """Normalize a PR's comments across every recognized reviewer into one list.
+
+    Replies are skipped: they are conversation, not findings. This matters now
+    that markers admit a comment on their own -- a reply quoting the body of a
+    finding carries that finding's marker verbatim, and would otherwise be
+    collected a second time as a duplicate signal.
 
     See :func:`normalize_inline_comment` for the per-comment dispatch. Use
     :func:`unrecognized_comments` to find out what this dropped.
     """
     out: list[ReviewSignal] = []
     for c in comments:
+        if c.get("in_reply_to_id"):
+            continue
         signal = normalize_inline_comment(c, model)
         if signal is not None:
             out.append(signal)
@@ -435,16 +455,19 @@ def collect_signals(comments: list[dict], model: str = "") -> list[ReviewSignal]
 
 
 def unrecognized_comments(comments: list[dict], model: str = "") -> list[dict]:
-    """Return the top-level inline comments that :func:`collect_signals` yields nothing for.
+    """Return the top-level inline comments no recognizer could read at all.
 
     A tool that can silently return a subset of the findings must be able to say so.
-    Replies are excluded: they are conversation, not findings, and are dropped by
-    design rather than by failure.
+    Two exclusions, both "dropped by design rather than by failure": replies are
+    conversation, and a comment whose author *is* recognized (CodeRabbit chat, a
+    rate-limit notice) was understood and then deliberately skipped.
     """
     return [
         c
         for c in comments
-        if not c.get("in_reply_to_id") and normalize_inline_comment(c, model) is None
+        if not c.get("in_reply_to_id")
+        and not is_recognized_author(c)
+        and normalize_inline_comment(c, model) is None
     ]
 
 

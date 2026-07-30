@@ -146,6 +146,10 @@ def _warn_on_dropped_comments(comments: list[dict], model: str) -> None:
     line -- which is the same silence, just louder. A *bot* comment that no
     recognizer can read is the thing that must never pass unnoticed. Reports rather
     than fails: not every bot comment is a finding either.
+
+    ``unrecognized_comments`` already excludes comments a recognizer claimed and
+    then deliberately skipped (CodeRabbit chat, rate-limit notices), so those never
+    reach this warning -- they were understood, not missed.
     """
     from collections import Counter
 
