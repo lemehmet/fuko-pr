@@ -37,6 +37,7 @@ from .fukoconfig import (
 )
 from .pool import order_pool, partition_roles, resolve_models
 from .presets import get_preset
+from .signals import RunReceipt, with_run_receipt
 from .status import escalation_needed
 from .sizing import required_context
 from .stores import get_store
@@ -130,6 +131,22 @@ def fetch_pr_head(pr: PRRef, token: str, api_url: str) -> str:
         resp = client.get(f"{base}/repos/{pr.repo}/pulls/{pr.number}")
         resp.raise_for_status()
         return resp.json()["head"]["sha"]
+
+
+def _head_for_receipts(pr: PRRef, token: str, api_url: str) -> str:
+    """Return the PR's HEAD for run receipts, or ``""`` if it cannot be read.
+
+    Receipts are observability, not control flow, so a failure to resolve HEAD
+    degrades them to un-anchored ("this instance ran, on an unknown commit")
+    rather than failing the review. A consumer treats an empty ``head_sha`` as
+    not covering the current HEAD, which withholds a merge rather than granting
+    one on unverified coverage.
+    """
+    try:
+        return fetch_pr_head(pr, token, api_url)
+    except (httpx.HTTPError, KeyError, ValueError) as e:
+        print(f"fuko: could not resolve HEAD for run receipts: {e}", file=sys.stderr)
+        return ""
 
 
 def fetch_check_runs(pr: PRRef, ref: str, token: str, api_url: str) -> list[dict]:
@@ -423,7 +440,7 @@ def _observe_reviewer_health(pr: PRRef, token: str, api_url: str) -> None:
             check_runs = fetch_check_runs(pr, head, token, api_url)
         except Exception:
             check_runs = None
-        rows = reviewer_states(head, issue_comments, reviews, check_runs)
+        rows = reviewer_states(head, issue_comments, reviews, check_runs, include_fuko=False)
     except Exception as e:
         print(f"fuko: reviewer-health observation skipped: {e}", file=sys.stderr)
         return
@@ -543,9 +560,26 @@ _FRESH_COMMENT_ENV = {
 }
 
 
+def _branch_header_body(label: str, role: str, receipt: RunReceipt) -> str:
+    """Render the visible branch header plus its embedded run receipt."""
+    body = f"🤖 **fuko A/B** — model `{label}`"
+    if role != "active":
+        body += f" · {role}"
+    if receipt.state == "failed":
+        body += " · ⚠️ failed"
+    return with_run_receipt(body, receipt)
+
+
 def _post_branch_header(
-    pr: PRRef, token: str, api_url: str, label: str, role: str = "active"
-) -> str | None:
+    pr: PRRef,
+    token: str,
+    api_url: str,
+    label: str,
+    role: str = "active",
+    *,
+    head_sha: str = "",
+    slot: str | None = None,
+) -> tuple[str | None, int | None]:
     """Post a model-labelled header issue comment for one A/B branch (best-effort).
 
     It gives a human a visible anchor for which model produced the summary that
@@ -554,31 +588,88 @@ def _post_branch_header(
     (e.g. ``· trial``) so a consumer enumerating the branch headers can tell a
     gating (active) instance from a non-gating (trial) one.
 
-    Returns the posting identity's user id as reported by the create-comment
-    response -- the one identity probe that works for App installation tokens
-    (``GET /user`` 403s for them, #57) -- so marker injection can restrict
-    itself to this branch's own comments (#66). ``None`` when nothing was
-    posted or the id is unavailable.
+    The header also carries an ``in_progress`` :class:`RunReceipt` naming
+    ``head_sha``, so the instance is observable as *started* before it has
+    produced anything. :func:`_finalize_branch_header` rewrites it on the way out.
+
+    Returns ``(actor, comment_id)``: the posting identity's user id as reported by
+    the create-comment response -- the one identity probe that works for App
+    installation tokens (``GET /user`` 403s for them, #57) -- so marker injection
+    can restrict itself to this branch's own comments (#66), and the comment id so
+    the receipt can be finalized in place. Either is ``None`` when unavailable.
     """
     if not token:
-        return None
+        return None, None
     base = api_url.rstrip("/")
-    body = f"🤖 **fuko A/B** — model `{label}`"
-    if role != "active":
-        body += f" · {role}"
+    receipt = RunReceipt(label=label, role=role, slot=slot, head_sha=head_sha, state="in_progress")
     try:
         resp = httpx.post(
             f"{base}/repos/{pr.repo}/issues/{pr.number}/comments",
-            json={"body": body},
+            json={"body": _branch_header_body(label, role, receipt)},
             headers=_gh_headers(token),
             timeout=30.0,
         )
         resp.raise_for_status()
-        actor_id = ((resp.json() or {}).get("user") or {}).get("id")
-        return str(actor_id) if actor_id is not None else None
+        payload = resp.json() or {}
+        actor_id = (payload.get("user") or {}).get("id")
+        comment_id = payload.get("id")
+        return (
+            str(actor_id) if actor_id is not None else None,
+            int(comment_id) if comment_id is not None else None,
+        )
     except (httpx.HTTPError, ValueError) as e:
         print(f"fuko: could not post A/B branch header for {label}: {e}", file=sys.stderr)
-        return None
+        return None, None
+
+
+def _finalize_branch_header(
+    pr: PRRef,
+    token: str,
+    api_url: str,
+    comment_id: int | None,
+    label: str,
+    role: str,
+    *,
+    head_sha: str,
+    slot: str | None,
+    result: InvokeResult,
+) -> None:
+    """Rewrite the branch header's receipt with the branch's outcome (best-effort).
+
+    Editing the header in place -- rather than posting a second comment -- keeps
+    exactly one receipt per instance per PR, which is what lets a consumer read
+    coverage without deduplicating.
+
+    A failure here is logged and swallowed: the review itself is already posted by
+    this point, and losing the receipt must never fail a round. The cost of the
+    swallow is a receipt stranded at ``in_progress``, which a consumer reads as
+    *not done* -- the fail-safe direction, since it withholds a merge rather than
+    granting one.
+    """
+    if not token or comment_id is None:
+        return
+    receipt = RunReceipt(
+        label=label,
+        role=role,
+        slot=slot,
+        head_sha=head_sha,
+        state="done" if result.returncode == 0 else "failed",
+        # `provider` is the pool entry that actually answered, so a promoted
+        # backup is attributed to itself rather than to the primary it replaced.
+        model=result.provider or label,
+        detail=result.detail or "",
+    )
+    base = api_url.rstrip("/")
+    try:
+        resp = httpx.patch(
+            f"{base}/repos/{pr.repo}/issues/comments/{comment_id}",
+            json={"body": _branch_header_body(label, role, receipt)},
+            headers=_gh_headers(token),
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError as e:
+        print(f"fuko: could not finalize A/B branch header for {label}: {e}", file=sys.stderr)
 
 
 def _run_pool(
@@ -638,7 +729,13 @@ def _run_pool(
             file=sys.stderr,
         )
 
-        result = replace(backend.invoke(pr, env, tools), provider=model.provider)
+        # The FULL pool-entry identity (`provider/name`), not the bare provider:
+        # a pool entry is provider+name, and a run receipt compares this against
+        # the branch label to tell a promoted backup from the primary. A bare
+        # provider never equals the label, so every successful primary run would
+        # otherwise be misreported as a promotion. Circuit-breaker keys stay bare
+        # (`_cb_trip(model.provider, …)`) — those are per-provider, not per-model.
+        result = replace(backend.invoke(pr, env, tools), provider=label)
         if not result.throttled:
             findings = None
             if result.returncode == 0:
@@ -730,6 +827,7 @@ def _run_compare_branch(
     tools: list[str],
     api_url: str,
     token: str,
+    head_sha: str = "",
 ) -> tuple[str, InvokeResult]:
     """Run one A/B branch end-to-end under its own ``token`` identity.
 
@@ -741,10 +839,18 @@ def _run_compare_branch(
     over instead of losing the round. Returns ``(label, result)``. Any exception
     is captured as a failed result so one branch's failure can never abort or
     corrupt a sibling running concurrently.
+
+    The header's run receipt is finalized on every exit path, including the
+    exception path -- a branch that dies is exactly the case a consumer must be
+    able to see, so it is the one that can least afford to skip the write.
     """
     label = f"{entry.provider}/{entry.name}"
+    slot = _slot_of(entry)
+    comment_id: int | None = None
     try:
-        actor = _post_branch_header(pr, token, api_url, label, entry.role)
+        actor, comment_id = _post_branch_header(
+            pr, token, api_url, label, entry.role, head_sha=head_sha, slot=slot
+        )
         result = _run_pool(
             backend,
             pr,
@@ -760,12 +866,35 @@ def _run_compare_branch(
             token=token,
             api_url=api_url,
             actor=actor,
-            slot=_slot_of(entry),
+            slot=slot,
             role=entry.role,
         )
     except Exception as e:
         print(f"fuko: A/B branch {label} failed in isolation: {e}", file=sys.stderr)
-        return label, InvokeResult(returncode=1, detail=f"{label} errored: {e}")
+        failed = InvokeResult(returncode=1, detail=f"{label} errored: {e}")
+        _finalize_branch_header(
+            pr,
+            token,
+            api_url,
+            comment_id,
+            label,
+            entry.role,
+            head_sha=head_sha,
+            slot=slot,
+            result=failed,
+        )
+        return label, failed
+    _finalize_branch_header(
+        pr,
+        token,
+        api_url,
+        comment_id,
+        label,
+        entry.role,
+        head_sha=head_sha,
+        slot=slot,
+        result=result,
+    )
     return label, result
 
 
@@ -781,6 +910,7 @@ def _review_compare(
     api_url: str,
     cooled: set[str],
     required: int | None,
+    head_sha: str = "",
 ) -> InvokeResult:
     """Review ``pr`` once per reviewer (active + trial) model for an A/B comparison.
 
@@ -842,6 +972,7 @@ def _review_compare(
                     tools,
                     api_url,
                     branch_token,
+                    head_sha,
                 )
                 for entry, branch_token in zip(reviewers, identities)
             ]
@@ -850,25 +981,51 @@ def _review_compare(
         outcomes = []
         for index, entry in enumerate(reviewers):
             label = f"{entry.provider}/{entry.name}"
+            slot = _slot_of(entry)
             print(f"fuko: A/B branch {index + 1}/{len(reviewers)}: {label}", file=sys.stderr)
-            actor = _post_branch_header(pr, token, api_url, label, entry.role)
-            result = _run_pool(
-                backend,
+            comment_id: int | None = None
+            # Isolate the branch exactly as the concurrent path does, with the
+            # header post INSIDE the guard: it only handles httpx/ValueError
+            # itself, so any other exception would escape the loop and the
+            # remaining branches would never run -- the very thing this guard
+            # exists to prevent. A crash before the header posts leaves
+            # `comment_id` None, which makes the finalize below a no-op; there is
+            # no receipt to rewrite because none was ever created.
+            try:
+                actor, comment_id = _post_branch_header(
+                    pr, token, api_url, label, entry.role, head_sha=head_sha, slot=slot
+                )
+                result = _run_pool(
+                    backend,
+                    pr,
+                    knowledge,
+                    gh_env,
+                    review,
+                    [entry, *backups],
+                    cooled,
+                    required,
+                    tools=tools,
+                    fresh_comment=True,
+                    compare=True,
+                    token=token,
+                    api_url=api_url,
+                    actor=actor,
+                    slot=slot,
+                    role=entry.role,
+                )
+            except Exception as e:
+                print(f"fuko: A/B branch {label} failed in isolation: {e}", file=sys.stderr)
+                result = InvokeResult(returncode=1, detail=f"{label} errored: {e}")
+            _finalize_branch_header(
                 pr,
-                knowledge,
-                gh_env,
-                review,
-                [entry, *backups],
-                cooled,
-                required,
-                tools=tools,
-                fresh_comment=True,
-                compare=True,
-                token=token,
-                api_url=api_url,
-                actor=actor,
-                slot=_slot_of(entry),
-                role=entry.role,
+                token,
+                api_url,
+                comment_id,
+                label,
+                entry.role,
+                head_sha=head_sha,
+                slot=slot,
+                result=result,
             )
             outcomes.append((label, result))
 
@@ -974,6 +1131,7 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
             api_url,
             cooled,
             required,
+            _head_for_receipts(pr, token, api_url),
         )
     else:
         result = _run_pool(
