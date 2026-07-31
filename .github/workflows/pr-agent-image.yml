@@ -7,11 +7,17 @@
 #
 # After it pushes, set in your .fuko.toml:
 #   [review]
-#   image = "ghcr.io/<owner>/pr-agent:0.39.0"
+#   image = "ghcr.io/<owner>/pr-agent:0.41.0"
 # and either make the GHCR package public or `docker login ghcr.io` on your runners.
 #
 # Action refs are pinned to commit SHAs (with a "# vX.Y.Z" comment) to match this
 # repo's security posture. These versions run on Node 24 — see issue #49.
+#
+# NOTE: upstream's self-reported version lags its git tag by one release — an
+# image built from v0.41.0 reports `0.40.0` from `importlib.metadata`, just as
+# v0.40.0 reported `0.39.0`. Verify a build by CONTENT (a feature only the
+# target release has), not by the version string, or a correct build reads as
+# the wrong tag.
 
 name: build pr-agent image
 
@@ -19,8 +25,8 @@ on:
   workflow_dispatch:
     inputs:
       pr_agent_ref:
-        description: "the-pr-agent/pr-agent git tag to build (e.g. v0.39.0)"
-        default: "v0.39.0"
+        description: "the-pr-agent/pr-agent git tag to build (e.g. v0.41.0)"
+        default: "v0.41.0"
         required: true
 
 jobs:

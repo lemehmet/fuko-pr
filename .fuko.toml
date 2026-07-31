@@ -1,5 +1,5 @@
 [review]
-image = "ghcr.io/lemehmet/pr-agent:0.39.0@sha256:8a8cfa4fb1a71fca35f586c82666ef55760262ac36f851a359cf08076ab1e094"
+image = "ghcr.io/lemehmet/pr-agent:0.41.0@sha256:7341dc6214be964534ce3e68fc73143f3d642240829fe66894b87864db417223"
 tool_timeout = 600
 optional_tools = ["improve"]
 
