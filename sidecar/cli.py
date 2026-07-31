@@ -27,7 +27,9 @@ def main() -> None:
     p_signals.add_argument("--config", default=".fuko.toml", help="path to .fuko.toml")
 
     p_status = sub.add_parser(
-        "status", help="emit per-reviewer review state on a PR's HEAD as JSON"
+        "status",
+        help="emit per-reviewer review state on a PR's HEAD as JSON "
+        "(external bots plus fuko's own instances)",
     )
     p_status.add_argument("--pr-url", required=True, help="full pull request URL")
 

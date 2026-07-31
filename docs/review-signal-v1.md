@@ -57,8 +57,50 @@ comment.
   (`_⚠️ Potential issue_ | _🔴 Critical_`); its chat replies and rate-limit
   notices carry no classification and are skipped. Severity/category are `declared`.
 
+## Run receipts (`fuko-run:v1`) — coverage, not findings
+
+A Review Signal says *what a reviewer found*. It cannot say *whether a reviewer
+ran*: an instance that reviewed the HEAD and found nothing emits exactly what an
+instance that never started emits — nothing. A consumer gating a merge on "the
+reviewer went quiet" therefore cannot tell review coverage from a missing API
+key, a throttled provider, or a branch that crashed. The ambiguity resolves in
+the unsafe direction: it merges unreviewed code.
+
+So each fuko branch writes a **run receipt** into its own header comment:
+
+```
+<!-- fuko-run:v1 {"v":1,"label":"openrouter/x-ai/grok-4.5","role":"active",
+     "head_sha":"def5678…","state":"done","model":"openrouter/x-ai/grok-4.5"} -->
+```
+
+| field | meaning |
+|---|---|
+| `label` | `provider/name` of the branch's configured **primary** entry |
+| `role` | `active` (gating), `trial` (surfaced, non-gating), `backup` |
+| `slot` | A/B slot, when the branch occupies one |
+| `head_sha` | the PR HEAD this branch reviewed |
+| `state` | `in_progress` → `done` \| `failed` |
+| `model` | who **actually** answered — differs from `label` when a backup was promoted |
+| `findings` | signals produced, when counted |
+| `detail` | human-readable outcome or failure reason |
+
+The receipt is written when the branch starts and **rewritten in place** when it
+ends, so there is exactly one receipt per instance per PR — a consumer reads
+coverage without deduplicating.
+
+`fuko status` surfaces these as `fuko:<label>` rows alongside the CodeRabbit and
+Copilot rows. Every ambiguous case reports as *not* `done`:
+
+- a receipt stuck at `in_progress` (the branch died before finalizing) stays
+  `in_progress`, so the consumer's own timeout governs rather than an implied
+  never-ending run;
+- a receipt for an older commit, or one with no `head_sha` (HEAD was
+  unresolvable at run time), reports `pending`;
+- a `failed` receipt reports `unavailable`, which is a **degraded** state, so
+  `escalation_needed` fires and backups are promoted next round.
+
 ## Stability
 
 `v1` is additive-only: new optional fields may appear; existing fields keep their
-meaning. A breaking change bumps the version (`fuko-signal:v2`) and consumers can
-branch on `v`.
+meaning. A breaking change bumps the version (`fuko-signal:v2` / `fuko-run:v2`)
+and consumers can branch on `v`.

@@ -26,6 +26,12 @@ _MARKER_TAG = "fuko-signal:v1"
 _MARKER_RE = re.compile(r"<!--\s*fuko-signal:v1\s+(.*?)\s*-->")
 _MARKER_STRIP_RE = re.compile(r"\n*<!--\s*fuko-signal:v1\s+.*?\s*-->\n*")
 
+_RUN_TAG = "fuko-run:v1"
+_RUN_RE = re.compile(r"<!--\s*fuko-run:v1\s+(.*?)\s*-->")
+_RUN_STRIP_RE = re.compile(r"\n*<!--\s*fuko-run:v1\s+.*?\s*-->\n*")
+
+RunState = Literal["in_progress", "done", "failed"]
+
 
 class ReviewSignal(BaseModel):
     """A single normalized review finding."""
@@ -57,6 +63,67 @@ class ReviewSignal(BaseModel):
         ),
     )
     kb_refs: list[str] = Field(default_factory=list)
+
+
+class RunReceipt(BaseModel):
+    """A per-branch record that a fuko instance ran against a specific HEAD.
+
+    A Review Signal says *what a reviewer found*; a receipt says *whether that
+    reviewer ran at all*. Without one, a fuko instance that found nothing is
+    indistinguishable from one that never started -- both produce zero signals --
+    so a consumer gating a merge on "the instance went quiet" cannot tell review
+    coverage from a silently broken key, a throttled provider, or a crashed
+    branch. That ambiguity is unsafe in exactly one direction: it merges
+    unreviewed code.
+
+    The receipt travels in the branch's own header issue comment, written when the
+    branch starts (``in_progress``) and rewritten in place when it ends, so each
+    instance has exactly one receipt per PR that a consumer can read alongside
+    :func:`sidecar.status.reviewer_states`.
+    """
+
+    v: int = 1
+    label: str = Field(description="`provider/name` of the branch's configured PRIMARY entry.")
+    role: str = Field(
+        default="active",
+        description=(
+            "The branch's configured role: 'active' (gating), 'trial' (surfaced but "
+            "non-gating), or 'backup'. Mirrors ReviewSignal.role so a consumer can "
+            "apply one gating rule to findings and coverage alike."
+        ),
+    )
+    slot: str | None = Field(
+        default=None, description="A/B slot identifier, when the branch occupies one."
+    )
+    head_sha: str = Field(
+        default="",
+        description=(
+            "The PR HEAD this branch reviewed. A receipt for an older HEAD means the "
+            "instance has not yet reviewed the current one -- the same staleness rule "
+            "the CodeRabbit/Copilot rows use."
+        ),
+    )
+    state: RunState = Field(
+        default="in_progress",
+        description=(
+            "'in_progress' once the branch starts, then 'done' (a review was posted) "
+            "or 'failed' (every model in the branch's pool, primary plus backups, was "
+            "exhausted). A receipt stuck at 'in_progress' means the branch died before "
+            "it could finalize -- which reads as NOT done, the fail-safe direction."
+        ),
+    )
+    model: str = Field(
+        default="",
+        description=(
+            "`provider/name` that actually produced the review, which differs from "
+            "`label` when the primary throttled and a backup was promoted. This is the "
+            "attribution a consumer needs to score a model's findings."
+        ),
+    )
+    findings: int | None = Field(
+        default=None, description="Signals this branch produced; None when not counted."
+    )
+    detail: str = Field(default="", description="Human-readable outcome or failure reason.")
 
 
 def make_id(*parts: str) -> str:
@@ -94,6 +161,38 @@ def strip_markers(text: str) -> str:
 def with_marker(body: str, signal: ReviewSignal) -> str:
     """Return ``body`` with ``signal``'s marker appended, replacing any existing marker."""
     return strip_markers(body).rstrip() + "\n\n" + encode_marker(signal)
+
+
+def encode_run_marker(receipt: RunReceipt) -> str:
+    """Render ``receipt`` as an invisible HTML-comment marker.
+
+    Escapes ``>`` exactly as :func:`encode_marker` does, so no field value can
+    close the HTML comment early.
+    """
+    payload = receipt.model_dump_json().replace(">", "\\u003e")
+    return f"<!-- {_RUN_TAG} {payload} -->"
+
+
+def extract_run_receipts(text: str) -> list[RunReceipt]:
+    """Parse all fuko-run receipts from ``text``, skipping malformed ones."""
+    out: list[RunReceipt] = []
+    for m in _RUN_RE.finditer(text or ""):
+        try:
+            out.append(RunReceipt.model_validate_json(m.group(1)))
+        except ValueError:
+            continue
+    return out
+
+
+def with_run_receipt(body: str, receipt: RunReceipt) -> str:
+    """Return ``body`` carrying ``receipt``, replacing any receipt already present.
+
+    Replacing rather than appending is what keeps the branch header rewritable in
+    place: the same comment is edited from ``in_progress`` to its final state, so a
+    consumer always reads exactly one receipt per instance instead of having to
+    pick the newest of a growing pile.
+    """
+    return _RUN_STRIP_RE.sub("", body or "").rstrip() + "\n\n" + encode_run_marker(receipt)
 
 
 def with_markers(body: str, signals: list[ReviewSignal]) -> str:

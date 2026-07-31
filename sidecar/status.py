@@ -1,10 +1,17 @@
 """Per-reviewer review STATE on a PR's current HEAD — the normalized "done" signal.
 
-`fuko status` answers *has each external reviewer finished reviewing the current
-HEAD?* for the bots a review loop gates on (CodeRabbit, Copilot). It is the state
-counterpart to `fuko signals` (which answers *what did they find?*). Only
-**observable** artifacts are read — fuko makes no time judgments like
-"unresponsive"; a consumer applies its own timeout to a `pending` state.
+`fuko status` answers *has each reviewer finished reviewing the current HEAD?*
+for the bots a review loop gates on. It is the state counterpart to
+`fuko signals` (which answers *what did they find?*). Only **observable**
+artifacts are read — fuko makes no time judgments like "unresponsive"; a
+consumer applies its own timeout to a `pending` state.
+
+Two kinds of reviewer are reported. **External** bots (CodeRabbit, Copilot) are
+read from the artifacts they happen to leave behind, which is why each needs its
+own heuristic below. **fuko's own instances** are read from the run receipts
+they write deliberately (`fuko_states`), so their coverage is a recorded fact
+rather than an inference — closing the gap where an instance that never started
+was indistinguishable from one that reviewed and found nothing.
 
 CodeRabbit's completion is taken from its **check-run** on the HEAD commit when one
 is present ("Review in progress" → completed) — the only signal that doesn't race
@@ -19,6 +26,8 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping
 from typing import Literal
+
+from .signals import RunReceipt, extract_run_receipts
 
 State = Literal["done", "pending", "in_progress", "rate_limited", "paused", "unavailable", "none"]
 
@@ -242,22 +251,93 @@ def copilot_state(
     )
 
 
+def fuko_states(head_sha: str, issue_comments: list[dict]) -> list[dict]:
+    """Return one state row per fuko instance, from the run receipts on this PR.
+
+    fuko's own instances were historically invisible to ``fuko status``: they are
+    not external reviewers, so nothing reported whether they had run. That left a
+    consumer unable to distinguish "this instance reviewed HEAD and found nothing"
+    from "this instance never started" -- both show up as zero signals -- and the
+    ambiguity resolves in the unsafe direction, merging unreviewed code.
+
+    Each branch writes a :class:`~sidecar.signals.RunReceipt` into its header
+    comment (see :func:`sidecar.runner._post_branch_header`), so this reads that
+    back. Rows carry the extra ``role`` key -- a ``trial`` instance is reported
+    but must not gate -- and use backend ``fuko:<label>`` so they never collide
+    with the CodeRabbit/Copilot rows.
+
+    States map so that only a receipt finalized as ``done`` *on this HEAD* reads
+    as ``done``:
+
+    - ``done`` -- reviewed this HEAD.
+    - ``in_progress`` -- started this HEAD, no outcome recorded yet. Also what a
+      branch that died mid-run leaves behind, so a consumer's own timeout governs
+      rather than an implied never-ending run (the same choice
+      :func:`coderabbit_state` makes).
+    - ``unavailable`` -- the branch finalized as failed: every model in its pool
+      was exhausted. A DEGRADED state, so :func:`escalation_needed` fires on it.
+    - ``pending`` -- the newest receipt is for an older commit.
+
+    Only the newest receipt per instance is reported. Receipts are rewritten in
+    place, but a force-push or a re-run can leave an older one behind, and later
+    comments are the later runs.
+    """
+    latest: dict[str, RunReceipt] = {}
+    for comment in issue_comments:
+        for receipt in extract_run_receipts(comment.get("body", "") or ""):
+            latest[receipt.label] = receipt
+
+    rows: list[dict] = []
+    for label, receipt in latest.items():
+        on_head = _sha_match(receipt.head_sha, head_sha) if receipt.head_sha else False
+        if receipt.state == "failed":
+            state: State = "unavailable"
+            detail = receipt.detail or "every model in the branch pool was exhausted"
+        elif not on_head:
+            state = "pending"
+            detail = f"latest run covers {receipt.head_sha[:7] or 'an unknown commit'}, not HEAD"
+        elif receipt.state == "done":
+            state = "done"
+            # A promoted backup answered under a different model than the branch
+            # is named for; say so, since it changes whose findings these are.
+            promoted = receipt.model and receipt.model != label
+            detail = f"reviewed HEAD as {receipt.model}" if promoted else "reviewed HEAD"
+        else:
+            state = "in_progress"
+            detail = "started on HEAD, no outcome recorded yet"
+        row = _row(f"fuko:{label}", state, receipt.head_sha or None, detail)
+        row["role"] = receipt.role
+        rows.append(row)
+    return sorted(rows, key=lambda r: r["backend"])
+
+
 def reviewer_states(
     head_sha: str,
     issue_comments: list[dict],
     reviews: list[dict],
     check_runs: list[dict] | None = None,
+    *,
+    include_fuko: bool = True,
 ) -> list[dict]:
-    """Return the normalized state of each gated reviewer (CodeRabbit, Copilot).
+    """Return the normalized state of each reviewer on ``head_sha``.
 
-    ``check_runs`` are the check-runs fetched for ``head_sha``; CodeRabbit's completion
-    is read from its own check there when present (issue #17). Optional so existing
-    callers and tests that only have comment/review data still work via the fallback.
+    Covers the external bots (CodeRabbit, Copilot) and, when ``include_fuko`` is
+    set, fuko's own instances via :func:`fuko_states`. ``check_runs`` are the
+    check-runs fetched for ``head_sha``; CodeRabbit's completion is read from its
+    own check there when present (issue #17). Both are optional so existing
+    callers and tests that only have comment/review data still work.
+
+    ``include_fuko`` exists for one caller: :func:`sidecar.runner._observe_reviewer_health`
+    records *external* reviewer health to decide backup promotion, and folding
+    fuko's own instances into that would let fuko escalate in response to itself.
     """
-    return [
+    rows = [
         coderabbit_state(head_sha, issue_comments, reviews, check_runs),
         copilot_state(head_sha, reviews, issue_comments),
     ]
+    if include_fuko:
+        rows.extend(fuko_states(head_sha, issue_comments))
+    return rows
 
 
 def escalation_needed(rows: Iterable[Mapping]) -> bool:

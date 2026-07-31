@@ -6,7 +6,7 @@ import pytest
 from sidecar import runner
 from sidecar.backends import pragent
 from sidecar.backends.base import InvokeResult, PRRef
-from sidecar.fukoconfig import CompareModel, KnowledgeConfig
+from sidecar.fukoconfig import CompareModel, KnowledgeConfig, ReviewConfig, ReviewModel
 
 
 class _Resp:
@@ -740,7 +740,7 @@ def test_review_compare_runs_each_model_fresh_without_describe(monkeypatch, tmp_
     monkeypatch.setattr(
         runner,
         "_post_branch_header",
-        lambda pr, token, api, label, role="active": headers.append(label),
+        lambda pr, token, api, label, role="active", **k: (headers.append(label), (None, None))[1],
     )
 
     calls = []
@@ -806,7 +806,7 @@ def test_review_compare_is_green_when_any_branch_posts(
     )
     monkeypatch.setenv("ANTHROPIC_KEY", "k")
     _stub_compare_io(monkeypatch)
-    monkeypatch.setattr(runner, "_post_branch_header", lambda *a: None)
+    monkeypatch.setattr(runner, "_post_branch_header", lambda *a, **k: (None, None))
 
     rcs = iter(returncodes)
 
@@ -834,7 +834,7 @@ def test_review_compare_fails_when_describe_is_only_tool(monkeypatch, tmp_path):
     )
     monkeypatch.setenv("ANTHROPIC_KEY", "k")
     _stub_compare_io(monkeypatch)
-    monkeypatch.setattr(runner, "_post_branch_header", lambda *a: None)
+    monkeypatch.setattr(runner, "_post_branch_header", lambda *a, **k: (None, None))
 
     class FakeBackend:
         def build_env(self, preset, model, knowledge, tools):
@@ -965,7 +965,7 @@ def test_review_unified_models_run_compare_with_backup_failover(monkeypatch, tmp
     monkeypatch.setenv("ANTHROPIC_KEY", "k")
     monkeypatch.setenv("OPENROUTER_KEY", "k")
     _stub_compare_io(monkeypatch)
-    monkeypatch.setattr(runner, "_post_branch_header", lambda *a: None)
+    monkeypatch.setattr(runner, "_post_branch_header", lambda *a, **k: (None, None))
     monkeypatch.setattr(runner, "_cb_trip", lambda *a: None)
 
     seen = []
@@ -1063,7 +1063,10 @@ def test_trial_model_runs_as_branch_and_flows_role(monkeypatch, tmp_path):
     monkeypatch.setattr(
         runner,
         "_post_branch_header",
-        lambda pr, token, api, label, role="active": headers.append((label, role)),
+        lambda pr, token, api, label, role="active", **k: (
+            headers.append((label, role)),
+            (None, None),
+        )[1],
     )
     seen = []
 
@@ -1254,7 +1257,10 @@ def test_review_compare_runs_concurrently_under_per_branch_identity(monkeypatch,
     monkeypatch.setattr(
         runner,
         "_post_branch_header",
-        lambda pr, token, api, label, role="active": headers.append((label, token)),
+        lambda pr, token, api, label, role="active", **k: (
+            headers.append((label, token)),
+            (None, None),
+        )[1],
     )
 
     seen = []  # one record per branch: the token it ran/normalized under
@@ -1298,7 +1304,7 @@ def test_review_compare_concurrent_branch_gets_own_github_user_token(monkeypatch
     monkeypatch.setenv("TOK_B", "tok-b")
     monkeypatch.setenv("ANTHROPIC_KEY", "antkey")
     _stub_compare_io(monkeypatch)
-    monkeypatch.setattr(runner, "_post_branch_header", lambda *a: None)
+    monkeypatch.setattr(runner, "_post_branch_header", lambda *a, **k: (None, None))
 
     user_tokens = []
 
@@ -1342,7 +1348,10 @@ def test_review_compare_falls_back_to_sequential_shared_token(monkeypatch, tmp_p
     monkeypatch.setattr(
         runner,
         "_post_branch_header",
-        lambda pr, token, api, label, role="active": header_tokens.append(token),
+        lambda pr, token, api, label, role="active", **k: (
+            header_tokens.append(token),
+            (None, None),
+        )[1],
     )
 
     invoke_tokens = []
@@ -1383,7 +1392,7 @@ def test_review_compare_concurrent_branch_failure_is_isolated(monkeypatch, tmp_p
     monkeypatch.setenv("TOK_B", "tok-b")
     monkeypatch.setenv("ANTHROPIC_KEY", "antkey")
     _stub_compare_io(monkeypatch)
-    monkeypatch.setattr(runner, "_post_branch_header", lambda *a: None)
+    monkeypatch.setattr(runner, "_post_branch_header", lambda *a, **k: (None, None))
 
     class FakeBackend:
         def build_env(self, preset, model, knowledge, tools):
@@ -1532,7 +1541,9 @@ def test_post_branch_header_returns_acting_identity(monkeypatch):
             return {"id": 1, "user": {"login": "fuko-gray[bot]", "id": 4242}}
 
     monkeypatch.setattr(runner.httpx, "post", lambda *a, **k: _Resp())
-    actor = runner._post_branch_header(PRRef("o/r", 8, "u"), "tok", "https://api.github.com", "p/m")
+    actor, _ = runner._post_branch_header(
+        PRRef("o/r", 8, "u"), "tok", "https://api.github.com", "p/m"
+    )
     assert actor == "4242"
 
 
@@ -1541,7 +1552,9 @@ def test_post_branch_header_none_on_failure(monkeypatch):
         raise runner.httpx.ConnectError("down")
 
     monkeypatch.setattr(runner.httpx, "post", boom)
-    actor = runner._post_branch_header(PRRef("o/r", 8, "u"), "tok", "https://api.github.com", "p/m")
+    actor, _ = runner._post_branch_header(
+        PRRef("o/r", 8, "u"), "tok", "https://api.github.com", "p/m"
+    )
     assert actor is None
 
 
@@ -1556,7 +1569,7 @@ def test_compare_branch_threads_actor_to_normalize(monkeypatch, tmp_path):
     monkeypatch.setattr(
         runner,
         "_post_branch_header",
-        lambda pr, token, api, label, role="active": f"actor-of-{token}",
+        lambda pr, token, api, label, role="active", **k: (f"actor-of-{token}", None),
     )
 
     seen = []
@@ -1586,3 +1599,197 @@ def test_compare_branch_threads_actor_to_normalize(monkeypatch, tmp_path):
     assert runner.review("https://github.com/o/r/pull/7", str(cfg)).returncode == 0
     assert sorted(s["actor"] for s in seen) == ["actor-of-tok-a", "actor-of-tok-b"]
     assert all(s["actor"] == f"actor-of-{s['token']}" for s in seen)
+
+
+# --- run receipts -------------------------------------------------------------
+
+
+def _review_config_for_receipts():
+    return ReviewConfig(tool_timeout=5)
+
+
+def _receipt_of(body):
+    from sidecar.signals import extract_run_receipts
+
+    return extract_run_receipts(body)[0]
+
+
+def test_branch_header_carries_an_in_progress_receipt(monkeypatch):
+    posted = {}
+
+    def fake_post(url, json, headers, timeout):
+        posted["body"] = json["body"]
+        return _Resp({"user": {"id": 7}, "id": 99})
+
+    monkeypatch.setattr(runner.httpx, "post", fake_post)
+    actor, comment_id = runner._post_branch_header(
+        PRRef("o/r", 8, "u"),
+        "tok",
+        "https://api.github.com",
+        "openrouter/grok",
+        "trial",
+        head_sha="abc123",
+        slot="A",
+    )
+    assert (actor, comment_id) == ("7", 99)
+    receipt = _receipt_of(posted["body"])
+    assert receipt.state == "in_progress"
+    assert receipt.head_sha == "abc123"
+    assert receipt.role == "trial"
+    assert receipt.slot == "A"
+    # The human-visible header survives alongside the machine payload.
+    assert "openrouter/grok" in posted["body"]
+
+
+def test_finalize_rewrites_the_receipt_in_place(monkeypatch):
+    patched = {}
+
+    def fake_patch(url, json, headers, timeout):
+        patched.update(url=url, body=json["body"])
+        return _Resp({})
+
+    monkeypatch.setattr(runner.httpx, "patch", fake_patch)
+    runner._finalize_branch_header(
+        PRRef("o/r", 8, "u"),
+        "tok",
+        "https://api.github.com",
+        99,
+        "openrouter/grok",
+        "active",
+        head_sha="abc123",
+        slot=None,
+        result=InvokeResult(returncode=0, detail="ok", provider="openrouter/grok"),
+    )
+    assert patched["url"].endswith("/repos/o/r/issues/comments/99")
+    receipt = _receipt_of(patched["body"])
+    assert receipt.state == "done"
+    # Exactly one receipt after the rewrite — not an accumulating pile.
+    from sidecar.signals import extract_run_receipts
+
+    assert len(extract_run_receipts(patched["body"])) == 1
+
+
+def test_finalize_attributes_a_promoted_backup_to_the_model_that_answered(monkeypatch):
+    patched = {}
+    monkeypatch.setattr(
+        runner.httpx,
+        "patch",
+        lambda url, json, headers, timeout: (patched.update(body=json["body"]), _Resp({}))[1],
+    )
+    runner._finalize_branch_header(
+        PRRef("o/r", 8, "u"),
+        "tok",
+        "https://api.github.com",
+        99,
+        "openrouter/primary",
+        "active",
+        head_sha="abc123",
+        slot=None,
+        result=InvokeResult(returncode=0, provider="ollama/backup"),
+    )
+    assert _receipt_of(patched["body"]).model == "ollama/backup"
+
+
+def test_finalize_marks_an_exhausted_pool_as_failed(monkeypatch):
+    patched = {}
+    monkeypatch.setattr(
+        runner.httpx,
+        "patch",
+        lambda url, json, headers, timeout: (patched.update(body=json["body"]), _Resp({}))[1],
+    )
+    runner._finalize_branch_header(
+        PRRef("o/r", 8, "u"),
+        "tok",
+        "https://api.github.com",
+        99,
+        "openrouter/grok",
+        "active",
+        head_sha="abc123",
+        slot=None,
+        result=InvokeResult(returncode=1, detail="all providers throttled"),
+    )
+    assert _receipt_of(patched["body"]).state == "failed"
+    assert "⚠️ failed" in patched["body"]  # visible to a human too, not just machines
+
+
+def test_finalize_is_a_noop_without_a_comment_id(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("must not PATCH without a comment id")
+
+    monkeypatch.setattr(runner.httpx, "patch", boom)
+    runner._finalize_branch_header(
+        PRRef("o/r", 8, "u"),
+        "tok",
+        "https://api.github.com",
+        None,
+        "p/m",
+        "active",
+        head_sha="abc",
+        slot=None,
+        result=InvokeResult(returncode=0),
+    )
+
+
+def test_finalize_swallows_api_failures(monkeypatch, capsys):
+    """Losing a receipt must never fail a round whose review already posted."""
+
+    def boom(*a, **k):
+        raise httpx.HTTPError("nope")
+
+    monkeypatch.setattr(runner.httpx, "patch", boom)
+    runner._finalize_branch_header(
+        PRRef("o/r", 8, "u"),
+        "tok",
+        "https://api.github.com",
+        99,
+        "p/m",
+        "active",
+        head_sha="abc",
+        slot=None,
+        result=InvokeResult(returncode=0),
+    )
+    assert "could not finalize" in capsys.readouterr().err
+
+
+def test_a_dying_branch_still_finalizes_its_receipt(monkeypatch):
+    """The case a consumer most needs to see is the one that can least afford to skip the write."""
+    monkeypatch.setattr(runner, "_post_branch_header", lambda *a, **k: ("actor", 42))
+    finalized = {}
+    monkeypatch.setattr(
+        runner,
+        "_finalize_branch_header",
+        lambda *a, **k: finalized.update(result=k["result"], comment_id=a[3]),
+    )
+
+    def explode(*a, **k):
+        raise RuntimeError("branch died")
+
+    monkeypatch.setattr(runner, "_run_pool", explode)
+    label, result = runner._run_compare_branch(
+        None,
+        PRRef("o/r", 8, "u"),
+        "",
+        _review_config_for_receipts(),
+        ReviewModel(provider="openrouter", name="grok"),
+        [],
+        set(),
+        None,
+        ["review"],
+        "https://api.github.com",
+        "tok",
+        "headsha",
+    )
+    assert result.returncode == 1
+    assert finalized["comment_id"] == 42
+    assert finalized["result"].returncode == 1
+
+
+def test_head_for_receipts_degrades_to_empty(monkeypatch, capsys):
+    """An unresolvable HEAD must degrade the receipt, not fail the review."""
+
+    def boom(*a, **k):
+        raise httpx.HTTPError("nope")
+
+    monkeypatch.setattr(runner, "fetch_pr_head", boom)
+    assert runner._head_for_receipts(PRRef("o/r", 8, "u"), "tok", "https://api.github.com") == ""
+    assert "could not resolve HEAD" in capsys.readouterr().err

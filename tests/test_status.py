@@ -1,6 +1,14 @@
 """Tests for per-reviewer state detection (fuko status), grounded in survey forms."""
 
-from sidecar.status import coderabbit_state, copilot_state, reviewer_states
+from sidecar.signals import RunReceipt, with_run_receipt
+from sidecar.status import (
+    DEGRADED_STATES,
+    coderabbit_state,
+    copilot_state,
+    escalation_needed,
+    fuko_states,
+    reviewer_states,
+)
 
 HEAD = "def5678abc0000000000000000000000000000aa"
 
@@ -384,3 +392,120 @@ def test_copilot_non_quota_bodies_stay_pending():
         }
     ]
     assert copilot_state(HEAD, reviews)["state"] == "pending"
+
+
+# --- fuko's own instances (run receipts) -------------------------------------
+#
+# The gap these close: an instance that reviewed HEAD and found nothing looks
+# identical to one that never started — both produce zero signals. Every case
+# below asserts that the two are now distinguishable, and that the ambiguous
+# ones resolve AWAY from "done" (which would merge unreviewed code).
+
+
+def _receipt_comment(**kw):
+    """An instance's header comment carrying one run receipt."""
+    fields = {"label": "openrouter/x-ai/grok-4.5", "head_sha": HEAD, "state": "done"}
+    fields.update(kw)
+    return {
+        "user": {"login": "fuko-sybil[bot]"},
+        "body": with_run_receipt("🤖 **fuko A/B** — model `x`", RunReceipt(**fields)),
+    }
+
+
+def test_fuko_instance_reports_done_on_head():
+    rows = fuko_states(HEAD, [_receipt_comment()])
+    assert [r["backend"] for r in rows] == ["fuko:openrouter/x-ai/grok-4.5"]
+    assert rows[0]["state"] == "done"
+    assert rows[0]["head_reviewed"] == HEAD
+    assert rows[0]["role"] == "active"
+
+
+def test_fuko_instance_that_never_ran_is_absent_not_done():
+    """No receipt at all must not read as a clean pass.
+
+    This is the whole point: silence from an instance that never started is not
+    evidence of a clean review, so it yields no row rather than a `done` one.
+    """
+    assert fuko_states(HEAD, [{"user": {"login": "someone"}, "body": "hi"}]) == []
+
+
+def test_fuko_instance_still_running_is_in_progress():
+    rows = fuko_states(HEAD, [_receipt_comment(state="in_progress")])
+    assert rows[0]["state"] == "in_progress"
+
+
+def test_fuko_branch_that_died_mid_run_stays_in_progress_not_done():
+    """A branch killed before finalizing leaves an `in_progress` receipt.
+
+    It must not decay to `done`; the consumer's own timeout governs instead.
+    """
+    rows = fuko_states(HEAD, [_receipt_comment(state="in_progress")])
+    assert rows[0]["state"] != "done"
+
+
+def test_fuko_failed_branch_is_degraded_and_escalates():
+    rows = fuko_states(HEAD, [_receipt_comment(state="failed", detail="all providers throttled")])
+    assert rows[0]["state"] == "unavailable"
+    assert rows[0]["state"] in DEGRADED_STATES
+    assert escalation_needed(rows) is True
+    assert "throttled" in rows[0]["detail"]
+
+
+def test_fuko_receipt_for_an_older_head_is_pending():
+    rows = fuko_states(HEAD, [_receipt_comment(head_sha="0" * 40)])
+    assert rows[0]["state"] == "pending"
+
+
+def test_fuko_receipt_without_a_head_never_reads_as_done():
+    """An un-anchored receipt (HEAD unresolvable at run time) withholds, not grants."""
+    rows = fuko_states(HEAD, [_receipt_comment(head_sha="")])
+    assert rows[0]["state"] == "pending"
+
+
+def test_fuko_trial_role_is_reported_so_a_consumer_can_skip_gating():
+    rows = fuko_states(HEAD, [_receipt_comment(role="trial")])
+    assert rows[0]["role"] == "trial"
+    assert rows[0]["state"] == "done"
+
+
+def test_fuko_promoted_backup_is_attributed_to_the_model_that_answered():
+    rows = fuko_states(HEAD, [_receipt_comment(model="ollama-cloud/glm-5.2:cloud")])
+    assert "ollama-cloud/glm-5.2:cloud" in rows[0]["detail"]
+
+
+def test_fuko_newest_receipt_per_instance_wins():
+    """A re-run leaves an older receipt behind; later comments are later runs."""
+    stale = _receipt_comment(head_sha="0" * 40, state="done")
+    fresh = _receipt_comment(head_sha=HEAD, state="done")
+    rows = fuko_states(HEAD, [stale, fresh])
+    assert len(rows) == 1
+    assert rows[0]["state"] == "done"
+
+
+def test_fuko_instances_are_separate_rows():
+    rows = fuko_states(
+        HEAD,
+        [_receipt_comment(label="a/one"), _receipt_comment(label="b/two", role="trial")],
+    )
+    assert [r["backend"] for r in rows] == ["fuko:a/one", "fuko:b/two"]
+
+
+def test_malformed_receipt_is_skipped_not_fatal():
+    bad = {"user": {"login": "x"}, "body": "<!-- fuko-run:v1 {not json} -->"}
+    assert fuko_states(HEAD, [bad, _receipt_comment()]) != []
+
+
+def test_reviewer_states_includes_fuko_rows_by_default():
+    rows = reviewer_states(HEAD, [_receipt_comment()], [])
+    assert [r["backend"] for r in rows] == [
+        "coderabbit",
+        "copilot",
+        "fuko:openrouter/x-ai/grok-4.5",
+    ]
+
+
+def test_reviewer_states_can_exclude_fuko_to_avoid_self_escalation():
+    """The runner's health probe must not let fuko escalate in response to itself."""
+    rows = reviewer_states(HEAD, [_receipt_comment(state="failed")], [], include_fuko=False)
+    assert all(not r["backend"].startswith("fuko:") for r in rows)
+    assert escalation_needed(rows) is False
