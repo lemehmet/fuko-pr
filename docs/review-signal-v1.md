@@ -95,9 +95,12 @@ Copilot rows. Every ambiguous case reports as *not* `done`:
   `in_progress`, so the consumer's own timeout governs rather than an implied
   never-ending run;
 - a receipt for an older commit, or one with no `head_sha` (HEAD was
-  unresolvable at run time), reports `pending`;
-- a `failed` receipt reports `unavailable`, which is a **degraded** state, so
-  `escalation_needed` fires and backups are promoted next round.
+  unresolvable at run time), reports `pending` — **staleness is checked before
+  the outcome**, so a failure on a superseded commit does not keep escalating
+  every later round;
+- a `failed` receipt **on the current HEAD** reports `unavailable`, which is a
+  **degraded** state, so `escalation_needed` fires and backups are promoted next
+  round.
 
 ## Stability
 

@@ -6,7 +6,16 @@ import pytest
 from sidecar import runner
 from sidecar.backends import pragent
 from sidecar.backends.base import InvokeResult, PRRef
-from sidecar.fukoconfig import CompareModel, KnowledgeConfig, ReviewConfig, ReviewModel
+from sidecar.fukoconfig import (
+    CompareModel,
+    KnowledgeConfig,
+    ModelConfig,
+    ReviewConfig,
+    ReviewModel,
+)
+from sidecar.status import fuko_states
+
+HEAD_FOR_RECEIPTS = "def5678abc0000000000000000000000000000aa"
 
 
 class _Resp:
@@ -1793,3 +1802,116 @@ def test_head_for_receipts_degrades_to_empty(monkeypatch, capsys):
     monkeypatch.setattr(runner, "fetch_pr_head", boom)
     assert runner._head_for_receipts(PRRef("o/r", 8, "u"), "tok", "https://api.github.com") == ""
     assert "could not resolve HEAD" in capsys.readouterr().err
+
+
+def test_run_pool_records_the_full_pool_entry_identity(monkeypatch, tmp_path):
+    """`InvokeResult.provider` must be `provider/name`, not the bare provider.
+
+    A run receipt compares it against the branch label to tell a promoted backup
+    from the primary, so a bare provider (never equal to the label) would report
+    every successful primary run as a promotion. Exercised THROUGH `_run_pool`
+    rather than by handing `provider` in, which is what let the bug through.
+    """
+    monkeypatch.setenv("ANTHROPIC_KEY", "antkey")
+
+    class FakeBackend:
+        def build_env(self, preset, model, knowledge, tools):
+            return {}
+
+        def invoke(self, pr, env, tools):
+            return InvokeResult(returncode=0)
+
+    monkeypatch.setattr(runner, "_normalize", lambda *a, **k: 0)
+    monkeypatch.setattr(runner, "_record_run", lambda *a, **k: None)
+    result = runner._run_pool(
+        FakeBackend(),
+        PRRef("o/r", 8, "u"),
+        "",
+        {},
+        _review_config_for_receipts(),
+        [ModelConfig(provider="anthropic", name="claude-sonnet-4-6", key_env="ANTHROPIC_KEY")],
+        set(),
+        None,
+        tools=["review"],
+    )
+    assert result.provider == "anthropic/claude-sonnet-4-6"
+
+
+def test_primary_success_is_not_reported_as_a_promotion(monkeypatch):
+    """End-to-end guard on the bug above: label == model means no promotion text."""
+    patched = {}
+    monkeypatch.setattr(
+        runner.httpx,
+        "patch",
+        lambda url, json, headers, timeout: (patched.update(body=json["body"]), _Resp({}))[1],
+    )
+    label = "anthropic/claude-sonnet-4-6"
+    runner._finalize_branch_header(
+        PRRef("o/r", 8, "u"),
+        "tok",
+        "https://api.github.com",
+        99,
+        label,
+        "active",
+        head_sha=HEAD_FOR_RECEIPTS,
+        slot=None,
+        result=InvokeResult(returncode=0, provider=label),
+    )
+    receipt = _receipt_of(patched["body"])
+    rows = fuko_states(HEAD_FOR_RECEIPTS, [{"user": {"login": "b"}, "body": patched["body"]}])
+    assert receipt.model == label
+    assert rows[0]["detail"] == "reviewed HEAD"  # not "reviewed HEAD as …"
+
+
+def test_sequential_branch_crash_finalizes_and_lets_siblings_run(monkeypatch, tmp_path):
+    """A crash in the sequential path must not strand the receipt or kill siblings.
+
+    The concurrent path already isolates each branch; without the same guard here
+    the two modes disagree about what a dead branch looks like.
+    """
+    monkeypatch.setenv("GITHUB_TOKEN", "ghtok")
+    monkeypatch.setenv("ANTHROPIC_KEY", "antkey")
+    _stub_compare_io(monkeypatch)
+    # No token_env on the entries => sequential mode.
+    monkeypatch.setattr(runner, "_resolve_branch_identities", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_post_branch_header", lambda *a, **k: ("actor", 42))
+
+    finalized = []
+    monkeypatch.setattr(
+        runner,
+        "_finalize_branch_header",
+        lambda *a, **k: finalized.append((a[4], k["result"].returncode)),
+    )
+
+    ran = []
+
+    def flaky(backend, pr, knowledge, gh_env, review, pool, *a, **k):
+        ran.append(pool[0].name)
+        if pool[0].name == "first":
+            raise RuntimeError("branch died")
+        return InvokeResult(returncode=0)
+
+    monkeypatch.setattr(runner, "_run_pool", flaky)
+    result = runner._review_compare(
+        None,
+        PRRef("o/r", 8, "u"),
+        "",
+        {},
+        _review_config_for_receipts(),
+        [
+            ReviewModel(provider="p", name="first"),
+            ReviewModel(provider="p", name="second"),
+        ],
+        [],
+        "tok",
+        "https://api.github.com",
+        set(),
+        None,
+        "headsha",
+    )
+    # The sibling still ran despite the first branch dying...
+    assert ran == ["first", "second"]
+    # ...both receipts were finalized, the dead one as a failure...
+    assert finalized == [("p/first", 1), ("p/second", 0)]
+    # ...and the round is green because a branch did post.
+    assert result.returncode == 0

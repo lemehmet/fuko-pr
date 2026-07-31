@@ -509,3 +509,21 @@ def test_reviewer_states_can_exclude_fuko_to_avoid_self_escalation():
     rows = reviewer_states(HEAD, [_receipt_comment(state="failed")], [], include_fuko=False)
     assert all(not r["backend"].startswith("fuko:") for r in rows)
     assert escalation_needed(rows) is False
+
+
+def test_stale_failed_receipt_reports_pending_not_unavailable():
+    """A failure on an OLD commit says nothing about HEAD.
+
+    Reporting it `unavailable` would keep firing `escalation_needed` every later
+    round until that instance happened to succeed — a failure that sticks long
+    after the push that outdated it.
+    """
+    rows = fuko_states(HEAD, [_receipt_comment(state="failed", head_sha="0" * 40)])
+    assert rows[0]["state"] == "pending"
+    assert escalation_needed(rows) is False
+
+
+def test_failure_on_the_current_head_still_escalates():
+    rows = fuko_states(HEAD, [_receipt_comment(state="failed", head_sha=HEAD)])
+    assert rows[0]["state"] == "unavailable"
+    assert escalation_needed(rows) is True

@@ -290,12 +290,19 @@ def fuko_states(head_sha: str, issue_comments: list[dict]) -> list[dict]:
     rows: list[dict] = []
     for label, receipt in latest.items():
         on_head = _sha_match(receipt.head_sha, head_sha) if receipt.head_sha else False
-        if receipt.state == "failed":
-            state: State = "unavailable"
-            detail = receipt.detail or "every model in the branch pool was exhausted"
-        elif not on_head:
-            state = "pending"
+        # Staleness is asked FIRST, ahead of the outcome. A receipt is anchored to
+        # the commit it describes, so a `failed` one for an older commit says
+        # nothing about HEAD -- reporting it as `unavailable` would keep firing
+        # `escalation_needed` on every later round until that instance happened to
+        # succeed, a failure that sticks long after the push that outdated it. This
+        # is the opposite order from :func:`copilot_state`, deliberately: Copilot's
+        # quota notice carries no commit anchor and so cannot go stale this way.
+        if not on_head:
+            state: State = "pending"
             detail = f"latest run covers {receipt.head_sha[:7] or 'an unknown commit'}, not HEAD"
+        elif receipt.state == "failed":
+            state = "unavailable"
+            detail = receipt.detail or "every model in the branch pool was exhausted"
         elif receipt.state == "done":
             state = "done"
             # A promoted backup answered under a different model than the branch

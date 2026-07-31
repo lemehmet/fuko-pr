@@ -729,7 +729,13 @@ def _run_pool(
             file=sys.stderr,
         )
 
-        result = replace(backend.invoke(pr, env, tools), provider=model.provider)
+        # The FULL pool-entry identity (`provider/name`), not the bare provider:
+        # a pool entry is provider+name, and a run receipt compares this against
+        # the branch label to tell a promoted backup from the primary. A bare
+        # provider never equals the label, so every successful primary run would
+        # otherwise be misreported as a promotion. Circuit-breaker keys stay bare
+        # (`_cb_trip(model.provider, …)`) — those are per-provider, not per-model.
+        result = replace(backend.invoke(pr, env, tools), provider=label)
         if not result.throttled:
             findings = None
             if result.returncode == 0:
@@ -980,24 +986,32 @@ def _review_compare(
             actor, comment_id = _post_branch_header(
                 pr, token, api_url, label, entry.role, head_sha=head_sha, slot=slot
             )
-            result = _run_pool(
-                backend,
-                pr,
-                knowledge,
-                gh_env,
-                review,
-                [entry, *backups],
-                cooled,
-                required,
-                tools=tools,
-                fresh_comment=True,
-                compare=True,
-                token=token,
-                api_url=api_url,
-                actor=actor,
-                slot=slot,
-                role=entry.role,
-            )
+            # Isolate the branch exactly as the concurrent path does. Without
+            # this a crash escapes the loop, so the remaining branches never run
+            # AND this branch's receipt is stranded at `in_progress` -- the two
+            # modes would then disagree about what a dead branch looks like.
+            try:
+                result = _run_pool(
+                    backend,
+                    pr,
+                    knowledge,
+                    gh_env,
+                    review,
+                    [entry, *backups],
+                    cooled,
+                    required,
+                    tools=tools,
+                    fresh_comment=True,
+                    compare=True,
+                    token=token,
+                    api_url=api_url,
+                    actor=actor,
+                    slot=slot,
+                    role=entry.role,
+                )
+            except Exception as e:
+                print(f"fuko: A/B branch {label} failed in isolation: {e}", file=sys.stderr)
+                result = InvokeResult(returncode=1, detail=f"{label} errored: {e}")
             _finalize_branch_header(
                 pr,
                 token,
