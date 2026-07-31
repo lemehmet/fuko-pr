@@ -983,14 +983,18 @@ def _review_compare(
             label = f"{entry.provider}/{entry.name}"
             slot = _slot_of(entry)
             print(f"fuko: A/B branch {index + 1}/{len(reviewers)}: {label}", file=sys.stderr)
-            actor, comment_id = _post_branch_header(
-                pr, token, api_url, label, entry.role, head_sha=head_sha, slot=slot
-            )
-            # Isolate the branch exactly as the concurrent path does. Without
-            # this a crash escapes the loop, so the remaining branches never run
-            # AND this branch's receipt is stranded at `in_progress` -- the two
-            # modes would then disagree about what a dead branch looks like.
+            comment_id: int | None = None
+            # Isolate the branch exactly as the concurrent path does, with the
+            # header post INSIDE the guard: it only handles httpx/ValueError
+            # itself, so any other exception would escape the loop and the
+            # remaining branches would never run -- the very thing this guard
+            # exists to prevent. A crash before the header posts leaves
+            # `comment_id` None, which makes the finalize below a no-op; there is
+            # no receipt to rewrite because none was ever created.
             try:
+                actor, comment_id = _post_branch_header(
+                    pr, token, api_url, label, entry.role, head_sha=head_sha, slot=slot
+                )
                 result = _run_pool(
                     backend,
                     pr,

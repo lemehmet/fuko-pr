@@ -1915,3 +1915,56 @@ def test_sequential_branch_crash_finalizes_and_lets_siblings_run(monkeypatch, tm
     assert finalized == [("p/first", 1), ("p/second", 0)]
     # ...and the round is green because a branch did post.
     assert result.returncode == 0
+
+
+def test_sequential_header_crash_does_not_kill_siblings(monkeypatch):
+    """`_post_branch_header` must sit INSIDE the isolation guard.
+
+    It only handles httpx/ValueError itself, so any other exception type would
+    escape the loop and strand the remaining branches.
+    """
+    monkeypatch.setenv("GITHUB_TOKEN", "ghtok")
+    _stub_compare_io(monkeypatch)
+    monkeypatch.setattr(runner, "_resolve_branch_identities", lambda *a, **k: None)
+
+    def header(pr, token, api, label, role="active", **k):
+        if label == "p/first":
+            raise RuntimeError("unexpected header failure")
+        return "actor", 42
+
+    monkeypatch.setattr(runner, "_post_branch_header", header)
+    finalized = []
+    monkeypatch.setattr(
+        runner,
+        "_finalize_branch_header",
+        lambda *a, **k: finalized.append((a[4], a[3], k["result"].returncode)),
+    )
+    ran = []
+    monkeypatch.setattr(
+        runner,
+        "_run_pool",
+        lambda backend, pr, knowledge, gh_env, review, pool, *a, **k: (
+            ran.append(pool[0].name),
+            InvokeResult(returncode=0),
+        )[1],
+    )
+    result = runner._review_compare(
+        None,
+        PRRef("o/r", 8, "u"),
+        "",
+        {},
+        _review_config_for_receipts(),
+        [ReviewModel(provider="p", name="first"), ReviewModel(provider="p", name="second")],
+        [],
+        "tok",
+        "https://api.github.com",
+        set(),
+        None,
+        "headsha",
+    )
+    # The sibling still ran even though the FIRST branch's header blew up.
+    assert ran == ["second"]
+    # The dead branch finalizes with comment_id None — a no-op, since no receipt
+    # was ever created to rewrite.
+    assert finalized == [("p/first", None, 1), ("p/second", 42, 0)]
+    assert result.returncode == 0
