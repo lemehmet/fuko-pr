@@ -2,8 +2,11 @@
 
 from sidecar.signals import (
     ReviewSignal,
+    RunReceipt,
     encode_marker,
+    encode_run_marker,
     extract_markers,
+    extract_run_receipts,
     make_id,
     strip_markers,
     visible_label,
@@ -189,3 +192,23 @@ def test_with_visible_label_preserves_tag_like_line_mid_body():
     assert "🤖 `not-a-real-tag`" in out
     # The genuine prepended tag (model-a) and the quoted look-alike → 2 robots.
     assert out.count("🤖") == 2
+
+
+def test_run_marker_survives_a_payload_that_tries_to_close_the_comment():
+    """Escaping `>` alone is sufficient — `-->` cannot form without a `>`.
+
+    An HTML comment can only be closed by a sequence containing `>`, and every
+    `>` is JSON-escaped to `\\u003e`, so no field value can terminate the marker
+    early. `--` on its own is inert and needs no escaping (escaping it would in
+    fact produce invalid JSON, since `\\-` is not a JSON escape).
+    """
+    hostile = RunReceipt(
+        label="p/m",
+        head_sha="abc",
+        state="failed",
+        detail="closes? --> and -- and <!-- nested --> and --!>",
+    )
+    marker = encode_run_marker(hostile)
+    assert ">" not in marker[len("<!-- fuko-run:v1 ") : -len(" -->")]
+    (back,) = extract_run_receipts("prefix\n" + marker + "\nsuffix")
+    assert back.detail == hostile.detail
