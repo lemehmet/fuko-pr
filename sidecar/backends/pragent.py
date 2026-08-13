@@ -130,8 +130,6 @@ class PrAgentBackend:
         if max_model_tokens is not None:
             env["CONFIG__MAX_MODEL_TOKENS"] = str(max_model_tokens)
 
-        # Per-entry steering goes FIRST so it frames how the shared repo
-        # knowledge below it is applied, for both prompts alike.
         instructions = "\n\n".join(part for part in (model.extra_instructions, knowledge) if part)
         if instructions:
             env["PR_REVIEWER__EXTRA_INSTRUCTIONS"] = instructions

@@ -214,7 +214,11 @@ def test_build_env_ollama_no_key_no_quirks():
 def test_build_env_entry_instructions_prepend_knowledge():
     env = PrAgentBackend().build_env(
         get_preset("ollama"),
-        ModelConfig(extra_instructions="Focus on concurrency and lifecycle bugs."),
+        ModelConfig(
+            provider="ollama",
+            name="qwen2.5-coder:32b",
+            extra_instructions="Focus on concurrency and lifecycle bugs.",
+        ),
         knowledge="- learn this",
         tools=["review"],
     )
@@ -226,7 +230,11 @@ def test_build_env_entry_instructions_prepend_knowledge():
 def test_build_env_entry_instructions_without_knowledge():
     env = PrAgentBackend().build_env(
         get_preset("ollama"),
-        ModelConfig(extra_instructions="Be an API-contract pedant."),
+        ModelConfig(
+            provider="ollama",
+            name="qwen2.5-coder:32b",
+            extra_instructions="Be an API-contract pedant.",
+        ),
         knowledge="",
         tools=["review"],
     )
