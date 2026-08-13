@@ -1,0 +1,268 @@
+"""Unit tests for the agentic review backend driver."""
+
+import json
+
+import httpx
+import pytest
+
+from sidecar.backends import agentic as agentic_mod
+from sidecar.backends import get_backend
+from sidecar.backends.agentic import AgenticBackend
+from sidecar.backends.base import PRRef
+from sidecar.fukoconfig import ModelConfig, ReviewConfig
+from sidecar.presets import get_preset
+from sidecar.reviewer.checkout import PRContext
+from sidecar.reviewer.harness import HarnessResult
+from sidecar.signals import extract_markers
+
+PR = PRRef(repo="o/r", number=9, url="https://github.com/o/r/pull/9")
+
+REVIEW_JSON = json.dumps(
+    {
+        "summary": "looked closely",
+        "findings": [
+            {
+                "file": "src/app.py",
+                "line": 4,
+                "severity": "high",
+                "category": "bug",
+                "title": "leak",
+                "body": "closes nothing",
+                "evidence": "read src/app.py:1-40",
+                "confidence": "high",
+            },
+            {
+                "file": "docs/other.md",
+                "line": None,
+                "severity": "low",
+                "category": "docs",
+                "title": "stale doc",
+                "body": "update it",
+                "confidence": "medium",
+            },
+            {
+                "file": "src/app.py",
+                "line": 8,
+                "title": "hunch",
+                "body": "maybe",
+                "confidence": "low",
+            },
+        ],
+    }
+)
+
+
+def _ctx() -> PRContext:
+    return PRContext(
+        title="T",
+        body="B",
+        head_sha="beef",
+        base_ref="main",
+        diff="d",
+        diff_files=frozenset({"src/app.py"}),
+    )
+
+
+def _invoke(monkeypatch, backend: AgenticBackend, harness_result: HarnessResult, env=None):
+    monkeypatch.setattr(agentic_mod, "fetch_pr_context", lambda *a, **k: _ctx())
+    monkeypatch.setattr(agentic_mod, "checkout_pr_head", lambda *a, **k: "/tmp/nowhere")
+    monkeypatch.setattr(agentic_mod, "rmtree", lambda *a, **k: None)
+    captured = {}
+
+    def fake_run_review(prompt, checkout, *, model, env, timeout, max_turns):
+        captured.update(prompt=prompt, model=model, env=env, timeout=timeout)
+        return harness_result
+
+    monkeypatch.setattr(agentic_mod, "run_review", fake_run_review)
+    result = backend.invoke(PR, env or {"FUKO_AGENTIC_MODEL": "claude-x"}, ["review"])
+    return result, captured
+
+
+def test_registered_in_backend_registry():
+    assert isinstance(get_backend("agentic"), AgenticBackend)
+
+
+def test_build_env_anthropic(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_KEY", "sk-ant")
+    env = AgenticBackend().build_env(
+        get_preset("anthropic"),
+        ModelConfig(
+            provider="anthropic",
+            name="claude-sonnet-5",
+            extra_instructions="Hunt races.",
+        ),
+        knowledge="- learn this",
+        tools=["review", "improve"],
+    )
+    assert env["FUKO_AGENTIC_MODEL"] == "claude-sonnet-5"
+    assert env["ANTHROPIC_API_KEY"] == "sk-ant"
+    assert env["FUKO_AGENTIC_INSTRUCTIONS"] == "Hunt races.\n\n- learn this"
+
+
+def test_build_env_rejects_non_anthropic():
+    with pytest.raises(ValueError, match="agentic"):
+        AgenticBackend().build_env(
+            get_preset("openrouter"),
+            ModelConfig(provider="openrouter", name="x-ai/grok-4.5"),
+            knowledge="",
+            tools=["review"],
+        )
+
+
+def test_invoke_stashes_and_filters(monkeypatch):
+    backend = AgenticBackend(ReviewConfig(tool_timeout=222))
+    result, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert result.returncode == 0
+    assert "2 findings" in result.detail
+    stash = backend._pending[(PR.url, "claude-x")]
+    assert [f.title for f in stash.findings] == ["leak", "stale doc"]  # low-conf dropped
+    assert stash.dropped == 1
+    assert captured["timeout"] == 222
+
+
+def test_invoke_strips_github_tokens_from_harness_env(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "gh-secret")
+    monkeypatch.setenv("FUKO_GITHUB_TOKEN_DORIAN", "app-secret")
+    backend = AgenticBackend()
+    _, captured = _invoke(
+        monkeypatch,
+        backend,
+        HarnessResult(0, REVIEW_JSON),
+        env={"FUKO_AGENTIC_MODEL": "m", "ANTHROPIC_API_KEY": "sk"},
+    )
+    assert "GITHUB_TOKEN" not in captured["env"]
+    assert "FUKO_GITHUB_TOKEN_DORIAN" not in captured["env"]
+    assert captured["env"]["ANTHROPIC_API_KEY"] == "sk"
+
+
+def test_invoke_throttle_classification(monkeypatch):
+    backend = AgenticBackend()
+    result, _ = _invoke(monkeypatch, backend, HarnessResult(1, "", stderr="429 too many requests"))
+    assert result.throttled
+    result, _ = _invoke(monkeypatch, backend, HarnessResult(124, "", timed_out=True))
+    assert result.throttled
+
+
+def test_invoke_parse_failure_is_not_throttle(monkeypatch):
+    backend = AgenticBackend()
+    result, _ = _invoke(monkeypatch, backend, HarnessResult(0, "not json at all"))
+    assert result.returncode == 1
+    assert not result.throttled
+    assert "reviewer output" in result.detail
+
+
+class _FakeResponse:
+    def __init__(self, status_code, text=""):
+        self.status_code = status_code
+        self.text = text
+
+
+class _FakeHttpx:
+    HTTPError = httpx.HTTPError
+
+    def __init__(self, statuses):
+        self.statuses = list(statuses)
+        self.posts = []
+
+    def Client(self, **kwargs):  # noqa: N802 - mimics httpx.Client
+        fake = self
+
+        class _C:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def post(self, url, json=None):
+                fake.posts.append((url, json))
+                return _FakeResponse(fake.statuses.pop(0))
+
+        return _C()
+
+
+def _seed(backend: AgenticBackend, model_key="claude-x"):
+    from sidecar.backends.agentic import _PendingReview
+    from sidecar.reviewer.prompt import AgenticFinding
+
+    backend._pending[(PR.url, model_key)] = _PendingReview(
+        findings=[
+            AgenticFinding(
+                file="src/app.py",
+                line=4,
+                severity="high",
+                title="leak",
+                body="b1",
+                evidence="read it",
+            ),
+            AgenticFinding(file="docs/other.md", title="stale doc", body="b2"),
+        ],
+        summary="s",
+        head_sha="beef",
+        diff_files=frozenset({"src/app.py"}),
+        dropped=1,
+    )
+
+
+def test_normalize_posts_review_with_markers(monkeypatch):
+    backend = AgenticBackend()
+    _seed(backend)
+    fake = _FakeHttpx([200])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    signals = backend.normalize_output(
+        PR, "anthropic/claude-x", token="tok", api_url="https://api.x", role="trial"
+    )
+    assert [s.role for s in signals] == ["trial", "trial"]
+    assert all(s.backend == "agentic" for s in signals)
+    url, payload = fake.posts[0]
+    assert url.endswith("/repos/o/r/pulls/9/reviews")
+    assert payload["commit_id"] == "beef"
+    (comment,) = payload["comments"]
+    assert comment["path"] == "src/app.py" and comment["line"] == 4
+    (marker,) = extract_markers(comment["body"])
+    assert marker.role == "trial" and marker.backend == "agentic"
+    assert "Verified against:" in comment["body"]
+    assert "stale doc" in payload["body"]  # unanchored finding lands in the body
+    assert "withheld" in payload["body"]
+
+
+def test_normalize_visible_label_in_ab_mode(monkeypatch):
+    backend = AgenticBackend()
+    _seed(backend)
+    fake = _FakeHttpx([200])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    backend.normalize_output(
+        PR, "anthropic/claude-x", compare_label="anthropic/claude-x", token="t"
+    )
+    (comment,) = fake.posts[0][1]["comments"]
+    assert comment["body"].startswith("🤖 `anthropic/claude-x`")
+
+
+def test_normalize_retries_body_only_on_422(monkeypatch):
+    backend = AgenticBackend()
+    _seed(backend)
+    fake = _FakeHttpx([422, 200])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    signals = backend.normalize_output(PR, "claude-x", token="t")
+    assert len(signals) == 2
+    assert len(fake.posts) == 2
+    retry_payload = fake.posts[1][1]
+    assert retry_payload["comments"] == []
+    assert "leak" in retry_payload["body"]
+
+
+def test_normalize_post_failure_returns_no_signals(monkeypatch, capsys):
+    backend = AgenticBackend()
+    _seed(backend)
+    fake = _FakeHttpx([500])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    assert backend.normalize_output(PR, "claude-x", token="t") == []
+    assert "post failed" in capsys.readouterr().err
+
+
+def test_normalize_without_stash_is_empty(monkeypatch):
+    backend = AgenticBackend()
+    fake = _FakeHttpx([])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    assert backend.normalize_output(PR, "claude-x", token="t") == []
+    assert fake.posts == []

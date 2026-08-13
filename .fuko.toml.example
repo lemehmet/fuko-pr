@@ -3,7 +3,9 @@
 # (supplied as a CI secret). See docs/design.md for the full schema.
 
 [review]
-backend = "pr-agent"            # review engine (driver)
+backend = "pr-agent"            # review engine (driver): pr-agent | agentic
+                                # (agentic = fuko's own checkout-based reviewer,
+                                # headless Claude Code; see docs/agentic-reviewer.md)
 tools = ["review", "improve"]   # PR-Agent tools to run
 # PR-Agent runs from its Docker image (it is not pip-installable). Defaults to
 # codiumai/pr-agent:latest; point at a pinned tag in your own registry once you
