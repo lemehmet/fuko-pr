@@ -72,6 +72,8 @@ name = "glm-5.2"
 # role = "active" (default) | "backup". Every active entry reviews each PR
 # (2+ actives = A/B, one branch per active); backups are shared failover
 # targets when an active's provider throttles. Entry order = priority.
+# extra_instructions = "..."      # optional per-entry review steering, prepended
+#                                 # to the shared knowledge blob for this entry only
 
 [knowledge]
 store = "postgres"                # postgres | sqlite-vec

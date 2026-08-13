@@ -211,6 +211,59 @@ def test_build_env_ollama_no_key_no_quirks():
     assert env["github_action_config.auto_improve"] == "false"
 
 
+def test_build_env_entry_instructions_prepend_knowledge():
+    env = PrAgentBackend().build_env(
+        get_preset("ollama"),
+        ModelConfig(
+            provider="ollama",
+            name="qwen2.5-coder:32b",
+            extra_instructions="Focus on concurrency and lifecycle bugs.",
+        ),
+        knowledge="- learn this",
+        tools=["review"],
+    )
+    combined = "Focus on concurrency and lifecycle bugs.\n\n- learn this"
+    assert env["PR_REVIEWER__EXTRA_INSTRUCTIONS"] == combined
+    assert env["PR_CODE_SUGGESTIONS__EXTRA_INSTRUCTIONS"] == combined
+
+
+def test_build_env_entry_instructions_without_knowledge():
+    env = PrAgentBackend().build_env(
+        get_preset("ollama"),
+        ModelConfig(
+            provider="ollama",
+            name="qwen2.5-coder:32b",
+            extra_instructions="Be an API-contract pedant.",
+        ),
+        knowledge="",
+        tools=["review"],
+    )
+    assert env["PR_REVIEWER__EXTRA_INSTRUCTIONS"] == "Be an API-contract pedant."
+    assert env["PR_CODE_SUGGESTIONS__EXTRA_INSTRUCTIONS"] == "Be an API-contract pedant."
+
+
+def test_load_config_parses_entry_extra_instructions(tmp_path):
+    p = tmp_path / ".fuko.toml"
+    p.write_text(
+        "\n".join(
+            [
+                "[[review.models]]",
+                'provider = "openrouter"',
+                'name = "x-ai/grok-4.5"',
+                "[[review.models]]",
+                'provider = "openrouter"',
+                'name = "qwen/qwen3.8-max"',
+                'role = "trial"',
+                'extra_instructions = "Hunt race conditions."',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cfg = load_config(p)
+    assert cfg.review.models[0].extra_instructions is None
+    assert cfg.review.models[1].extra_instructions == "Hunt race conditions."
+
+
 def test_build_env_anthropic_key_routes_to_anthropic_section(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_KEY", "sk-ant")
     env = PrAgentBackend().build_env(

@@ -46,6 +46,15 @@ tools = ["review", "improve"]   # PR-Agent tools to run
 # GPU box, key from PRODIA_KEY; it has no default base_url, so each model
 # entry must set base_url to the rental's endpoint.)
 #
+# Per-entry review steering: an optional `extra_instructions` string on any
+# entry is prepended to the shared knowledge blob for THAT entry's runs only —
+# use it to differentiate a fleet that would otherwise converge on the same
+# findings (all entries share one context pipeline, so they correlate by
+# construction). Entry-keyed: a promoted backup applies its own instructions,
+# not the rescued branch's. Caution: a focus prompt implicitly deprioritizes
+# everything outside the focus — prefer personas on trial/non-gating entries
+# and keep gating actives general.
+#
 # Concurrent A/B (per-branch identities): give EVERY branch that runs — every
 # active AND every trial (both start a branch) — a `token_env` whose env var
 # resolves to a distinct GitHub actor (e.g. separate GitHub Apps), and the
@@ -81,6 +90,10 @@ max_context = 1000000
 # max_context = 1000000
 # token_env = "FUKO_GITHUB_TOKEN_C"
 # role = "trial"                # runs + surfaced for evaluation, but NON-gating
+# # Optional per-entry steering (see note above). Keep the opening """ bare:
+# # a '#' after it would be part of the string, not a TOML comment.
+# extra_instructions = """
+# Review with an adversarial security and API-contract focus."""
 
 # [[review.models]]
 # provider = "ollama-cloud"     # same model via Ollama Cloud, key from OLLAMA_API_KEY

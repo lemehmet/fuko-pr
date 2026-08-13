@@ -80,6 +80,11 @@ class PrAgentBackend:
         source of intent). The ``improve`` prompt template ignores the
         description entirely upstream; no env can change that.
 
+        The extra-instructions channel carries the model entry's own
+        ``extra_instructions`` (per-entry review steering, when set) followed
+        by the shared ``knowledge`` blob, joined by a blank line; both the
+        review and code-suggestions prompts receive the same text.
+
         Ticket-compliance analysis is disabled
         (``PR_REVIEWER__REQUIRE_TICKET_ANALYSIS_REVIEW=false``): it fetches the
         sub-issues of ``#<n>`` refs in the PR body and throws on a ref that
@@ -125,9 +130,10 @@ class PrAgentBackend:
         if max_model_tokens is not None:
             env["CONFIG__MAX_MODEL_TOKENS"] = str(max_model_tokens)
 
-        if knowledge:
-            env["PR_REVIEWER__EXTRA_INSTRUCTIONS"] = knowledge
-            env["PR_CODE_SUGGESTIONS__EXTRA_INSTRUCTIONS"] = knowledge
+        instructions = "\n\n".join(part for part in (model.extra_instructions, knowledge) if part)
+        if instructions:
+            env["PR_REVIEWER__EXTRA_INSTRUCTIONS"] = instructions
+            env["PR_CODE_SUGGESTIONS__EXTRA_INSTRUCTIONS"] = instructions
 
         for tool, flag in _TOOL_FLAGS.items():
             env[flag] = "true" if tool in tools else "false"

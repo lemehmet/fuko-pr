@@ -32,6 +32,16 @@ class ModelConfig(BaseModel):
     base_url: str | None = None
     max_context: int | None = None
     max_model_tokens: int | None = None
+    extra_instructions: str | None = Field(
+        default=None,
+        description=(
+            "Per-entry review steering prepended to the shared knowledge blob "
+            "in the backend's extra-instructions channel — e.g. a reviewing "
+            "focus that differentiates this entry from the rest of the fleet. "
+            "Entry-keyed: it travels with the model, so a promoted backup "
+            "applies its OWN instructions (if any), not the rescued branch's."
+        ),
+    )
 
     @field_validator("max_context", "max_model_tokens")
     @classmethod

@@ -16,7 +16,10 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install ruff
+      # Exact pin, kept in sync with pyproject's dev extra, so CI and local dev
+      # run the same formatter (an unpinned install drifted to 0.16 and failed
+      # `ruff format --check` on files a 0.15 venv passed).
+      - run: pip install ruff==0.16.3
       - run: ruff check .
       - run: ruff format --check .
 
