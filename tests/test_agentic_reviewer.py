@@ -313,6 +313,21 @@ def test_parse_review_bare_and_wrapped():
         assert review.findings[0].severity == "medium"
 
 
+@pytest.mark.parametrize(
+    ("field", "bad", "default"),
+    [("severity", "moderate", "medium"), ("category", "correctness", "bug")],
+)
+def test_parse_review_degrades_off_vocabulary_severity_and_category(field, bad, default):
+    """One stray word must cost that field's value, never the whole review."""
+    payload = {
+        "summary": "s",
+        "findings": [{"file": "a.py", "line": 1, "title": "t", "body": "b", field: bad}],
+    }
+    review = parse_review(json.dumps(payload))
+    assert getattr(review.findings[0], field) == default
+    assert review.findings[0].title == "t"  # the rest of the finding survives
+
+
 def test_parse_review_rejects_garbage_and_bad_schema():
     with pytest.raises(ReviewParseError):
         parse_review("no json here")

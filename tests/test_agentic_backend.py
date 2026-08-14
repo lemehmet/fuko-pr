@@ -509,10 +509,22 @@ def test_claim_does_not_steal_another_models_review(monkeypatch):
 
 def test_claim_tolerates_prefixed_spelling_of_the_same_model(monkeypatch):
     backend = AgenticBackend()
-    _seed(backend, model_key="claude-x")
+    _seed(backend, model_key="openai/claude-x")  # a different provider spelling
     fake = _FakeHttpx([200])
     monkeypatch.setattr(agentic_mod, "httpx", fake)
     assert len(backend.normalize_output(PR, "anthropic/claude-x", token="t")) == 2
+
+
+def test_claim_rejects_a_model_that_merely_ends_with_the_stashed_name(monkeypatch):
+    """Suffix matching looks equivalent to exact bare equality and is not."""
+    backend = AgenticBackend()
+    _seed(backend, model_key="sonnet-4")
+    fake = _FakeHttpx([])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+
+    assert backend.normalize_output(PR, "anthropic/claude-sonnet-4", token="t") == []
+    assert fake.posts == []
+    assert (PR.url, "sonnet-4") in backend._pending
 
 
 def test_normalize_marks_unanchored_findings_in_the_body(monkeypatch):

@@ -455,8 +455,13 @@ class AgenticBackend:
         same backend instance, so that rule lets whichever branch normalizes
         first walk off with another model's findings and post them under its own
         identity and role. The fallback therefore requires the remaining entry to
-        be the *same model under a different spelling* (one side a suffix of the
-        other), which still covers the id-drift case it exists for.
+        be the *same model under a different spelling*: the bare names (after
+        dropping any provider prefix) must match EXACTLY. A suffix match looks
+        equivalent and is not -- two genuinely different models can end in each
+        other (``sonnet-4`` and ``claude-sonnet-4`` are the same model, but the
+        rule does not know that, and nothing stops a pair where they differ) --
+        while exact bare equality already covers the litellm-prefix drift this
+        fallback exists for, since both sides are reduced the same way.
         """
         bare = model.rsplit("/", 1)[-1]
         with self._lock:
@@ -467,11 +472,7 @@ class AgenticBackend:
             if len(mine) == 1:
                 stashed = mine[0][1]
                 stashed_bare = stashed.rsplit("/", 1)[-1]
-                if (
-                    bare
-                    and stashed_bare
-                    and (bare.endswith(stashed_bare) or stashed_bare.endswith(bare))
-                ):
+                if bare and bare == stashed_bare:
                     return self._pending.pop(mine[0])
         return None
 

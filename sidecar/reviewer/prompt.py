@@ -20,8 +20,9 @@ runtime:
 from __future__ import annotations
 
 import json
+from typing import get_args
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from ..signals import Category, Severity
 from .checkout import PRContext
@@ -54,6 +55,22 @@ class AgenticFinding(BaseModel):
             "parse failure of the whole review."
         ),
     )
+
+    @field_validator("severity", "category", mode="before")
+    @classmethod
+    def _known_vocabulary_or_default(cls, value, info):
+        """Degrade an off-vocabulary severity/category to the field default.
+
+        These are strict literals, so without this a single stray word from the
+        model ("moderate", "correctness") raises ValidationError, fails
+        :func:`parse_review`, and discards an entire multi-turn review. That is
+        the same trade the ``confidence`` field is deliberately a plain ``str``
+        to avoid: one finding's metadata is worth far less than the review.
+        Structural problems (a missing ``title``, a non-object finding) still
+        fail loudly -- this only rescues a known field with an unknown word.
+        """
+        field = cls.model_fields[info.field_name]
+        return value if value in get_args(field.annotation) else field.default
 
 
 class AgenticReview(BaseModel):
