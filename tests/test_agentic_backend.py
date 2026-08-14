@@ -67,10 +67,14 @@ def _invoke(monkeypatch, backend: AgenticBackend, harness_result: HarnessResult,
     monkeypatch.setattr(agentic_mod, "fetch_pr_context", lambda *a, **k: _ctx())
     monkeypatch.setattr(agentic_mod, "checkout_pr_head", lambda *a, **k: "/tmp/nowhere")
     monkeypatch.setattr(agentic_mod, "rmtree", lambda *a, **k: None)
+    monkeypatch.setattr(agentic_mod, "strip_agent_config", lambda *a, **k: [])
+    monkeypatch.setattr(agentic_mod, "check_auth", lambda *a, **k: {"loggedIn": True})
     captured = {}
 
-    def fake_run_review(prompt, checkout, *, model, env, timeout, max_turns):
-        captured.update(prompt=prompt, model=model, env=env, timeout=timeout)
+    def fake_run_review(prompt, checkout, *, cwd, model, env, timeout, max_turns):
+        captured.update(
+            prompt=prompt, checkout=checkout, cwd=cwd, model=model, env=env, timeout=timeout
+        )
         return harness_result
 
     monkeypatch.setattr(agentic_mod, "run_review", fake_run_review)
@@ -82,21 +86,45 @@ def test_registered_in_backend_registry():
     assert isinstance(get_backend("agentic"), AgenticBackend)
 
 
+def _model(**kw) -> ModelConfig:
+    return ModelConfig(provider="anthropic", name="claude-sonnet-5", **kw)
+
+
 def test_build_env_anthropic(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_KEY", "sk-ant")
     env = AgenticBackend().build_env(
         get_preset("anthropic"),
-        ModelConfig(
-            provider="anthropic",
-            name="claude-sonnet-5",
-            extra_instructions="Hunt races.",
-        ),
+        _model(extra_instructions="Hunt races."),
         knowledge="- learn this",
         tools=["review", "improve"],
     )
     assert env["FUKO_AGENTIC_MODEL"] == "claude-sonnet-5"
     assert env["ANTHROPIC_API_KEY"] == "sk-ant"
+    assert env["FUKO_AGENTIC_AUTH"] == "api-key"
     assert env["FUKO_AGENTIC_INSTRUCTIONS"] == "Hunt races.\n\n- learn this"
+
+
+def test_build_env_auto_falls_back_to_subscription(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_KEY", raising=False)
+    env = AgenticBackend().build_env(get_preset("anthropic"), _model(), "", ["review"])
+    assert env["FUKO_AGENTIC_AUTH"] == "subscription"
+    assert "ANTHROPIC_API_KEY" not in env
+
+
+def test_build_env_explicit_subscription_ignores_ambient_key(monkeypatch):
+    """A key in the environment must not silently move billing off the plan."""
+    monkeypatch.setenv("ANTHROPIC_KEY", "sk-ant")
+    env = AgenticBackend().build_env(
+        get_preset("anthropic"), _model(auth="subscription"), "", ["review"]
+    )
+    assert env["FUKO_AGENTIC_AUTH"] == "subscription"
+    assert "ANTHROPIC_API_KEY" not in env
+
+
+def test_build_env_explicit_api_key_without_key_fails_fast(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_KEY", raising=False)
+    with pytest.raises(ValueError, match="ANTHROPIC_KEY"):
+        AgenticBackend().build_env(get_preset("anthropic"), _model(auth="api-key"), "", ["review"])
 
 
 def test_build_env_rejects_non_anthropic():
@@ -128,11 +156,103 @@ def test_invoke_strips_github_tokens_from_harness_env(monkeypatch):
         monkeypatch,
         backend,
         HarnessResult(0, REVIEW_JSON),
-        env={"FUKO_AGENTIC_MODEL": "m", "ANTHROPIC_API_KEY": "sk"},
+        env={
+            "FUKO_AGENTIC_MODEL": "m",
+            "FUKO_AGENTIC_AUTH": "api-key",
+            "ANTHROPIC_API_KEY": "sk",
+        },
     )
     assert "GITHUB_TOKEN" not in captured["env"]
     assert "FUKO_GITHUB_TOKEN_DORIAN" not in captured["env"]
     assert captured["env"]["ANTHROPIC_API_KEY"] == "sk"
+
+
+def test_invoke_subscription_mode_drops_ambient_anthropic_creds(monkeypatch):
+    """Ambient keys outrank the subscription login, so they must not survive."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ambient")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "bearer-ambient")
+    monkeypatch.setenv("HOME", "/home/runner")
+    backend = AgenticBackend()
+    _, captured = _invoke(
+        monkeypatch,
+        backend,
+        HarnessResult(0, REVIEW_JSON),
+        env={"FUKO_AGENTIC_MODEL": "m", "FUKO_AGENTIC_AUTH": "subscription"},
+    )
+    assert "ANTHROPIC_API_KEY" not in captured["env"]
+    assert "ANTHROPIC_AUTH_TOKEN" not in captured["env"]
+    # HOME must survive: the subscription login lives there.
+    assert captured["env"]["HOME"] == "/home/runner"
+
+
+def test_invoke_subscription_mode_forwards_ci_oauth_token(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-tok")
+    backend = AgenticBackend()
+    _, captured = _invoke(
+        monkeypatch,
+        backend,
+        HarnessResult(0, REVIEW_JSON),
+        env={"FUKO_AGENTIC_MODEL": "m", "FUKO_AGENTIC_AUTH": "subscription"},
+    )
+    assert captured["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-tok"
+
+
+def test_invoke_api_key_mode_drops_oauth_token(monkeypatch):
+    """Each mode injects exactly one credential, so billing is never ambiguous."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-tok")
+    backend = AgenticBackend()
+    _, captured = _invoke(
+        monkeypatch,
+        backend,
+        HarnessResult(0, REVIEW_JSON),
+        env={
+            "FUKO_AGENTIC_MODEL": "m",
+            "FUKO_AGENTIC_AUTH": "api-key",
+            "ANTHROPIC_API_KEY": "sk",
+        },
+    )
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in captured["env"]
+
+
+def test_invoke_subscription_preflight_fails_fast_when_logged_out(monkeypatch):
+    monkeypatch.setattr(agentic_mod, "check_auth", lambda *a, **k: {"loggedIn": False})
+    monkeypatch.setattr(
+        agentic_mod, "fetch_pr_context", lambda *a, **k: pytest.fail("should not clone")
+    )
+    result = AgenticBackend().invoke(
+        PR, {"FUKO_AGENTIC_MODEL": "m", "FUKO_AGENTIC_AUTH": "subscription"}, ["review"]
+    )
+    assert result.returncode == 1
+    assert not result.throttled
+    assert "setup-token" in result.detail
+
+
+def test_invoke_runs_outside_the_checkout(monkeypatch):
+    """The agent's cwd must never be the untrusted checkout (repo hooks)."""
+    backend = AgenticBackend()
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert str(captured["cwd"]) != str(captured["checkout"])
+    assert "/tmp/nowhere" in captured["prompt"]  # the root is named in the prompt
+
+
+def test_invoke_auth_failure_is_not_throttled(monkeypatch):
+    """Failing over on bad credentials would burn every provider in the pool."""
+    backend = AgenticBackend()
+    result, _ = _invoke(
+        monkeypatch, backend, HarnessResult(1, "", stderr="Not logged in · Please run /login")
+    )
+    assert result.returncode == 1
+    assert not result.throttled
+    assert "authenticate" in result.detail
+
+
+def test_invoke_subscription_limit_is_throttled(monkeypatch):
+    """An exhausted plan window should fail over to a backup, not fail the run."""
+    backend = AgenticBackend()
+    result, _ = _invoke(
+        monkeypatch, backend, HarnessResult(1, "", stderr="You've hit your weekly limit")
+    )
+    assert result.throttled
 
 
 def test_invoke_throttle_classification(monkeypatch):

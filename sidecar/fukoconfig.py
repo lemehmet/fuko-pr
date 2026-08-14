@@ -32,6 +32,20 @@ class ModelConfig(BaseModel):
     base_url: str | None = None
     max_context: int | None = None
     max_model_tokens: int | None = None
+    auth: Literal["auto", "api-key", "subscription"] = Field(
+        default="auto",
+        description=(
+            "How the backend authenticates to the model provider. 'api-key' "
+            "uses the preset's key env var; 'subscription' uses the runner's "
+            "own logged-in session (Claude Code OAuth) and passes NO key; "
+            "'auto' picks api-key when the preset's key env var is set, else "
+            "subscription. Read by the agentic backend only -- pr-agent always "
+            "authenticates by key. Set it explicitly to pin who pays: an "
+            "ambient ANTHROPIC_API_KEY overrides subscription billing, so a "
+            "subscription runner that also exports a key would silently bill "
+            "per token under 'auto'."
+        ),
+    )
     extra_instructions: str | None = Field(
         default=None,
         description=(

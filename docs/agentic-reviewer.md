@@ -55,20 +55,94 @@ that is not "report it anyway".
 
 ## Security model
 
-- **Read-only agent.** Headless mode cannot prompt for permissions, so the
-  tool allowlist (`Read,Grep,Glob`) is the entire tool surface: no Bash, no
-  file writes, no network tools. Repository code is never executed — git does
-  not run repo-shipped hooks on clone/fetch/checkout, and the reviewer treats
-  the tree purely as data.
+The reviewed checkout is an **arbitrary contributor's code**, and the reviewer
+runs on a self-hosted runner. That makes one non-obvious vector the dominant
+concern.
+
+### The working directory is the attack surface
+
+Claude Code loads project configuration from its working directory —
+`.claude/settings.json` **hooks** (arbitrary commands) and `.mcp.json` servers
+— and a `-p` session shows no workspace-trust dialog to gate it. This is
+documented behavior, and it was **verified against Claude Code 2.1.232**: a
+`SessionStart` hook placed in the working directory executed. A hostile PR
+adding `.claude/settings.json` would therefore have run code on the runner.
+
+Mitigations, each independently sufficient for its vector:
+
+1. **The agent never runs from the checkout.** `cwd` is a clean scratch
+   directory; the checkout is mounted as an additional readable root
+   (`--add-dir`). Settings, hooks, and MCP servers load from the working
+   directory, not from `--add-dir` roots — verified: the same hook does not
+   fire under this arrangement, while `Read`/`Grep`/`Glob` still work.
+2. **`--setting-sources user`** — project settings are never a source.
+3. **`--settings '{"disableAllHooks":true}'`** — hooks off regardless.
+4. **`--strict-mcp-config`** — no MCP server starts that was not configured
+   here (none is).
+5. **The checkout is stripped** of `.claude/`, `.mcp.json`, and friends before
+   the run (`strip_agent_config`), because skills and subagents *are* read from
+   additional roots. The files remain in the diff, so a PR that edits them is
+   still reviewable — and worth flagging, which the strategy prompt asks for.
+
+`--bare` would harden further, but its help is explicit that it never reads
+OAuth or the keychain — it would force API-key billing and break subscription
+auth, so it is deliberately not used.
+
+### Everything else
+
+- **Read-only tool surface.** Headless mode cannot prompt for permissions, so
+  the allowlist (`Read,Grep,Glob`) *is* the tool surface: no Bash, no writes,
+  no network. Repository code is never executed — git does not run
+  repo-shipped hooks on clone/fetch/checkout either.
 - **Prompt-injection posture.** The diff and repository contents are declared
   untrusted in the strategy prompt; instruction-like text inside them
   (including text addressed to AI reviewers) must be ignored and *reported as
   a security finding*. The blast radius of a successful injection is bounded
   by the tool surface: wrong review text, not actions.
 - **Credential hygiene.** The agent subprocess environment strips
-  `GITHUB_TOKEN` / `GITHUB__USER_TOKEN` / `FUKO_GITHUB_*`; it receives only
-  the Anthropic credentials. The checkout's fetch auth rides in `GIT_CONFIG_*`
-  environment (not argv, not the remote URL), scoped to the one fetch.
+  `GITHUB_TOKEN` / `GITHUB__USER_TOKEN` / `FUKO_GITHUB_*` and every Anthropic
+  credential, then injects exactly the one its auth mode uses (below). The
+  checkout's fetch auth rides in `GIT_CONFIG_*` environment (not argv, not the
+  remote URL), scoped to the one fetch.
+
+## Authentication
+
+Two modes, chosen per model entry with `auth`:
+
+```toml
+[[review.models]]
+provider = "anthropic"
+name = "claude-sonnet-5"
+auth = "subscription"   # "auto" (default) | "subscription" | "api-key"
+```
+
+- **`subscription`** — the agent runs as the runner's own logged-in Claude
+  session; no key is passed. On a CI runner, generate a long-lived token with
+  `claude setup-token` and export it as `CLAUDE_CODE_OAUTH_TOKEN`; an
+  interactive login works too (credentials live under `HOME` /
+  `CLAUDE_CONFIG_DIR`, both of which pass through to the agent untouched).
+  A logged-out runner is caught by a preflight (`claude auth status`) and
+  fails that branch immediately, before any clone.
+- **`api-key`** — `ANTHROPIC_KEY` (the preset's env var) is passed through as
+  `ANTHROPIC_API_KEY`, with `ANTHROPIC_BASE_URL` for a gateway. A missing key
+  is a config error, raised before the run.
+- **`auto`** (default) — api-key when `ANTHROPIC_KEY` is set, else
+  subscription.
+
+**Why the modes are mutually exclusive at the environment level:** Claude
+Code's credential precedence is `ANTHROPIC_AUTH_TOKEN` > `ANTHROPIC_API_KEY` >
+`apiKeyHelper` > `CLAUDE_CODE_OAUTH_TOKEN` > the interactive login. An ambient
+`ANTHROPIC_API_KEY` therefore *silently* moves billing off a subscription —
+verified: with the key exported, `claude auth status` reports
+`apiKeySource: ANTHROPIC_API_KEY` and `subscriptionType: null`. So all
+Anthropic credentials are stripped from the inherited environment and each
+mode injects only its own. Pin `auth` explicitly on any runner where both
+exist.
+
+An exhausted plan window ("You've hit your session/weekly limit") is
+classified as throttling, so the branch fails over to a backup entry; an
+authentication failure is deliberately **not**, because failing over would
+burn every provider in the pool on what is a one-line runner fix.
 
 ## Configuration
 
@@ -77,8 +151,9 @@ that is not "report it anyway".
 backend = "agentic"        # global until fuko-pr #99 lands per-model backend
 
 [[review.models]]
-provider = "anthropic"     # key from env ANTHROPIC_KEY
+provider = "anthropic"
 name = "claude-sonnet-5"
+auth = "subscription"      # or "api-key" (ANTHROPIC_KEY); see Authentication
 # extra_instructions = """
 # ...per-entry steering, same field the pr-agent backend uses (#98)."""
 ```
@@ -86,8 +161,8 @@ name = "claude-sonnet-5"
 Current limits, on purpose:
 
 - **Runner prerequisite:** the `claude` CLI must be installed on the runner
-  (`npm install -g @anthropic-ai/claude-code`); a missing binary fails that
-  branch with a clear message instead of throttling.
+  and authenticated per the mode above; a missing binary fails that branch
+  with a clear message instead of throttling.
 - **`anthropic` preset only.** The headless-Claude harness authenticates via
   `ANTHROPIC_API_KEY`. Other model families arrive with an OSS agentic harness
   implementing the same `run_review` signature — the strategy and driver do

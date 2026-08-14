@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import os
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -99,6 +100,42 @@ def fetch_pr_context(
         diff_files=files,
         truncated=truncated,
     )
+
+
+#: Paths in a checkout that configure an agent runtime rather than describe the
+#: project. Removed before review; see :func:`strip_agent_config`.
+AGENT_CONFIG_PATHS = (".claude", ".mcp.json", ".cursor", ".github/copilot-instructions.md")
+
+
+def strip_agent_config(root: Path) -> list[str]:
+    """Delete agent-runtime config from a checkout; return what was removed.
+
+    Defense in depth behind the clean working directory in
+    :mod:`sidecar.reviewer.harness`. That alone stops the documented execution
+    vectors (project hooks and ``.mcp.json`` servers load from the working
+    directory, not from an ``--add-dir`` root), but skills and subagents *are*
+    read from additional roots, and the reviewer should not inherit
+    instructions from the code it is judging in any case.
+
+    The files still appear in the diff the reviewer reads, so a PR that edits
+    them remains reviewable -- and worth reporting, which the strategy prompt
+    asks for explicitly. Removal is best-effort: this operates on a throwaway
+    checkout, so a failure to delete is not worth failing the review over.
+    """
+    removed: list[str] = []
+    for rel in AGENT_CONFIG_PATHS:
+        target = root / rel
+        try:
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            elif target.exists():
+                target.unlink()
+            else:
+                continue
+        except OSError:
+            continue
+        removed.append(rel)
+    return removed
 
 
 def checkout_pr_head(

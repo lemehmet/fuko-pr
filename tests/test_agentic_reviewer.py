@@ -13,8 +13,14 @@ from sidecar.reviewer.checkout import (
     PRContext,
     checkout_pr_head,
     fetch_pr_context,
+    strip_agent_config,
 )
-from sidecar.reviewer.harness import HarnessNotAvailableError, run_review
+from sidecar.reviewer.harness import (
+    HarnessNotAvailableError,
+    check_auth,
+    is_auth_failure,
+    run_review,
+)
 from sidecar.reviewer.prompt import (
     MAX_FINDINGS,
     ReviewParseError,
@@ -139,12 +145,15 @@ def test_checkout_pr_head_failure_raises(monkeypatch, tmp_path):
 
 
 def test_build_prompt_sections():
-    prompt = build_prompt(_ctx(), instructions="- prefer httpx")
+    prompt = build_prompt(_ctx(), instructions="- prefer httpx", checkout_root="/tmp/co")
     assert "<diff>" in prompt and DIFF.strip() in prompt
     assert "<operator-guidance>" in prompt and "- prefer httpx" in prompt
     assert "UNTRUSTED" in prompt
     assert f"at most {MAX_FINDINGS} findings" in prompt
     assert "truncated" not in prompt.split("<diff>")[0].split("Unified diff")[1]
+    # cwd is not the checkout, so the root must be named and paths stay relative.
+    assert "/tmp/co" in prompt
+    assert "repository-relative" in prompt
 
 
 def test_build_prompt_omits_guidance_and_flags_truncation():
@@ -176,7 +185,7 @@ def test_parse_review_rejects_garbage_and_bad_schema():
 def test_run_review_missing_binary(monkeypatch, tmp_path):
     monkeypatch.setattr(harness_mod.shutil, "which", lambda *a, **k: None)
     with pytest.raises(HarnessNotAvailableError):
-        run_review("p", tmp_path, model="m", env={}, timeout=5)
+        run_review("p", tmp_path, cwd=tmp_path, model="m", env={}, timeout=5)
 
 
 def test_run_review_invocation_shape(monkeypatch, tmp_path):
@@ -189,8 +198,9 @@ def test_run_review_invocation_shape(monkeypatch, tmp_path):
 
     monkeypatch.setattr(harness_mod.shutil, "which", lambda *a, **k: "/bin/claude")
     monkeypatch.setattr(harness_mod.subprocess, "run", fake_run)
+    repo, work = tmp_path / "repo", tmp_path / "work"
     result = run_review(
-        "the prompt", tmp_path, model="claude-x", env={"A": "1"}, timeout=9, max_turns=7
+        "the prompt", repo, cwd=work, model="claude-x", env={"A": "1"}, timeout=9, max_turns=7
     )
     assert result.returncode == 0 and result.text == '{"findings": []}'
     cmd = seen["cmd"]
@@ -199,9 +209,32 @@ def test_run_review_invocation_shape(monkeypatch, tmp_path):
     assert cmd[cmd.index("--allowedTools") + 1] == "Read,Grep,Glob"
     assert cmd[cmd.index("--max-turns") + 1] == "7"
     assert seen["kwargs"]["input"] == "the prompt"
-    assert seen["kwargs"]["cwd"] == str(tmp_path)
     assert seen["kwargs"]["env"] == {"A": "1"}
     assert seen["kwargs"]["timeout"] == 9
+
+
+def test_run_review_isolates_the_untrusted_checkout(monkeypatch, tmp_path):
+    """The agent must never run FROM the checkout: repo hooks would execute."""
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["kwargs"] = kwargs
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(harness_mod.shutil, "which", lambda *a, **k: "/bin/claude")
+    monkeypatch.setattr(harness_mod.subprocess, "run", fake_run)
+    repo, work = tmp_path / "repo", tmp_path / "work"
+    run_review("p", repo, cwd=work, model="m", env={}, timeout=5)
+    cmd, kwargs = seen["cmd"], seen["kwargs"]
+    assert kwargs["cwd"] == str(work) != str(repo)
+    assert cmd[cmd.index("--add-dir") + 1] == str(repo)
+    assert cmd[cmd.index("--setting-sources") + 1] == "user"
+    assert cmd[cmd.index("--settings") + 1] == '{"disableAllHooks":true}'
+    assert "--strict-mcp-config" in cmd
+    # --bare would harden further but forces API-key billing (it never reads
+    # OAuth), which would break subscription auth.
+    assert "--bare" not in cmd
 
 
 def test_run_review_timeout_maps_to_throttle_returncode(monkeypatch, tmp_path):
@@ -210,5 +243,49 @@ def test_run_review_timeout_maps_to_throttle_returncode(monkeypatch, tmp_path):
 
     monkeypatch.setattr(harness_mod.shutil, "which", lambda *a, **k: "/bin/claude")
     monkeypatch.setattr(harness_mod.subprocess, "run", fake_run)
-    result = run_review("p", tmp_path, model="m", env={}, timeout=9)
+    result = run_review("p", tmp_path, cwd=tmp_path, model="m", env={}, timeout=9)
     assert result.timed_out and result.returncode == 124
+
+
+def test_is_auth_failure_distinguishes_credentials_from_capacity():
+    assert is_auth_failure("Not logged in · Please run /login")
+    assert is_auth_failure("API Error: 401 invalid api key")
+    assert not is_auth_failure("You've hit your session limit")
+    assert not is_auth_failure("")
+
+
+def test_check_auth_parses_status(monkeypatch, tmp_path):
+    monkeypatch.setattr(harness_mod.shutil, "which", lambda *a, **k: "/bin/claude")
+    monkeypatch.setattr(
+        harness_mod.subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(
+            cmd, 0, stdout='{"loggedIn": true, "subscriptionType": "max"}', stderr=""
+        ),
+    )
+    assert check_auth({})["loggedIn"] is True
+
+
+def test_check_auth_degrades_to_none(monkeypatch):
+    monkeypatch.setattr(harness_mod.shutil, "which", lambda *a, **k: None)
+    assert check_auth({}) is None
+    monkeypatch.setattr(harness_mod.shutil, "which", lambda *a, **k: "/bin/claude")
+    monkeypatch.setattr(
+        harness_mod.subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout="not json", stderr=""),
+    )
+    assert check_auth({}) is None
+
+
+def test_strip_agent_config_removes_execution_vectors(tmp_path):
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.json").write_text('{"hooks": {}}', encoding="utf-8")
+    (tmp_path / ".mcp.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "src.py").write_text("x = 1", encoding="utf-8")
+    removed = strip_agent_config(tmp_path)
+    assert set(removed) == {".claude", ".mcp.json"}
+    assert not (tmp_path / ".claude").exists()
+    assert not (tmp_path / ".mcp.json").exists()
+    assert (tmp_path / "src.py").exists()
+    assert strip_agent_config(tmp_path) == []  # idempotent

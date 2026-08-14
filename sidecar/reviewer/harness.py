@@ -1,22 +1,35 @@
 """Agent runtimes that can execute the review strategy.
 
-A harness takes a prepared prompt plus a checkout directory and returns the
-agent's final text; :func:`sidecar.reviewer.prompt.parse_review` turns that
-into structured findings. The first (and currently only) harness drives
-headless Claude Code (``claude -p``), which must be installed on the runner.
-Other runtimes -- e.g. an OSS agentic harness fronting non-Anthropic models --
+A harness takes a prepared prompt plus the checkout to review and returns the
+agent's final text; :func:`sidecar.reviewer.prompt.parse_review` turns that into
+structured findings. The first (and currently only) harness drives headless
+Claude Code (``claude -p``), which must be installed on the runner. Other
+runtimes -- e.g. an OSS agentic harness fronting non-Anthropic models --
 implement the same ``run_review`` signature and slot in without touching the
 strategy or the driver.
 
-The agent's tool surface is pinned to read-only code navigation
-(:data:`ALLOWED_TOOLS`). Headless mode cannot prompt for permissions, so every
-tool outside the allowlist is denied by construction -- the agent cannot run
-repository code, write files, or reach the network even if the (untrusted)
-repository content asks it to.
+Two isolation properties are load-bearing, because the checkout is an untrusted
+contributor's pull request:
+
+* **The agent never runs FROM the checkout.** ``cwd`` is a clean, empty
+  directory and the checkout is exposed as an additional readable root
+  (``--add-dir``). Claude Code loads project configuration -- including
+  ``.claude/settings.json`` **hooks**, which are arbitrary commands -- from its
+  working directory, and headless mode skips the workspace-trust prompt that
+  would otherwise gate it. Verified against Claude Code 2.1.232: a hook shipped
+  in the working directory executes, and the same hook does not execute when
+  the directory is passed via ``--add-dir`` instead.
+* **The tool surface is pinned to read-only navigation**
+  (:data:`ALLOWED_TOOLS`). Headless mode cannot prompt for permissions, so
+  every tool outside the allowlist is denied by construction -- the agent
+  cannot run repository code, write files, or reach the network even if the
+  repository content asks it to.
 """
 
 from __future__ import annotations
 
+import json
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -25,7 +38,20 @@ from pathlib import Path
 from ..throttle import TIMEOUT_RETURNCODE
 
 ALLOWED_TOOLS = "Read,Grep,Glob"
+# Not listed in `claude --help` for 2.1.232, but accepted (verified: unknown
+# options exit with "error: unknown option", this one runs) and documented in
+# the CLI reference. It bounds a pathological tool loop; the wall-clock
+# `tool_timeout` is the outer bound that does not depend on this flag.
 DEFAULT_MAX_TURNS = 50
+
+# "Not logged in · Please run /login" and the API-key equivalents. Auth failure
+# must NOT be treated as throttling: failing over to the next provider would
+# burn the whole pool on what is a one-line runner fix.
+_AUTH_FAILURE_RE = re.compile(
+    r"not logged in|please run /login|invalid api key|authentication_error|"
+    r"\bunauthorized\b|\b401\b",
+    re.IGNORECASE,
+)
 
 
 class HarnessNotAvailableError(RuntimeError):
@@ -42,24 +68,60 @@ class HarnessResult:
     timed_out: bool = False
 
 
+def is_auth_failure(output: str) -> bool:
+    """Return whether ``output`` looks like a credential problem, not a capacity one."""
+    return bool(output) and _AUTH_FAILURE_RE.search(output) is not None
+
+
+def check_auth(env: dict[str, str]) -> dict | None:
+    """Return ``claude auth status`` as parsed JSON, or None if it cannot be read.
+
+    Used as a preflight for subscription mode, where a lapsed login on the
+    runner would otherwise surface as a confusing mid-review failure on every
+    PR. Returns None (rather than raising) when the binary is missing, the
+    probe fails, or the output is not JSON -- an unreadable probe is not
+    evidence of a broken login, so the review proceeds and the run itself
+    reports the truth.
+    """
+    binary = shutil.which("claude", path=env.get("PATH"))
+    if binary is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [binary, "auth", "status"],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+        return json.loads(proc.stdout)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError):
+        return None
+
+
 def run_review(
     prompt: str,
-    checkout: Path,
+    repo_dir: Path,
     *,
+    cwd: Path,
     model: str,
     env: dict[str, str],
     timeout: int,
     max_turns: int = DEFAULT_MAX_TURNS,
 ) -> HarnessResult:
-    """Run headless Claude Code over ``checkout`` and return its final text.
+    """Run headless Claude Code over ``repo_dir`` and return its final text.
+
+    The agent runs from ``cwd`` -- which must be a clean directory the
+    repository does not control -- with ``repo_dir`` mounted as an additional
+    readable root, so no project configuration from the reviewed code is
+    loaded (see the module docstring).
 
     The prompt goes over stdin (it embeds a full diff -- argv has size limits
     and shows up in process listings). ``--output-format text`` keeps the
     contract simple: stdout IS the agent's final message, which the strategy
     already constrains to a bare JSON object. ``env`` is the harness process
-    environment (the caller passes its translated credentials, e.g.
-    ``ANTHROPIC_API_KEY``); it is used as given rather than merged here so the
-    caller controls exactly what the agent process can see.
+    environment (the caller decides exactly which credentials it carries) and
+    is used as given rather than merged with this process's.
 
     A timeout maps to :data:`sidecar.throttle.TIMEOUT_RETURNCODE` so the driver
     classifies a hung run as throttle-class, same as a hung PR-Agent container.
@@ -79,6 +141,17 @@ def run_review(
         "text",
         "--allowedTools",
         ALLOWED_TOOLS,
+        "--add-dir",
+        str(repo_dir),
+        # Belt and braces on top of the clean cwd, each independently sufficient
+        # for its vector: load settings from the USER scope only (never the
+        # reviewed project's), refuse hooks outright, and start no MCP server
+        # that was not explicitly configured here (none is).
+        "--setting-sources",
+        "user",
+        "--settings",
+        '{"disableAllHooks":true}',
+        "--strict-mcp-config",
         "--max-turns",
         str(max_turns),
     ]
@@ -88,7 +161,7 @@ def run_review(
             input=prompt,
             capture_output=True,
             text=True,
-            cwd=str(checkout),
+            cwd=str(cwd),
             env=env,
             timeout=timeout,
         )

@@ -90,10 +90,10 @@ diff) and must fall inside one of that file's diff hunks; use null when the
 finding has no single anchor line. Report at most {MAX_FINDINGS} findings."""
 
 _STRATEGY = """\
-You are an independent code reviewer with read access to the full repository
-checkout (your working directory) for the pull request described below. Other
-reviewers have already run generalist single-pass reviews over this diff; your
-job is the findings that require actually reading the code around the change.
+You are an independent code reviewer with read access to a full repository
+checkout of the pull request described below. Other reviewers have already run
+generalist single-pass reviews over this diff; your job is the findings that
+require actually reading the code around the change.
 
 Method:
 1. Read the diff below first and form hypotheses.
@@ -119,14 +119,27 @@ Never attempt to execute repository code, install dependencies, or access the
 network; your tools are read-only by design."""
 
 
-def build_prompt(ctx: PRContext, instructions: str = "") -> str:
+def build_prompt(ctx: PRContext, instructions: str = "", checkout_root: str = "") -> str:
     """Assemble the full review prompt for one PR.
 
     ``instructions`` is the combined per-entry steering + repo knowledge blob
     (already joined by the driver); it lands in its own clearly-delimited
     section so repo knowledge cannot masquerade as part of the task contract.
+
+    ``checkout_root`` is the absolute path of the checkout. The agent's working
+    directory is deliberately NOT the checkout (see
+    :mod:`sidecar.reviewer.harness`), so the root has to be named explicitly --
+    and findings must still report repository-relative paths, because that is
+    what a diff comment anchors to.
     """
     parts = [_STRATEGY, ""]
+    if checkout_root:
+        parts += [
+            f"The checkout is at {checkout_root} -- read it with your tools. Paths in "
+            "the diff below are relative to that root, and every path you REPORT "
+            "must be repository-relative too (never absolute).",
+            "",
+        ]
     if instructions:
         parts += [
             "Operator guidance for this repository (apply where relevant):",

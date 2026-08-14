@@ -48,6 +48,12 @@ tools = ["review", "improve"]   # PR-Agent tools to run
 # GPU box, key from PRODIA_KEY; it has no default base_url, so each model
 # entry must set base_url to the rental's endpoint.)
 #
+# `auth` (agentic backend only): "auto" (default) | "api-key" | "subscription".
+# api-key reads the preset's key env var; subscription runs as the runner's own
+# logged-in Claude session and passes NO key. Pin it explicitly on a runner
+# where a key is also present — an ambient key outranks the subscription and
+# would silently bill per token. See docs/agentic-reviewer.md.
+#
 # Per-entry review steering: an optional `extra_instructions` string on any
 # entry is prepended to the shared knowledge blob for THAT entry's runs only —
 # use it to differentiate a fleet that would otherwise converge on the same

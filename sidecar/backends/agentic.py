@@ -33,15 +33,23 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import rmtree
+from tempfile import mkdtemp
 
 import httpx
 
 from ..fukoconfig import ModelConfig, ReviewConfig
 from ..presets import ProviderPreset
-from ..reviewer.checkout import CheckoutError, checkout_pr_head, fetch_pr_context
+from ..reviewer.checkout import (
+    CheckoutError,
+    checkout_pr_head,
+    fetch_pr_context,
+    strip_agent_config,
+)
 from ..reviewer.harness import (
     DEFAULT_MAX_TURNS,
     HarnessNotAvailableError,
+    check_auth,
+    is_auth_failure,
     run_review,
 )
 from ..reviewer.prompt import (
@@ -57,9 +65,25 @@ from .base import InvokeResult, PRRef
 
 _ENV_MODEL = "FUKO_AGENTIC_MODEL"
 _ENV_INSTRUCTIONS = "FUKO_AGENTIC_INSTRUCTIONS"
+_ENV_AUTH = "FUKO_AGENTIC_AUTH"
 # Runner-merged GitHub credential names (PR-Agent dunder shape until #99 moves
 # them behind the driver contract); the process fallbacks keep laptop runs working.
 _ENV_GH_TOKEN = "GITHUB__USER_TOKEN"
+
+_AUTH_API_KEY = "api-key"
+_AUTH_SUBSCRIPTION = "subscription"
+# Every credential that can decide who pays. Claude Code's precedence is
+# ANTHROPIC_AUTH_TOKEN > ANTHROPIC_API_KEY > apiKeyHelper > CLAUDE_CODE_OAUTH_TOKEN
+# > the runner's interactive login, so an ambient API key silently moves billing
+# OFF a subscription (verified: with ANTHROPIC_API_KEY set, `claude auth status`
+# reports apiKeySource=ANTHROPIC_API_KEY and subscriptionType=null). All of them
+# are therefore stripped from the ambient environment and each mode injects
+# exactly the one it means to use.
+_ANTHROPIC_CRED_VARS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+)
 
 
 @dataclass
@@ -96,14 +120,25 @@ class AgenticBackend:
     ) -> dict[str, str]:
         """Translate the model entry into the harness environment.
 
-        Only the ``anthropic`` preset family is accepted: the headless-Claude
-        harness reads ``ANTHROPIC_API_KEY`` (mapped here from the preset's
-        ``key_env``) and optionally ``ANTHROPIC_BASE_URL``. The per-entry
-        ``extra_instructions`` and the shared ``knowledge`` blob are combined
-        exactly as the pr-agent backend combines them (steering first) and
-        carried under :data:`_ENV_INSTRUCTIONS` into the review prompt's
-        operator-guidance section. ``tools`` is accepted for protocol parity;
-        anything besides ``review`` is ignored (this backend has one tool).
+        Only the ``anthropic`` preset family is accepted: the harness is
+        headless Claude Code. It authenticates two ways, chosen by the entry's
+        ``auth`` field (see :attr:`sidecar.fukoconfig.ModelConfig.auth`):
+
+        * ``api-key`` -- the preset's key env var is passed through as
+          ``ANTHROPIC_API_KEY`` (plus ``ANTHROPIC_BASE_URL`` for a gateway).
+          A missing key is a config error raised here, not a runtime surprise.
+        * ``subscription`` -- NO key is passed; the agent authenticates as the
+          runner's own logged-in Claude session (``claude setup-token`` for CI,
+          or an interactive login under ``HOME``/``CLAUDE_CONFIG_DIR``).
+
+        ``auto`` resolves to ``api-key`` when the preset's key env var is set,
+        else ``subscription``.
+
+        The per-entry ``extra_instructions`` and the shared ``knowledge`` blob
+        are combined exactly as the pr-agent backend combines them (steering
+        first) and carried under :data:`_ENV_INSTRUCTIONS` into the review
+        prompt's operator-guidance section. ``tools`` is accepted for protocol
+        parity; anything besides ``review`` is ignored (one tool here).
         """
         if preset.litellm_prefix != "anthropic/":
             raise ValueError(
@@ -112,33 +147,96 @@ class AgenticBackend:
                 f"'{model.provider}'. Other model families arrive with an OSS "
                 f"harness -- until then run them on the pr-agent backend."
             )
-        env: dict[str, str] = {_ENV_MODEL: model.name}
-        if preset.key_env:
-            key = os.environ.get(preset.key_env)
-            if key:
-                env["ANTHROPIC_API_KEY"] = key
-        base_url = model.base_url or preset.base_url
-        if base_url:
-            env["ANTHROPIC_BASE_URL"] = base_url
+        auth = self._resolve_auth(preset, model)
+        env: dict[str, str] = {_ENV_MODEL: model.name, _ENV_AUTH: auth}
+        if auth == _AUTH_API_KEY:
+            key = os.environ.get(preset.key_env or "", "")
+            if not key:
+                raise ValueError(
+                    f"model entry '{model.provider}/{model.name}' asks for "
+                    f"auth = 'api-key' but {preset.key_env or '<no key env>'} is "
+                    f"not set; export it, or use auth = 'subscription' to run as "
+                    f"the runner's own logged-in Claude session."
+                )
+            env["ANTHROPIC_API_KEY"] = key
+            base_url = model.base_url or preset.base_url
+            if base_url:
+                env["ANTHROPIC_BASE_URL"] = base_url
         instructions = "\n\n".join(part for part in (model.extra_instructions, knowledge) if part)
         if instructions:
             env[_ENV_INSTRUCTIONS] = instructions
         return env
 
+    @staticmethod
+    def _resolve_auth(preset: ProviderPreset, model: ModelConfig) -> str:
+        """Resolve the entry's ``auth`` setting to a concrete mode.
+
+        ``auto`` prefers an available API key because that is the mode a
+        key-holding user almost always means; a runner with no key is a
+        subscription runner. Pin the field explicitly when both are present --
+        that is the case where the default would quietly charge per token.
+        """
+        if model.auth != "auto":
+            return model.auth
+        has_key = bool(preset.key_env and os.environ.get(preset.key_env))
+        return _AUTH_API_KEY if has_key else _AUTH_SUBSCRIPTION
+
     def invoke(self, pr: PRRef, env: dict[str, str], tools: list[str]) -> InvokeResult:
         """Check out the PR head, run the agent, and stash the parsed findings.
 
-        The harness subprocess gets the ambient environment MINUS GitHub
-        credentials (the agent's tools are read-only and networkless, but the
-        review process still should not carry tokens it has no use for), plus
-        the translated Anthropic credentials. A throttle-shaped failure
-        (timeout, 429/overloaded signature) reports ``throttled=True`` so the
-        pool fails over exactly as it does for PR-Agent.
+        The harness subprocess gets the ambient environment MINUS every GitHub
+        and Anthropic credential, plus exactly the credential its auth mode
+        means to use (see :data:`_ANTHROPIC_CRED_VARS`). Everything else passes
+        through untouched -- notably ``HOME``/``CLAUDE_CONFIG_DIR``, which is
+        where a subscription login lives.
+
+        The agent runs from a clean scratch directory with the checkout mounted
+        read-only beside it, never *inside* the checkout: project config in a
+        reviewed repository would otherwise execute on this runner (see
+        :mod:`sidecar.reviewer.harness`). The checkout is additionally stripped
+        of agent-config files before the run.
+
+        A throttle-shaped failure (timeout, 429/overloaded, an exhausted
+        subscription window) reports ``throttled=True`` so the pool fails over
+        exactly as it does for PR-Agent; an authentication failure explicitly
+        does NOT, because failing over would burn every remaining provider on
+        what is a one-line runner fix.
         """
         token = env.get(_ENV_GH_TOKEN) or os.environ.get("GITHUB_TOKEN", "")
         api_url = os.environ.get("GITHUB_API_URL", "https://api.github.com")
         server_url = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
         model_name = env.get(_ENV_MODEL, "")
+        auth = env.get(_ENV_AUTH, _AUTH_SUBSCRIPTION)
+
+        harness_env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("GITHUB_TOKEN", _ENV_GH_TOKEN)
+            and not k.startswith("FUKO_GITHUB_")
+            and k not in _ANTHROPIC_CRED_VARS
+        }
+        if auth == _AUTH_API_KEY:
+            for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"):
+                if key in env:
+                    harness_env[key] = env[key]
+        else:
+            # The CI form of a subscription login: a long-lived token from
+            # `claude setup-token`. An interactive login instead lives under
+            # HOME/CLAUDE_CONFIG_DIR, which never left the environment.
+            oauth = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+            if oauth:
+                harness_env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth
+            status = check_auth(harness_env)
+            if status is not None and not status.get("loggedIn"):
+                return InvokeResult(
+                    returncode=1,
+                    detail=(
+                        "agentic backend is in subscription auth mode but this "
+                        "runner has no logged-in Claude session; run `claude "
+                        "setup-token` and export CLAUDE_CODE_OAUTH_TOKEN, or set "
+                        "auth = 'api-key' on this model entry"
+                    ),
+                )
 
         try:
             ctx = fetch_pr_context(pr.repo, pr.number, token=token, api_url=api_url)
@@ -150,21 +248,15 @@ class AgenticBackend:
             )
         except CheckoutError as e:
             return InvokeResult(returncode=1, detail=str(e))
+        workdir = Path(mkdtemp(prefix="fuko-agentic-cwd-"))
 
-        harness_env = {
-            k: v
-            for k, v in os.environ.items()
-            if k not in ("GITHUB_TOKEN", _ENV_GH_TOKEN) and not k.startswith("FUKO_GITHUB_")
-        }
-        for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"):
-            if key in env:
-                harness_env[key] = env[key]
-
-        prompt = build_prompt(ctx, env.get(_ENV_INSTRUCTIONS, ""))
+        prompt = build_prompt(ctx, env.get(_ENV_INSTRUCTIONS, ""), checkout_root=str(checkout))
         try:
+            strip_agent_config(Path(checkout))
             result = run_review(
                 prompt,
                 Path(checkout),
+                cwd=workdir,
                 model=model_name,
                 env=harness_env,
                 timeout=self.tool_timeout,
@@ -174,9 +266,18 @@ class AgenticBackend:
             return InvokeResult(returncode=1, detail=str(e))
         finally:
             rmtree(checkout, ignore_errors=True)
+            rmtree(workdir, ignore_errors=True)
 
         if result.returncode != 0:
             output = result.stderr + "\n" + result.text
+            if is_auth_failure(output):
+                return InvokeResult(
+                    returncode=result.returncode,
+                    detail=(
+                        f"agent could not authenticate in {auth} mode: "
+                        f"{result.stderr.strip()[:300]}"
+                    ),
+                )
             return InvokeResult(
                 returncode=result.returncode,
                 detail=result.stderr.strip()[:500] or "agent run failed",
