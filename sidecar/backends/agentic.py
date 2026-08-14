@@ -31,6 +31,7 @@ import os
 import sys
 import threading
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from shutil import rmtree
 from tempfile import mkdtemp
@@ -88,6 +89,18 @@ _GITHUB_CRED_VARS = (
     "GITHUB_ENTERPRISE_TOKEN",
 )
 
+
+def _identity(token: str) -> str:
+    """Fingerprint the branch's posting token, to key its stash without holding it.
+
+    A hash, not the token: this value lives in a dict key that could surface in
+    a traceback or a debugger, and a GitHub App token there would be a
+    credential in a log. Truncation is fine -- this only has to separate the
+    handful of branches on one PR, not resist collision attacks.
+    """
+    return sha256(token.encode()).hexdigest()[:12] if token else ""
+
+
 _AUTH_API_KEY = "api-key"
 _AUTH_SUBSCRIPTION = "subscription"
 # Everything ambient that can decide WHO PAYS or WHERE THE TRAFFIC GOES. The
@@ -138,7 +151,14 @@ class AgenticBackend:
         """Take the per-tool timeout from ``[review]``; other knobs are constants."""
         self.tool_timeout = config.tool_timeout if config else 900
         self.max_turns = DEFAULT_MAX_TURNS
-        self._pending: dict[tuple[str, str], _PendingReview] = {}
+        # Keyed (pr_url, model, identity): two [[review.models]] entries may
+        # legally share a provider/name and differ only by `token_env` (the same
+        # model run under two App identities) -- nothing validates uniqueness --
+        # so a (pr_url, model) key collides in concurrent A/B and one branch's
+        # invoke silently overwrites the other's stash. The identity component
+        # is a fingerprint of the posting token, which is exactly what makes the
+        # branches distinct.
+        self._pending: dict[tuple[str, str, str], _PendingReview] = {}
         self._lock = threading.Lock()
 
     def build_env(
@@ -355,7 +375,7 @@ class AgenticBackend:
         confident = [f for f in review.findings if f.confidence.strip().lower() != "low"]
         kept = confident[:MAX_FINDINGS]
         with self._lock:
-            self._pending[(pr.url, model_name)] = _PendingReview(
+            self._pending[(pr.url, model_name, _identity(token))] = _PendingReview(
                 findings=kept,
                 summary=review.summary,
                 head_sha=ctx.head_sha,
@@ -392,12 +412,15 @@ class AgenticBackend:
         ``actor`` is unused (protocol parity): output is born marked under this
         branch's own identity, so there is no foreign-comment scoping problem.
         """
-        stash = self._claim(pr.url, model)
-        if stash is None:
-            return []
+        # Resolve the token FIRST: it fingerprints the branch, and the stash is
+        # keyed by that fingerprint (see __init__), so it is an input to the
+        # claim rather than something needed only for posting.
         token = os.environ.get("GITHUB_TOKEN", "") if token is None else token
         if api_url is None:
             api_url = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+        stash = self._claim(pr.url, model, _identity(token))
+        if stash is None:
+            return []
 
         signals: list[ReviewSignal] = []
         inline: list[tuple[AgenticFinding, dict]] = []
@@ -443,8 +466,8 @@ class AgenticBackend:
         posted = self._post_review(pr, token, api_url, stash, inline, overflow)
         return signals if posted else []
 
-    def _claim(self, pr_url: str, model: str) -> _PendingReview | None:
-        """Pop the pending review for ``(pr_url, model)``, tolerating id spelling.
+    def _claim(self, pr_url: str, model: str, identity: str = "") -> _PendingReview | None:
+        """Pop the pending review for this PR, model and branch identity.
 
         ``invoke`` keys the stash by the bare harness model name while the
         runner hands egress the litellm-prefixed id, so the prefixed spelling
@@ -462,13 +485,17 @@ class AgenticBackend:
         rule does not know that, and nothing stops a pair where they differ) --
         while exact bare equality already covers the litellm-prefix drift this
         fallback exists for, since both sides are reduced the same way.
+
+        ``identity`` narrows every lookup to the branch that produced the stash,
+        so two entries sharing a provider/name and differing only by
+        ``token_env`` cannot claim each other's findings.
         """
         bare = model.rsplit("/", 1)[-1]
         with self._lock:
-            for key in ((pr_url, bare), (pr_url, model)):
+            for key in ((pr_url, bare, identity), (pr_url, model, identity)):
                 if key in self._pending:
                     return self._pending.pop(key)
-            mine = [k for k in self._pending if k[0] == pr_url]
+            mine = [k for k in self._pending if k[0] == pr_url and k[2] == identity]
             if len(mine) == 1:
                 stashed = mine[0][1]
                 stashed_bare = stashed.rsplit("/", 1)[-1]

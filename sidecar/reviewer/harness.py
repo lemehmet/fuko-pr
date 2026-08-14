@@ -89,6 +89,26 @@ SENSITIVE_HOME_DIRS = (
 #: Single files worth the same treatment.
 SENSITIVE_HOME_FILES = (".netrc", ".git-credentials", ".claude.json")
 
+#: Kernel pseudo-filesystems, denied because ``/proc/self/environ`` hands the
+#: agent its OWN process environment -- which necessarily holds the credential
+#: this backend just injected (``ANTHROPIC_API_KEY`` in api-key mode,
+#: ``CLAUDE_CODE_OAUTH_TOKEN`` in subscription mode). Published findings are the
+#: same egress channel as the original read-confinement bug; only the source
+#: differs. No legitimate code review reads ``/proc``, ``/sys`` or ``/dev``, so
+#: this costs a real reviewer nothing.
+#:
+#: NOT empirically verified: this was developed on darwin, which has no
+#: ``/proc``. The rules use the ``Read(//abs/**)`` spelling that WAS verified
+#: (see the matrix above), and path rules were measured to cover ``Grep`` too,
+#: so one rule closes both tools -- but the specific ``/proc`` denial is
+#: reasoned, not measured, and should be checked on a Linux runner.
+#:
+#: This is also precisely why fuko-pr#102 (running the reviewer in a container)
+#: matters: a denylist over ``/proc`` still leaves the credential sitting in
+#: the agent's own environment, reachable by any path we failed to enumerate.
+#: Only a boundary fixes the class; this closes the instance.
+SENSITIVE_SYSTEM_DIRS = ("/proc", "/sys", "/dev")
+
 
 def _permission_settings(env: dict[str, str]) -> str:
     """Build the ``--settings`` payload: hooks off, credential stores unreadable.
@@ -113,6 +133,9 @@ def _permission_settings(env: dict[str, str]) -> str:
     config_dir = (env.get("CLAUDE_CONFIG_DIR") or "").replace("\\", "/").rstrip("/")
     if config_dir:
         candidates.append((config_dir, True))
+    # Unconditional: these do not depend on HOME, and on a runner without one
+    # they are the only rules that remain.
+    candidates += [(d, True) for d in SENSITIVE_SYSTEM_DIRS]
 
     deny = [
         f"Read(/{path}/**)" if is_dir else f"Read(/{path})"

@@ -212,7 +212,12 @@ def build_prompt(
         if ctx.truncated
         else ""
     )
-    parts += [f"Pull request: {ctx.title}"]
+    # The title is contributor-controlled exactly like the body and the diff, so
+    # it gets the same fence. It was the one field interpolated raw, which made
+    # it the cheapest way to reach the instruction stream in a module that
+    # otherwise fences everything.
+    parts += ["Pull request title:"]
+    parts += _fenced("pr-title", ctx.title or "(no title)")
     parts += _fenced("pr-description", ctx.body or "(no description)")
     parts += [
         "",

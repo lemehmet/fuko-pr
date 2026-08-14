@@ -145,7 +145,7 @@ def test_invoke_stashes_and_filters(monkeypatch):
     result, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
     assert result.returncode == 0
     assert "2 findings" in result.detail
-    stash = backend._pending[(PR.url, "claude-x")]
+    stash = backend._pending[(PR.url, "claude-x", "")]
     assert [f.title for f in stash.findings] == ["leak", "stale doc"]  # low-conf dropped
     assert stash.withheld_low == 1
     assert stash.over_cap == 0
@@ -365,11 +365,15 @@ class _FakeHttpx:
         return _C()
 
 
-def _seed(backend: AgenticBackend, model_key="claude-x"):
+# Tests post with token="t"; the stash is keyed by that token's fingerprint.
+TOKEN_ID = agentic_mod._identity("t")
+
+
+def _seed(backend: AgenticBackend, model_key="claude-x", identity=TOKEN_ID):
     from sidecar.backends.agentic import _PendingReview
     from sidecar.reviewer.prompt import AgenticFinding
 
-    backend._pending[(PR.url, model_key)] = _PendingReview(
+    backend._pending[(PR.url, model_key, identity)] = _PendingReview(
         findings=[
             AgenticFinding(
                 file="src/app.py",
@@ -390,7 +394,7 @@ def _seed(backend: AgenticBackend, model_key="claude-x"):
 
 def test_normalize_posts_review_with_markers(monkeypatch):
     backend = AgenticBackend()
-    _seed(backend)
+    _seed(backend, identity=agentic_mod._identity("tok"))
     fake = _FakeHttpx([200])
     monkeypatch.setattr(agentic_mod, "httpx", fake)
     signals = backend.normalize_output(
@@ -468,7 +472,7 @@ def test_review_body_separates_low_confidence_from_cap(monkeypatch):
     from sidecar.reviewer.prompt import AgenticFinding
 
     backend = AgenticBackend()
-    backend._pending[(PR.url, "claude-x")] = _PendingReview(
+    backend._pending[(PR.url, "claude-x", TOKEN_ID)] = _PendingReview(
         findings=[AgenticFinding(file="docs/a.md", title="t", body="b")],
         summary="s",
         head_sha="beef",
@@ -504,7 +508,7 @@ def test_claim_does_not_steal_another_models_review(monkeypatch):
     assert backend.normalize_output(PR, "anthropic/claude-sonnet", token="t") == []
     assert fake.posts == []
     # Still there for its rightful owner.
-    assert (PR.url, "claude-opus") in backend._pending
+    assert (PR.url, "claude-opus", TOKEN_ID) in backend._pending
 
 
 def test_claim_tolerates_prefixed_spelling_of_the_same_model(monkeypatch):
@@ -513,6 +517,23 @@ def test_claim_tolerates_prefixed_spelling_of_the_same_model(monkeypatch):
     fake = _FakeHttpx([200])
     monkeypatch.setattr(agentic_mod, "httpx", fake)
     assert len(backend.normalize_output(PR, "anthropic/claude-x", token="t")) == 2
+
+
+def test_two_identities_of_the_same_model_do_not_collide(monkeypatch):
+    """Two [[review.models]] entries may share provider/name and differ by token_env."""
+    backend = AgenticBackend()
+    _seed(backend, identity=agentic_mod._identity("tok-a"))
+    _seed(backend, identity=agentic_mod._identity("tok-b"))
+    assert len(backend._pending) == 2  # the second must not overwrite the first
+
+    fake = _FakeHttpx([200, 200])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+
+    assert len(backend.normalize_output(PR, "claude-x", token="tok-a")) == 2
+    # The other identity's stash is untouched and still claimable by its owner.
+    assert (PR.url, "claude-x", agentic_mod._identity("tok-b")) in backend._pending
+    assert len(backend.normalize_output(PR, "claude-x", token="tok-b")) == 2
+    assert backend._pending == {}
 
 
 def test_claim_rejects_a_model_that_merely_ends_with_the_stashed_name(monkeypatch):
@@ -524,7 +545,7 @@ def test_claim_rejects_a_model_that_merely_ends_with_the_stashed_name(monkeypatc
 
     assert backend.normalize_output(PR, "anthropic/claude-sonnet-4", token="t") == []
     assert fake.posts == []
-    assert (PR.url, "sonnet-4") in backend._pending
+    assert (PR.url, "sonnet-4", TOKEN_ID) in backend._pending
 
 
 def test_normalize_marks_unanchored_findings_in_the_body(monkeypatch):
@@ -572,7 +593,7 @@ def test_invoke_withholds_low_confidence_regardless_of_spelling(monkeypatch, spe
     )
     backend = AgenticBackend()
     _invoke(monkeypatch, backend, HarnessResult(0, review))
-    stash = backend._pending[(PR.url, "claude-x")]
+    stash = backend._pending[(PR.url, "claude-x", "")]
     assert [f.title for f in stash.findings] == ["keep"]
     assert stash.withheld_low == 1
 
