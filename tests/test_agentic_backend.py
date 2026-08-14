@@ -445,8 +445,9 @@ def test_normalize_body_only_fallback_keeps_markers(monkeypatch):
     signals = backend.normalize_output(PR, "claude-x", token="t")
 
     body = fake.posts[1][1]["body"]
-    markers = extract_markers(body)
-    assert [m.id for m in markers] == [s.id for s in signals if s.file == "src/app.py"]
+    # Every finding is recoverable from the body: the demoted inline one and the
+    # unanchored one that was already rendered there.
+    assert sorted(m.id for m in extract_markers(body)) == sorted(s.id for s in signals)
     assert "read it" in body  # evidence survives the demotion too
 
 
@@ -512,6 +513,80 @@ def test_claim_tolerates_prefixed_spelling_of_the_same_model(monkeypatch):
     fake = _FakeHttpx([200])
     monkeypatch.setattr(agentic_mod, "httpx", fake)
     assert len(backend.normalize_output(PR, "anthropic/claude-x", token="t")) == 2
+
+
+def test_normalize_marks_unanchored_findings_in_the_body(monkeypatch):
+    """Findings outside the diff are this reviewer's specialty -- they need markers too."""
+    backend = AgenticBackend()
+    _seed(backend)
+    fake = _FakeHttpx([200])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    signals = backend.normalize_output(PR, "claude-x", token="t")
+
+    body = fake.posts[0][1]["body"]
+    unanchored = next(s for s in signals if s.file == "docs/other.md")
+    assert unanchored.id in [m.id for m in extract_markers(body)]
+    assert "docs/other.md" in body
+
+
+def test_normalize_unanchored_findings_carry_the_visible_label(monkeypatch):
+    backend = AgenticBackend()
+    _seed(backend)
+    fake = _FakeHttpx([200])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    backend.normalize_output(
+        PR, "anthropic/claude-x", compare_label="anthropic/claude-x", token="t"
+    )
+    assert "🤖 `anthropic/claude-x`" in fake.posts[0][1]["body"]
+
+
+@pytest.mark.parametrize("spelling", ["low", "Low", "LOW", " low "])
+def test_invoke_withholds_low_confidence_regardless_of_spelling(monkeypatch, spelling):
+    """The pressure valve must meet the model where it writes, not where we hope."""
+    review = json.dumps(
+        {
+            "summary": "s",
+            "findings": [
+                {"file": "src/app.py", "line": 4, "title": "keep", "body": "b"},
+                {
+                    "file": "src/app.py",
+                    "line": 8,
+                    "title": "hedged",
+                    "body": "b",
+                    "confidence": spelling,
+                },
+            ],
+        }
+    )
+    backend = AgenticBackend()
+    _invoke(monkeypatch, backend, HarnessResult(0, review))
+    stash = backend._pending[(PR.url, "claude-x")]
+    assert [f.title for f in stash.findings] == ["keep"]
+    assert stash.withheld_low == 1
+
+
+def test_normalize_transport_failure_returns_no_signals(monkeypatch, capsys):
+    """A connection error means nothing reached the PR, same as a rejected post."""
+    backend = AgenticBackend()
+    _seed(backend)
+
+    class _Boom(_FakeHttpx):
+        def Client(self, **kwargs):  # noqa: N802 - mimics httpx.Client
+            class _C:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def post(self, url, json=None):
+                    raise httpx.ConnectError("no route to host")
+
+            return _C()
+
+    monkeypatch.setattr(agentic_mod, "httpx", _Boom([]))
+    assert backend.normalize_output(PR, "claude-x", token="t") == []
+    assert "transport" in capsys.readouterr().err
 
 
 def test_normalize_without_stash_is_empty(monkeypatch):

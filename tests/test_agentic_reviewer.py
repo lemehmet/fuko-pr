@@ -405,6 +405,36 @@ def test_run_review_denies_reads_of_credential_stores(monkeypatch, tmp_path):
     assert "Read(//cfg/claude/**)" in deny
 
 
+def test_permission_rules_use_the_double_slash_absolute_spelling():
+    """Pin the exact spelling: `//abs` matches, `/abs` and `///abs` silently do not.
+
+    Both wrong forms have been proposed as "fixes" (one reviewer read the f-string
+    as emitting a single slash and suggested adding another, which would produce
+    `///`). Measured on 2.1.232: only the two-slash form denies.
+    """
+    deny = json.loads(harness_mod._permission_settings({"HOME": "/home/runner"}))["permissions"][
+        "deny"
+    ]
+    assert deny, "a runner with HOME must get rules"
+    for rule in deny:
+        assert rule.startswith("Read(//"), rule
+        assert "///" not in rule, rule
+        assert not rule.startswith("Read(/home"), rule  # the single-slash form
+
+
+def test_permission_rules_do_not_include_tool_scoped_grep_rules():
+    """Deliberate: `Grep(...)` rules are not honored, `Read(...)` path rules cover Grep.
+
+    Measured on 2.1.232 -- with only `Grep(//abs/**)` denied, an agent asked to
+    Grep the canary still read it; with only `Read(//abs/**)` denied, it was
+    refused. Emitting Grep rules would imply a guarantee that does not exist.
+    """
+    deny = json.loads(harness_mod._permission_settings({"HOME": "/home/runner"}))["permissions"][
+        "deny"
+    ]
+    assert not any(rule.startswith("Grep(") for rule in deny)
+
+
 def test_run_review_settings_survive_a_home_less_environment(monkeypatch, tmp_path):
     """No HOME (hardened runner) must still yield valid settings, not a crash."""
     seen = {}
@@ -507,6 +537,23 @@ def test_strip_agent_config_reaches_nested_project_roots(tmp_path):
     assert (nested / "keep.py").exists()
     assert (tmp_path / ".git" / "config").exists()
     assert strip_agent_config(tmp_path) == []  # idempotent
+
+
+def test_strip_agent_config_skips_paths_under_a_symlinked_parent(tmp_path):
+    """A symlinked PARENT is the same escape one level up as a symlinked leaf."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "copilot-instructions.md"
+    victim.write_text("precious", encoding="utf-8")
+    checkout = tmp_path / "co"
+    checkout.mkdir()
+    (checkout / ".github").symlink_to(outside, target_is_directory=True)
+
+    removed = strip_agent_config(checkout)
+
+    assert ".github/copilot-instructions.md" not in removed
+    assert victim.read_text(encoding="utf-8") == "precious"
+    assert (checkout / ".github").is_symlink()  # the link itself is left alone
 
 
 def test_strip_agent_config_removes_other_tools_config_at_root_only(tmp_path):

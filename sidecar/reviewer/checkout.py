@@ -124,13 +124,35 @@ AGENT_CONFIG_NAMES = (".claude", ".mcp.json")
 AGENT_CONFIG_ROOT_PATHS = (".cursor", ".github/copilot-instructions.md")
 
 
+def _has_symlinked_parent(target: Path, root: Path) -> bool:
+    """Whether any directory component between ``root`` and ``target`` is a link.
+
+    A symlinked *leaf* is handled by :func:`_remove_path`, but a symlinked
+    parent is the same escape one level up: ``.github/copilot-instructions.md``
+    has a directory component, so a PR that ships ``.github`` as a link to
+    somewhere outside the checkout would make ``exists()`` follow it and
+    ``unlink()`` delete the target's file rather than the checkout's.
+    """
+    try:
+        relative = target.relative_to(root)
+    except ValueError:
+        return True
+    current = root
+    for part in relative.parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
 def _remove_path(target: Path) -> bool:
     """Best-effort delete of a file or directory; report whether it was there.
 
     Symlinks are unlinked, never followed: the checkout is contributor-
     controlled, so a ``.claude`` symlink pointing outside it must cost the link
     and nothing else. (``is_dir()`` follows symlinks, which is why the symlink
-    test has to come first.)
+    test has to come first.) Callers are responsible for rejecting a target
+    whose PARENT is a link -- see :func:`_has_symlinked_parent`.
     """
     try:
         if target.is_symlink():
@@ -170,7 +192,13 @@ def strip_agent_config(root: Path) -> list[str]:
     """
     removed: list[str] = []
     for rel in AGENT_CONFIG_ROOT_PATHS:
-        if _remove_path(root / rel):
+        target = root / rel
+        # A multi-component root path (`.github/copilot-instructions.md`) can be
+        # reached through a symlinked directory; deleting through it would land
+        # outside the checkout entirely.
+        if _has_symlinked_parent(target, root):
+            continue
+        if _remove_path(target):
             removed.append(rel)
     for dirpath, dirnames, filenames in os.walk(root):
         here = Path(dirpath)

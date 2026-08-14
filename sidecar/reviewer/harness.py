@@ -52,9 +52,29 @@ ALLOWED_TOOLS = "Read,Grep,Glob"
 #: makes ``~/.claude`` the highest-value target on the box.
 #:
 #: This is a denylist over the credential stores, not a sandbox: it closes the
-#: named paths, it does not confine the agent. Real confinement needs the run
-#: to happen in a container or under a dedicated unprivileged user, which is
-#: the runner's job, not this module's.
+#: named paths, it does not confine the agent -- Read and Grep still reach
+#: anything else on the runner (``/etc``, other checkouts in the work dir).
+#: Real confinement needs the run to happen in a container or under a dedicated
+#: unprivileged user, which is the runner's job, not this module's.
+#:
+#: Two properties below are load-bearing and were measured on 2.1.232, because
+#: both are the opposite of what the rule syntax suggests. Canary outside cwd
+#: and outside every ``--add-dir`` root, agent asked to Grep it:
+#:
+#: ===========================================  ==========
+#: deny rules                                   outcome
+#: ===========================================  ==========
+#: (none)                                       LEAKED
+#: ``Read(//abs/**)``                           blocked
+#: ``Read(//abs/**)`` + ``Grep(//abs/**)``      blocked
+#: ``Grep(//abs/**)``                           LEAKED
+#: ===========================================  ==========
+#:
+#: So: a PATH rule is enforced across the read-class tools -- the ``Read(...)``
+#: rules below are what actually stop ``Grep`` from reading a credential file --
+#: while a TOOL-scoped ``Grep(...)`` rule is not honored at all. We therefore
+#: emit only ``Read(...)`` rules on purpose. Adding ``Grep(...)`` entries would
+#: be decorative and would imply a coverage guarantee that does not exist.
 SENSITIVE_HOME_DIRS = (
     ".claude",
     ".ssh",

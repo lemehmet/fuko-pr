@@ -347,7 +347,12 @@ class AgenticBackend:
         except ReviewParseError as e:
             return InvokeResult(returncode=1, detail=str(e)[:500])
 
-        confident = [f for f in review.findings if f.confidence != "low"]
+        # Case/whitespace-normalized: `confidence` is deliberately a free-form
+        # str so an off-vocabulary value degrades to filtering rather than
+        # failing the parse, but that only works if the comparison meets the
+        # model where it writes -- "Low" and "LOW" must reach the pressure valve
+        # too, or a finding the agent hedged on gets posted as a confident one.
+        confident = [f for f in review.findings if f.confidence.strip().lower() != "low"]
         kept = confident[:MAX_FINDINGS]
         with self._lock:
             self._pending[(pr.url, model_name)] = _PendingReview(
@@ -416,11 +421,16 @@ class AgenticBackend:
             body = f"**{f.title}**\n\n{f.body}"
             if f.evidence:
                 body += f"\n\n*Verified against:* {f.evidence}"
+            # Decorate BEFORE choosing inline vs body. The marker is what makes a
+            # finding recoverable as a Review Signal, and the body is not the rare
+            # path here: findings about callers, cleanup paths and missing tests
+            # legitimately land outside the diff, which is exactly the class this
+            # reviewer exists to produce.
+            if compare_label is not None:
+                body = with_visible_label(body, compare_label, signal)
+            else:
+                body = with_marker(body, signal)
             if f.line is not None and f.file in stash.diff_files:
-                if compare_label is not None:
-                    body = with_visible_label(body, compare_label, signal)
-                else:
-                    body = with_marker(body, signal)
                 comment = {"path": f.file, "line": f.line, "side": "RIGHT", "body": body}
                 if f.end_line is not None and f.end_line > f.line:
                     comment.update(
@@ -428,7 +438,7 @@ class AgenticBackend:
                     )
                 inline.append((f, comment))
             else:
-                overflow.append(f)
+                overflow.append((f, body))
 
         posted = self._post_review(pr, token, api_url, stash, inline, overflow)
         return signals if posted else []
@@ -486,7 +496,7 @@ class AgenticBackend:
         api_url: str,
         stash: _PendingReview,
         inline: list[tuple[AgenticFinding, dict]],
-        overflow: list[AgenticFinding],
+        overflow: list[tuple[AgenticFinding, str]],
     ) -> bool:
         """POST one PR review; retry body-only on a 422; report success."""
         headers = {
@@ -497,8 +507,15 @@ class AgenticBackend:
             headers["Authorization"] = "Bearer " + token
         body_parts = ["## fuko agentic review", "", stash.summary or "(no summary)"]
         if overflow:
-            body_parts += ["", "### Findings without a diff anchor"]
-            body_parts += [self._finding_line(f) for f in overflow]
+            body_parts += ["", "### Findings without a diff anchor", ""]
+            body_parts += [
+                "\n\n---\n\n".join(
+                    f"**Location:** `{f.file}`"
+                    + (f":{f.line}" if f.line is not None else "")
+                    + f" ({f.severity})\n\n{body}"
+                    for f, body in overflow
+                )
+            ]
         if stash.withheld_low:
             body_parts += ["", f"*{stash.withheld_low} low-confidence finding(s) withheld.*"]
         if stash.over_cap:
@@ -513,6 +530,23 @@ class AgenticBackend:
             "comments": [comment for _, comment in inline],
         }
         url = f"{api_url.rstrip('/')}/repos/{pr.repo}/pulls/{pr.number}/reviews"
+        try:
+            return self._post(url, headers, payload, inline)
+        except httpx.HTTPError as e:
+            # A transport failure (DNS, reset, read timeout) is the same outcome
+            # as a rejected post: nothing reached the PR. Report it like one, so
+            # normalize_output returns no signals rather than phantom findings.
+            print(f"fuko: agentic review post failed (transport): {e}", file=sys.stderr)
+            return False
+
+    def _post(
+        self,
+        url: str,
+        headers: dict[str, str],
+        payload: dict,
+        inline: list[tuple[AgenticFinding, dict]],
+    ) -> bool:
+        """Issue the review POST, with the one body-only retry; report success."""
         with httpx.Client(timeout=60.0, headers=headers) as client:
             resp = client.post(url, json=payload)
             if resp.status_code == 422 and inline:

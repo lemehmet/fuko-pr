@@ -116,10 +116,22 @@ auth, so it is deliberately not used.
   `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `~/.config/gcloud`,
   `~/.docker`, `~/.kube`, `~/.netrc`, `~/.git-credentials`), written in the
   absolute-rule spelling `Read(//abs/path/**)` (a single leading slash silently
-  fails to match). This closes the named paths; it does not confine the agent
-  to the checkout. **Run the reviewer on a runner you would be willing to let
-  an untrusted PR read** — a container or a dedicated unprivileged user is the
-  real boundary, and that is the runner's job, not this module's.
+  fails to match, and so does a triple).
+
+  Two measured properties are worth knowing before you extend this. A **path**
+  rule is enforced across the read-class tools — the `Read(...)` rules are what
+  stop `Grep` from reading a credential file — while a **tool-scoped**
+  `Grep(...)` rule is not honored at all. Verified on 2.1.232 with a canary
+  outside every declared root: no rules → leaked; `Read(//abs/**)` → blocked;
+  `Grep(//abs/**)` alone → leaked. That is why only `Read(...)` rules are
+  emitted, and why adding `Grep(...)` entries would be decorative.
+
+  **The list bounds the known credential stores and nothing more.** `Read` and
+  `Grep` still reach everything else on the runner — `/etc`, other repositories
+  checked out in the work dir, build caches. So: **run the reviewer on a runner
+  you would be willing to let an untrusted PR read.** A container or a
+  dedicated unprivileged user is the real boundary, and that is the runner's
+  job, not this module's.
 - **Credential hygiene.** The agent subprocess environment strips
   `GITHUB_TOKEN` / `GITHUB__USER_TOKEN` / `FUKO_GITHUB_*` and everything that
   decides who pays or where the traffic goes — every Anthropic credential plus
