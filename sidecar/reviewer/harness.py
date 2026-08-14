@@ -32,6 +32,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -95,17 +96,38 @@ def _permission_settings(env: dict[str, str]) -> str:
     Paths use Claude Code's absolute-rule spelling ``Read(//abs/path/**)`` (a
     leading ``//``), which is what actually matches an absolute path -- a
     single-slash rule silently fails to match and the read goes through.
+
+    Only POSIX-absolute roots produce rules. A Windows-shaped home
+    (a ``C:`` drive path) would otherwise render as ``Read(/C:/Users/...)``,
+    which is not the verified spelling and would silently match nothing -- a
+    denylist that looks present and protects nothing is worse than none at all.
+    Such a root is skipped and announced on stderr instead, so the operator
+    learns the credential denylist is not in force on that runner rather than
+    discovering it from a leaked review.
     """
-    roots: list[str] = []
-    home = env.get("HOME") or env.get("USERPROFILE") or ""
+    candidates: list[tuple[str, bool]] = []  # (path, is_directory)
+    home = (env.get("HOME") or env.get("USERPROFILE") or "").replace("\\", "/").rstrip("/")
     if home:
-        roots += [f"{home.rstrip('/')}/{d}" for d in SENSITIVE_HOME_DIRS]
-    config_dir = env.get("CLAUDE_CONFIG_DIR")
+        candidates += [(f"{home}/{d}", True) for d in SENSITIVE_HOME_DIRS]
+        candidates += [(f"{home}/{f}", False) for f in SENSITIVE_HOME_FILES]
+    config_dir = (env.get("CLAUDE_CONFIG_DIR") or "").replace("\\", "/").rstrip("/")
     if config_dir:
-        roots.append(config_dir.rstrip("/"))
-    deny = [f"Read(/{root}/**)" for root in roots]
-    if home:
-        deny += [f"Read(/{home.rstrip('/')}/{f})" for f in SENSITIVE_HOME_FILES]
+        candidates.append((config_dir, True))
+
+    deny = [
+        f"Read(/{path}/**)" if is_dir else f"Read(/{path})"
+        for path, is_dir in candidates
+        if path.startswith("/")
+    ]
+    unusable = sorted({path for path, _ in candidates if not path.startswith("/")})
+    if unusable:
+        print(
+            "fuko: credential denylist NOT applied -- these paths are not "
+            f"POSIX-absolute, so no verified deny rule exists for them: {', '.join(unusable)}. "
+            "The agentic reviewer's read denylist is inert on this runner; run it "
+            "in a container or under a dedicated unprivileged user.",
+            file=sys.stderr,
+        )
     return json.dumps({"disableAllHooks": True, "permissions": {"deny": deny}})
 
 

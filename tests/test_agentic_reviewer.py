@@ -437,6 +437,15 @@ def test_permission_rules_use_the_double_slash_absolute_spelling():
         assert not rule.startswith("Read(/home"), rule  # the single-slash form
 
 
+def test_permission_rules_skip_non_posix_roots_and_say_so(capsys):
+    """A rule we cannot vouch for is worse than none: skip it, and make it loud."""
+    settings = json.loads(harness_mod._permission_settings({"USERPROFILE": r"C:\Users\runner"}))
+    assert settings["permissions"]["deny"] == []
+    err = capsys.readouterr().err
+    assert "NOT applied" in err
+    assert "C:/Users/runner/.claude" in err
+
+
 def test_permission_rules_do_not_include_tool_scoped_grep_rules():
     """Deliberate: `Grep(...)` rules are not honored, `Read(...)` path rules cover Grep.
 
