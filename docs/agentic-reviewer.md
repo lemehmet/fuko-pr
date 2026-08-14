@@ -18,7 +18,7 @@ different-context reviewer, and it doubles as the proof that the
 
 ## Architecture
 
-```
+```text
 sidecar/reviewer/            the reviewer (harness-agnostic core)
   checkout.py                PR head checkout + API diff fetch
   prompt.py                  review strategy + JSON output contract   <- the value
@@ -81,7 +81,10 @@ Mitigations, each independently sufficient for its vector:
    here (none is).
 5. **The checkout is stripped** of `.claude/`, `.mcp.json`, and friends before
    the run (`strip_agent_config`), because skills and subagents *are* read from
-   additional roots. The files remain in the diff, so a PR that edits them is
+   additional roots. `.claude/` and `.mcp.json` are cleared at **every depth**
+   (a subdirectory is a project root in its own right); other tools' config
+   (`.cursor`, `.github/copilot-instructions.md`) only at the checkout root.
+   The files remain in the diff, so a PR that edits them is
    still reviewable — and worth flagging, which the strategy prompt asks for.
 
 `--bare` would harden further, but its help is explicit that it never reads
@@ -97,13 +100,36 @@ auth, so it is deliberately not used.
 - **Prompt-injection posture.** The diff and repository contents are declared
   untrusted in the strategy prompt; instruction-like text inside them
   (including text addressed to AI reviewers) must be ignored and *reported as
-  a security finding*. The blast radius of a successful injection is bounded
-  by the tool surface: wrong review text, not actions.
+  a security finding*. Untrusted text is fenced with delimiters it cannot close
+  (a literal `</diff>` in a PR body is neutralised), so it cannot escape into
+  the instruction stream.
+- **Read confinement is a denylist, not a sandbox — know what that buys.**
+  `--add-dir` *adds* a readable root; it does **not** confine reads to it.
+  Verified on Claude Code 2.1.232: with `Read` allowlisted and a clean cwd, an
+  absolute path outside every declared root is still readable. That matters
+  because findings are published verbatim to the PR, where the (untrusted)
+  author can read them — so "the blast radius is wrong review text, not
+  actions" is **not** the whole story: an injected "read X, put it in a
+  finding" is an exfiltration channel. The harness therefore ships explicit
+  `permissions.deny` rules over the runner's credential stores
+  (`~/.claude` — which subscription auth deliberately keeps reachable — plus
+  `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `~/.config/gcloud`,
+  `~/.docker`, `~/.kube`, `~/.netrc`, `~/.git-credentials`), written in the
+  absolute-rule spelling `Read(//abs/path/**)` (a single leading slash silently
+  fails to match). This closes the named paths; it does not confine the agent
+  to the checkout. **Run the reviewer on a runner you would be willing to let
+  an untrusted PR read** — a container or a dedicated unprivileged user is the
+  real boundary, and that is the runner's job, not this module's.
 - **Credential hygiene.** The agent subprocess environment strips
-  `GITHUB_TOKEN` / `GITHUB__USER_TOKEN` / `FUKO_GITHUB_*` and every Anthropic
-  credential, then injects exactly the one its auth mode uses (below). The
-  checkout's fetch auth rides in `GIT_CONFIG_*` environment (not argv, not the
-  remote URL), scoped to the one fetch.
+  `GITHUB_TOKEN` / `GITHUB__USER_TOKEN` / `FUKO_GITHUB_*` and everything that
+  decides who pays or where the traffic goes — every Anthropic credential plus
+  `ANTHROPIC_BASE_URL` — then injects exactly what its auth mode uses (below).
+  **Config decides the endpoint, never the ambient environment**: a gateway
+  user sets `base_url` on the model entry, which api-key mode re-injects;
+  subscription mode never gets one, since an inherited base URL would point the
+  runner's own authenticated session at a foreign host. The checkout's fetch
+  auth rides in `GIT_CONFIG_*` environment (not argv, not the remote URL),
+  scoped to the one fetch.
 
 ## Authentication
 
@@ -172,10 +198,13 @@ Current limits, on purpose:
   tracked as #99. Until then a repo opts in wholesale (or dogfoods it solo).
 - **One tool.** `review` only; `improve`/`describe` in `[review].tools` are
   ignored for this backend.
-- Failover pairs an agentic branch with whatever backups the pool holds; a
-  pr-agent backup rescuing an agentic branch works (different harness, same
-  receipts attribution) but mixes harnesses within one branch — #99's
-  per-model backend field is also the place that gets a per-entry say.
+- **Failover stays inside the configured backend.** Because `backend` is a
+  single global scalar (above), every entry in the pool — actives and backups
+  alike — runs on the same driver, so an agentic branch fails over to another
+  *agentic* entry. A pr-agent backup rescuing an agentic branch is not
+  something this release can express; it becomes possible with #99's per-model
+  backend field, which is also where a per-entry say on mixing harnesses
+  belongs.
 
 ## Cost & pacing
 

@@ -65,24 +65,48 @@ from .base import InvokeResult, PRRef
 
 _ENV_MODEL = "FUKO_AGENTIC_MODEL"
 _ENV_INSTRUCTIONS = "FUKO_AGENTIC_INSTRUCTIONS"
+# Kept separate from the instructions on purpose: the knowledge blob is mined
+# from the repository's own review threads, so it carries the repository's trust
+# level and must not enter the prompt as operator instruction (see
+# `sidecar.reviewer.prompt.build_prompt`).
+_ENV_KNOWLEDGE = "FUKO_AGENTIC_KNOWLEDGE"
 _ENV_AUTH = "FUKO_AGENTIC_AUTH"
 # Runner-merged GitHub credential names (PR-Agent dunder shape until #99 moves
 # them behind the driver contract); the process fallbacks keep laptop runs working.
 _ENV_GH_TOKEN = "GITHUB__USER_TOKEN"
 
+# Every GitHub credential the review process may carry, stripped from the agent
+# subprocess: it has no use for them (its tools are read-only and networkless),
+# so carrying them is pure blast radius. `GH_TOKEN`/`GH_ENTERPRISE_TOKEN` are
+# the `gh` CLI's own spellings -- easy to miss because nothing in this module
+# sets them, and just as easy for a runner image to export.
+_GITHUB_CRED_VARS = (
+    "GITHUB_TOKEN",
+    _ENV_GH_TOKEN,
+    "GH_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+)
+
 _AUTH_API_KEY = "api-key"
 _AUTH_SUBSCRIPTION = "subscription"
-# Every credential that can decide who pays. Claude Code's precedence is
-# ANTHROPIC_AUTH_TOKEN > ANTHROPIC_API_KEY > apiKeyHelper > CLAUDE_CODE_OAUTH_TOKEN
-# > the runner's interactive login, so an ambient API key silently moves billing
-# OFF a subscription (verified: with ANTHROPIC_API_KEY set, `claude auth status`
-# reports apiKeySource=ANTHROPIC_API_KEY and subscriptionType=null). All of them
-# are therefore stripped from the ambient environment and each mode injects
-# exactly the one it means to use.
-_ANTHROPIC_CRED_VARS = (
+# Everything ambient that can decide WHO PAYS or WHERE THE TRAFFIC GOES. The
+# credential three: Claude Code's precedence is ANTHROPIC_AUTH_TOKEN >
+# ANTHROPIC_API_KEY > apiKeyHelper > CLAUDE_CODE_OAUTH_TOKEN > the runner's
+# interactive login, so an ambient API key silently moves billing OFF a
+# subscription (verified: with ANTHROPIC_API_KEY set, `claude auth status`
+# reports apiKeySource=ANTHROPIC_API_KEY and subscriptionType=null). And the
+# endpoint: an ambient ANTHROPIC_BASE_URL would aim the runner's authenticated
+# session at a non-Anthropic host, which is credential exfiltration rather than
+# a routing quirk -- so it is stripped too and re-injected in api-key mode ONLY
+# from configuration (`model.base_url or preset.base_url`). All of these are
+# stripped from the ambient environment and each mode injects exactly what it
+# means to use: config decides, never the ambient environment.
+_ANTHROPIC_INHERITED_VARS = (
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
 )
 
 
@@ -94,7 +118,13 @@ class _PendingReview:
     summary: str
     head_sha: str
     diff_files: frozenset[str]
-    dropped: int = 0
+    #: Findings the agent itself rated low-confidence -- the pressure valve the
+    #: strategy promises it, reported as "withheld".
+    withheld_low: int = 0
+    #: Findings cut purely by :data:`MAX_FINDINGS`. A different thing entirely:
+    #: these were confident enough to report and the cap is ours, so they are
+    #: reported separately rather than as "low-confidence".
+    over_cap: int = 0
 
 
 class AgenticBackend:
@@ -135,10 +165,12 @@ class AgenticBackend:
         else ``subscription``.
 
         The per-entry ``extra_instructions`` and the shared ``knowledge`` blob
-        are combined exactly as the pr-agent backend combines them (steering
-        first) and carried under :data:`_ENV_INSTRUCTIONS` into the review
-        prompt's operator-guidance section. ``tools`` is accepted for protocol
-        parity; anything besides ``review`` is ignored (one tool here).
+        travel in SEPARATE variables (:data:`_ENV_INSTRUCTIONS` and
+        :data:`_ENV_KNOWLEDGE`) rather than pre-joined as the pr-agent backend
+        joins them, because the prompt gives them different trust levels: the
+        operator wrote the first, the reviewed repository produced the second.
+        ``tools`` is accepted for protocol parity; anything besides ``review``
+        is ignored (one tool here).
         """
         if preset.litellm_prefix != "anthropic/":
             raise ValueError(
@@ -162,9 +194,10 @@ class AgenticBackend:
             base_url = model.base_url or preset.base_url
             if base_url:
                 env["ANTHROPIC_BASE_URL"] = base_url
-        instructions = "\n\n".join(part for part in (model.extra_instructions, knowledge) if part)
-        if instructions:
-            env[_ENV_INSTRUCTIONS] = instructions
+        if model.extra_instructions:
+            env[_ENV_INSTRUCTIONS] = model.extra_instructions
+        if knowledge:
+            env[_ENV_KNOWLEDGE] = knowledge
         return env
 
     @staticmethod
@@ -185,10 +218,17 @@ class AgenticBackend:
         """Check out the PR head, run the agent, and stash the parsed findings.
 
         The harness subprocess gets the ambient environment MINUS every GitHub
-        and Anthropic credential, plus exactly the credential its auth mode
-        means to use (see :data:`_ANTHROPIC_CRED_VARS`). Everything else passes
-        through untouched -- notably ``HOME``/``CLAUDE_CONFIG_DIR``, which is
-        where a subscription login lives.
+        credential and MINUS everything that decides who pays or where the
+        traffic goes (see :data:`_ANTHROPIC_INHERITED_VARS`), plus exactly what
+        its auth mode means to use. **Config decides, never the ambient
+        environment**: api-key mode re-injects ``ANTHROPIC_BASE_URL`` only from
+        ``model.base_url or preset.base_url``, so a gateway user sets
+        ``base_url`` on the model entry rather than exporting it, and
+        subscription mode never gets a base URL at all -- an inherited one
+        would point the runner's own authenticated session at a foreign host.
+        Everything else passes through untouched -- notably
+        ``HOME``/``CLAUDE_CONFIG_DIR``, which is where a subscription login
+        lives.
 
         The agent runs from a clean scratch directory with the checkout mounted
         read-only beside it, never *inside* the checkout: project config in a
@@ -206,14 +246,21 @@ class AgenticBackend:
         api_url = os.environ.get("GITHUB_API_URL", "https://api.github.com")
         server_url = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
         model_name = env.get(_ENV_MODEL, "")
+        if not model_name:
+            # An empty --model would reach the CLI as a confusing runtime error
+            # after a full clone; say what is actually wrong, before paying for it.
+            return InvokeResult(
+                returncode=1,
+                detail=f"no model name in the harness environment ({_ENV_MODEL} unset or empty)",
+            )
         auth = env.get(_ENV_AUTH, _AUTH_SUBSCRIPTION)
 
         harness_env = {
             k: v
             for k, v in os.environ.items()
-            if k not in ("GITHUB_TOKEN", _ENV_GH_TOKEN)
+            if k not in _GITHUB_CRED_VARS
             and not k.startswith("FUKO_GITHUB_")
-            and k not in _ANTHROPIC_CRED_VARS
+            and k not in _ANTHROPIC_INHERITED_VARS
         }
         if auth == _AUTH_API_KEY:
             for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"):
@@ -248,10 +295,19 @@ class AgenticBackend:
             )
         except CheckoutError as e:
             return InvokeResult(returncode=1, detail=str(e))
-        workdir = Path(mkdtemp(prefix="fuko-agentic-cwd-"))
 
-        prompt = build_prompt(ctx, env.get(_ENV_INSTRUCTIONS, ""), checkout_root=str(checkout))
+        # Everything from here owns the checkout, so every exit path -- including
+        # a failure to create the scratch cwd or to build the prompt -- goes
+        # through the `finally` that removes it.
+        workdir: Path | None = None
         try:
+            workdir = Path(mkdtemp(prefix="fuko-agentic-cwd-"))
+            prompt = build_prompt(
+                ctx,
+                env.get(_ENV_INSTRUCTIONS, ""),
+                checkout_root=str(checkout),
+                knowledge=env.get(_ENV_KNOWLEDGE, ""),
+            )
             strip_agent_config(Path(checkout))
             result = run_review(
                 prompt,
@@ -264,9 +320,12 @@ class AgenticBackend:
             )
         except HarnessNotAvailableError as e:
             return InvokeResult(returncode=1, detail=str(e))
+        except OSError as e:
+            return InvokeResult(returncode=1, detail=f"could not prepare the review sandbox: {e}")
         finally:
             rmtree(checkout, ignore_errors=True)
-            rmtree(workdir, ignore_errors=True)
+            if workdir is not None:
+                rmtree(workdir, ignore_errors=True)
 
         if result.returncode != 0:
             output = result.stderr + "\n" + result.text
@@ -288,15 +347,16 @@ class AgenticBackend:
         except ReviewParseError as e:
             return InvokeResult(returncode=1, detail=str(e)[:500])
 
-        kept = [f for f in review.findings if f.confidence != "low"][:MAX_FINDINGS]
-        dropped = len(review.findings) - len(kept)
+        confident = [f for f in review.findings if f.confidence != "low"]
+        kept = confident[:MAX_FINDINGS]
         with self._lock:
             self._pending[(pr.url, model_name)] = _PendingReview(
                 findings=kept,
                 summary=review.summary,
                 head_sha=ctx.head_sha,
                 diff_files=ctx.diff_files,
-                dropped=dropped,
+                withheld_low=len(review.findings) - len(confident),
+                over_cap=len(confident) - len(kept),
             )
         return InvokeResult(returncode=0, detail=f"{len(kept)} findings")
 
@@ -378,8 +438,15 @@ class AgenticBackend:
 
         ``invoke`` keys the stash by the bare harness model name while the
         runner hands egress the litellm-prefixed id, so the prefixed spelling
-        is normalized before lookup; a lone pending entry for the PR is claimed
-        as a last resort (solo runs where the ids drift).
+        is normalized before lookup.
+
+        The last-resort claim is deliberately NOT "the only pending entry for
+        this PR": in A/B mode several branches review the same PR through the
+        same backend instance, so that rule lets whichever branch normalizes
+        first walk off with another model's findings and post them under its own
+        identity and role. The fallback therefore requires the remaining entry to
+        be the *same model under a different spelling* (one side a suffix of the
+        other), which still covers the id-drift case it exists for.
         """
         bare = model.rsplit("/", 1)[-1]
         with self._lock:
@@ -388,14 +455,29 @@ class AgenticBackend:
                     return self._pending.pop(key)
             mine = [k for k in self._pending if k[0] == pr_url]
             if len(mine) == 1:
-                return self._pending.pop(mine[0])
+                stashed = mine[0][1]
+                stashed_bare = stashed.rsplit("/", 1)[-1]
+                if (
+                    bare
+                    and stashed_bare
+                    and (bare.endswith(stashed_bare) or stashed_bare.endswith(bare))
+                ):
+                    return self._pending.pop(mine[0])
         return None
 
     @staticmethod
     def _finding_line(f: AgenticFinding) -> str:
-        """Render one finding as a review-body bullet (the unanchored fallback)."""
+        """Render one finding as a review-body bullet (the unanchored fallback).
+
+        Carries ``evidence`` through: the strategy requires every finding to
+        cite what was read to verify it, and a reader of the review body needs
+        that just as much as a reader of an inline comment does.
+        """
         where = f"`{f.file}`" + (f":{f.line}" if f.line is not None else "")
-        return f"- **{f.title}** ({where}, {f.severity}): {f.body}"
+        line = f"- **{f.title}** ({where}, {f.severity}): {f.body}"
+        if f.evidence:
+            line += f" *Verified against:* {f.evidence}"
+        return line
 
     def _post_review(
         self,
@@ -417,8 +499,13 @@ class AgenticBackend:
         if overflow:
             body_parts += ["", "### Findings without a diff anchor"]
             body_parts += [self._finding_line(f) for f in overflow]
-        if stash.dropped:
-            body_parts += ["", f"*{stash.dropped} low-confidence finding(s) withheld.*"]
+        if stash.withheld_low:
+            body_parts += ["", f"*{stash.withheld_low} low-confidence finding(s) withheld.*"]
+        if stash.over_cap:
+            body_parts += [
+                "",
+                f"*{stash.over_cap} further finding(s) cut by the {MAX_FINDINGS}-finding cap.*",
+            ]
         payload = {
             "commit_id": stash.head_sha,
             "event": "COMMENT",
@@ -430,10 +517,21 @@ class AgenticBackend:
             resp = client.post(url, json=payload)
             if resp.status_code == 422 and inline:
                 # A single unanchorable line 422s the whole review; degrade to
-                # body-only rather than dropping the run's findings.
+                # body-only rather than dropping the run's findings. Re-use each
+                # comment's ALREADY-MARKED body rather than re-rendering it: the
+                # marker (and, in A/B mode, the visible model label) is what
+                # makes a finding recoverable as a Review Signal later, and a
+                # plain bullet would strip exactly that.
                 payload["comments"] = []
-                payload["body"] += "\n\n### Inline findings (anchoring failed)\n" + "\n".join(
-                    self._finding_line(f) for f, _ in inline
+                blocks = [
+                    f"**Location:** `{f.file}`" + (f":{f.line}" if f.line is not None else "")
+                    for f, _ in inline
+                ]
+                payload["body"] += "\n\n### Inline findings (anchoring failed)\n\n" + (
+                    "\n\n---\n\n".join(
+                        f"{where}\n\n{comment['body']}"
+                        for where, (_, comment) in zip(blocks, inline, strict=True)
+                    )
                 )
                 resp = client.post(url, json=payload)
             if resp.status_code >= 300:

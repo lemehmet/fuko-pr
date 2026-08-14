@@ -36,14 +36,19 @@ class ModelConfig(BaseModel):
         default="auto",
         description=(
             "How the backend authenticates to the model provider. 'api-key' "
-            "uses the preset's key env var; 'subscription' uses the runner's "
-            "own logged-in session (Claude Code OAuth) and passes NO key; "
-            "'auto' picks api-key when the preset's key env var is set, else "
-            "subscription. Read by the agentic backend only -- pr-agent always "
-            "authenticates by key. Set it explicitly to pin who pays: an "
-            "ambient ANTHROPIC_API_KEY overrides subscription billing, so a "
-            "subscription runner that also exports a key would silently bill "
-            "per token under 'auto'."
+            "uses the preset's key env var (ANTHROPIC_KEY for the anthropic "
+            "preset); 'subscription' uses the runner's own logged-in session "
+            "(Claude Code OAuth) and passes NO key; 'auto' picks api-key when "
+            "that same preset key env var is set, else subscription. Read by "
+            "the agentic backend only -- pr-agent always authenticates by key. "
+            "Set it explicitly to pin who pays: 'auto' resolves to api-key on "
+            "any runner that happens to export ANTHROPIC_KEY, so a "
+            "subscription runner that also holds a key bills per token unless "
+            "it says auth = 'subscription'. Note the resolution input is "
+            "ANTHROPIC_KEY (fuko's own config var), NOT the ANTHROPIC_API_KEY "
+            "that Claude Code itself reads -- the backend strips every ambient "
+            "Anthropic credential from the agent and injects only the one this "
+            "mode selects, so the mode decides billing, not the environment."
         ),
     )
     extra_instructions: str | None = Field(

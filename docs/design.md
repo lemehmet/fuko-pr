@@ -187,10 +187,21 @@ class ReviewBackend(Protocol):
     def build_env(self, preset: ProviderPreset, model: ModelConfig,
                   knowledge: str, tools: list[str]) -> dict[str, str]: ...
 
-    def invoke(self, pr_url: str, env: dict[str, str]) -> InvokeResult: ...
+    def invoke(self, pr: PRRef, env: dict[str, str],
+               tools: list[str]) -> InvokeResult: ...
 
-    def normalize_output(self, pr: PRRef) -> list[ReviewSignal]: ...
+    # `model`/`compare_label` label the branch on the diff; `token`/`api_url`
+    # pin the identity that posts; `role` rides each marker (active vs trial).
+    def normalize_output(self, pr: PRRef, model: str = "", *,
+                         compare_label: str | None = None,
+                         token: str | None = None,
+                         api_url: str | None = None,
+                         actor: str | None = None,
+                         role: str = "active") -> list[ReviewSignal]: ...
 ```
+
+(`sidecar/backends/base.py` is authoritative; this block is a readable copy of
+it and should move when it does.)
 
 The **pr-agent driver** (first implementation):
 

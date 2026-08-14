@@ -38,6 +38,57 @@ from pathlib import Path
 from ..throttle import TIMEOUT_RETURNCODE
 
 ALLOWED_TOOLS = "Read,Grep,Glob"
+
+#: Directories the agent must never read, relative to the runner's home.
+#:
+#: ``--add-dir`` ADDS a readable root; it does NOT confine reads to it. Verified
+#: on Claude Code 2.1.232: with ``--allowedTools Read`` and a clean cwd, the
+#: agent will happily read an absolute path outside both cwd and every
+#: ``--add-dir`` root. That matters here because findings are published
+#: verbatim to the pull request, which the (untrusted) PR author can read -- so
+#: an injected instruction that says "read X and put it in a finding" is an
+#: exfiltration channel, not merely "wrong review text". Subscription auth
+#: deliberately keeps the runner's own login reachable under ``HOME``, which
+#: makes ``~/.claude`` the highest-value target on the box.
+#:
+#: This is a denylist over the credential stores, not a sandbox: it closes the
+#: named paths, it does not confine the agent. Real confinement needs the run
+#: to happen in a container or under a dedicated unprivileged user, which is
+#: the runner's job, not this module's.
+SENSITIVE_HOME_DIRS = (
+    ".claude",
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".config/gh",
+    ".config/gcloud",
+    ".docker",
+    ".kube",
+)
+#: Single files worth the same treatment.
+SENSITIVE_HOME_FILES = (".netrc", ".git-credentials", ".claude.json")
+
+
+def _permission_settings(env: dict[str, str]) -> str:
+    """Build the ``--settings`` payload: hooks off, credential stores unreadable.
+
+    Paths use Claude Code's absolute-rule spelling ``Read(//abs/path/**)`` (a
+    leading ``//``), which is what actually matches an absolute path -- a
+    single-slash rule silently fails to match and the read goes through.
+    """
+    roots: list[str] = []
+    home = env.get("HOME") or env.get("USERPROFILE") or ""
+    if home:
+        roots += [f"{home.rstrip('/')}/{d}" for d in SENSITIVE_HOME_DIRS]
+    config_dir = env.get("CLAUDE_CONFIG_DIR")
+    if config_dir:
+        roots.append(config_dir.rstrip("/"))
+    deny = [f"Read(/{root}/**)" for root in roots]
+    if home:
+        deny += [f"Read(/{home.rstrip('/')}/{f})" for f in SENSITIVE_HOME_FILES]
+    return json.dumps({"disableAllHooks": True, "permissions": {"deny": deny}})
+
+
 # Not listed in `claude --help` for 2.1.232, but accepted (verified: unknown
 # options exit with "error: unknown option", this one runs) and documented in
 # the CLI reference. It bounds a pathological tool loop; the wall-clock
@@ -79,9 +130,11 @@ def check_auth(env: dict[str, str]) -> dict | None:
     Used as a preflight for subscription mode, where a lapsed login on the
     runner would otherwise surface as a confusing mid-review failure on every
     PR. Returns None (rather than raising) when the binary is missing, the
-    probe fails, or the output is not JSON -- an unreadable probe is not
-    evidence of a broken login, so the review proceeds and the run itself
-    reports the truth.
+    probe fails, or the output is not a JSON **object** -- an unreadable probe
+    is not evidence of a broken login, so the review proceeds and the run
+    itself reports the truth. The object check matters because ``json.loads``
+    happily returns a bare ``null``/number/string for malformed-but-valid JSON,
+    which the caller would then treat as a status mapping and crash on.
     """
     binary = shutil.which("claude", path=env.get("PATH"))
     if binary is None:
@@ -94,9 +147,10 @@ def check_auth(env: dict[str, str]) -> dict | None:
             env=env,
             timeout=30,
         )
-        return json.loads(proc.stdout)
+        parsed = json.loads(proc.stdout)
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError):
         return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def run_review(
@@ -150,7 +204,7 @@ def run_review(
         "--setting-sources",
         "user",
         "--settings",
-        '{"disableAllHooks":true}',
+        _permission_settings(env),
         "--strict-mcp-config",
         "--max-turns",
         str(max_turns),
