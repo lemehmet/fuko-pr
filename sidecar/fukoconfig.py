@@ -11,7 +11,7 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 DEFAULT_CONFIG_PATH = ".fuko.toml"
 
@@ -110,6 +110,16 @@ class ReviewModel(CompareModel):
     """
 
     role: Literal["active", "backup", "trial"] = "active"
+    backend: str | None = Field(
+        default=None,
+        description=(
+            "Review driver (harness) for THIS entry -- e.g. 'pr-agent' or 'agentic'. "
+            "None inherits [review].backend, so a pr-agent-only config is unchanged. "
+            "Lets one fleet mix harnesses (harness diversity is the correlation fix "
+            "the 2026-07-31 audit motivated); an unknown name fails at config load, "
+            "not mid-run."
+        ),
+    )
     promoted: bool = Field(
         default=False,
         description=(
@@ -169,6 +179,32 @@ class ReviewConfig(BaseModel):
         if value and not any(m.role == "active" for m in value):
             raise ValueError("[[review.models]] needs at least one entry with role = 'active'")
         return value
+
+    @model_validator(mode="after")
+    def _known_backends(self) -> "ReviewConfig":
+        """Reject a backend name no driver is registered for, at config-parse time.
+
+        Runs ``mode="after"`` because it must see the whole-config ``backend`` and
+        every per-entry ``models[*].backend`` together. The registry import is LAZY
+        (``sidecar.backends`` imports this module, so the reverse edge cannot be a
+        top-level import) -- deferring it to validation time, after both modules are
+        loaded, breaks the cycle. Failing here surfaces an unknown driver at
+        ``load_config`` as a ``ValidationError`` rather than a mid-run crash.
+        """
+        from .backends import known_backends
+
+        known = known_backends()
+        # Filter on ``is not None``, not truthiness: an explicit ``backend = ""``
+        # is a mistake, not an inherit request, so it must reach ``named`` and be
+        # rejected here rather than silently falling back to ``self.backend`` in
+        # ``_backend_for`` (which treats "" as "unset" via ``or``).
+        named = {self.backend, *(m.backend for m in self.models if m.backend is not None)}
+        unknown = sorted(n for n in named if n not in known)
+        if unknown:
+            raise ValueError(
+                f"unknown review backend(s) {unknown}; registered: {', '.join(sorted(known))}"
+            )
+        return self
 
     strategy: str = "failover"
     cooldown_seconds: int = 300

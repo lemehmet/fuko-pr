@@ -16,6 +16,25 @@ def _client(monkeypatch):
     return TestClient(main.app, headers={"Authorization": f"Bearer {_TOKEN}"})
 
 
+def test_migration_006_backfills_backend_idempotently():
+    """#99: the backend column is added NOT NULL DEFAULT 'pr-agent' so existing
+    review_runs rows backfill; ADD COLUMN IF NOT EXISTS keeps re-apply a no-op
+    (migrations re-run on every pool creation). Guards the text without a live DB,
+    matching how the repo already checks migrations."""
+    from pathlib import Path
+
+    sql = (
+        Path(__file__).resolve().parent.parent / "migrations" / "006_review_run_backend.sql"
+    ).read_text(encoding="utf-8")
+    # Strip line comments exactly as db._migration_sql does, then split on ';'.
+    stripped = "\n".join(ln for ln in sql.splitlines() if not ln.lstrip().startswith("--"))
+    stmts = [s.strip() for s in stripped.split(";") if s.strip()]
+    assert len(stmts) == 2
+    assert "ADD COLUMN IF NOT EXISTS backend" in stmts[0]
+    assert "DEFAULT 'pr-agent'" in stmts[0] and "NOT NULL" in stmts[0]
+    assert stmts[1].startswith("CREATE INDEX IF NOT EXISTS")
+
+
 def test_run_metrics_no_ops_without_database(monkeypatch):
     monkeypatch.setattr(run_metrics.settings, "database_url", "")
     assert run_metrics.record("o/r", 7, "openrouter", "m") is None
@@ -48,6 +67,23 @@ def test_metrics_run_endpoint(monkeypatch):
     assert resp.status_code == 200
     assert resp.json() == {"recorded": True, "persisted": False}
     assert seen["slot"] == "sybil" and seen["attempts"] == 2 and seen["findings"] == 3
+    # #99: an omitted backend defaults to 'pr-agent' at the request model.
+    assert seen["backend"] == "pr-agent"
+
+
+def test_metrics_run_endpoint_carries_backend(monkeypatch):
+    """#99: an explicit backend rides the /metrics/run body through to record()."""
+    monkeypatch.setattr(main.settings, "database_url", "")
+    seen = {}
+    monkeypatch.setattr(
+        run_metrics, "record", lambda repo, pr, provider, model, **kw: seen.update(kw)
+    )
+    resp = _client(monkeypatch).post(
+        "/metrics/run",
+        json={"repo": "o/r", "pr": 7, "provider": "p", "model": "m", "backend": "agentic"},
+    )
+    assert resp.status_code == 200
+    assert seen["backend"] == "agentic"
 
 
 def test_metrics_summary_endpoint(monkeypatch):
@@ -150,6 +186,8 @@ def test_review_records_metrics_with_failover(monkeypatch, tmp_path):
     assert kw["findings"] == 3
     assert kw["slot"] == "dorian"
     assert kw["duration_s"] >= 0
+    # #99 golden: a pr-agent-shaped config attributes its run to 'pr-agent'.
+    assert kw["backend"] == "pr-agent"
 
 
 def test_sequential_compare_records_per_branch_slots(monkeypatch, tmp_path):

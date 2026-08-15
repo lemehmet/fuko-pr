@@ -140,6 +140,16 @@ class RunReceipt(BaseModel):
             "attribution a consumer needs to score a model's findings."
         ),
     )
+    backend: str = Field(
+        default="pr-agent",
+        description=(
+            "The review DRIVER (harness) that produced this run -- 'pr-agent' or "
+            "'agentic'. Two harnesses are otherwise indistinguishable receipts-only, "
+            "and scoring is receipts-only by rule (#99). Defaults to 'pr-agent' so a "
+            "receipt written before this field existed decodes as the only backend "
+            "that could have produced it, matching the review_runs backfill."
+        ),
+    )
     findings: int | None = Field(
         default=None, description="Signals this branch produced; None when not counted."
     )

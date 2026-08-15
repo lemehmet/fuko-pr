@@ -54,6 +54,15 @@ tools = ["review", "improve"]   # PR-Agent tools to run
 # where a key is also present — an ambient key outranks the subscription and
 # would silently bill per token. See docs/agentic-reviewer.md.
 #
+# Per-entry `backend` (driver): any [[review.models]] entry may set
+#   backend = "pr-agent" | "agentic"
+# to override [review].backend for THAT entry only; unset (None) inherits it, so a
+# pr-agent-only config is unchanged. This is how one fleet mixes harnesses — the
+# 2026-07-31 audit found same-pipeline instances correlate by construction, and
+# harness diversity is the fix. An unknown name fails at config load, not mid-run.
+# A promoted/rescued backup runs under the branch's backend unless it declares its
+# own (a backup is only escalation-eligible when its backend matches the round's).
+#
 # Per-entry review steering: an optional `extra_instructions` string on any
 # entry is prepended to the shared knowledge blob for THAT entry's runs only —
 # use it to differentiate a fleet that would otherwise converge on the same
@@ -98,6 +107,7 @@ max_context = 1000000
 # max_context = 1000000
 # token_env = "FUKO_GITHUB_TOKEN_C"
 # role = "trial"                # runs + surfaced for evaluation, but NON-gating
+# backend = "agentic"           # override [review].backend for THIS entry only
 # # Optional per-entry steering (see note above). Keep the opening """ bare:
 # # a '#' after it would be part of the string, not a TOML comment.
 # extra_instructions = """

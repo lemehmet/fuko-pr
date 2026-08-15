@@ -221,10 +221,17 @@ The **agentic driver** (second implementation; see
 [`docs/agentic-reviewer.md`](agentic-reviewer.md)) drives fuko's own
 checkout-based reviewer and posts Review Signals natively — no scrape/PATCH
 egress. It is the existence proof the previous rule here ("do not build a
-second backend driver until a real one exists") was waiting for; the remaining
-pr-agent shapes still leaking through the seam (`build_env`'s env-dict, the
-runner-side GitHub env merge, the single global `backend` scalar, receipts
-without a backend field) are tracked in #99.
+second backend driver until a real one exists") was waiting for.
+
+Part A of #99 closed the receipts-only seam gaps: `[[review.models]]` entries take a
+per-entry `backend` (resolved **per branch**, not one global scalar), validated
+against the registry at config-load time; `RunReceipt` and the `review_runs`
+table carry a `backend` field (pre-existing rows/receipts backfill to `pr-agent`),
+which `fuko status` surfaces as `review_backend`; and escalation only promotes a
+backup whose backend matches the round's single active backend (fail-closed when
+the fleet spans more than one). The remaining pr-agent shapes still leaking
+through the seam — `build_env`'s env-dict, the runner-side GitHub env merge, and
+the `describe` tool-name special-case — are Part B (#99 items 2 & 4).
 
 ### Store
 

@@ -757,6 +757,14 @@ def test_fuko_dead_channel_on_an_older_head_is_still_pending():
     assert rows[0]["state"] == "pending"
 
 
+def test_fuko_row_surfaces_review_backend():
+    """#99: the row names the driver under `review_backend`, leaving `backend`
+    (the display id) untouched so the sort key and consumers are unaffected."""
+    rows = fuko_states(HEAD, [_receipt_comment(backend="agentic")])
+    assert rows[0]["review_backend"] == "agentic"
+    assert rows[0]["backend"] == "fuko:openrouter/x-ai/grok-4.5"
+
+
 def test_fuko_removed_seat_is_superseded_not_a_stuck_pending():
     """#116: a receipt whose seat was renamed/removed must not gate forever.
 

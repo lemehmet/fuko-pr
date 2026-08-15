@@ -20,6 +20,17 @@ class UnknownBackendError(KeyError):
     """Raised when a ``.fuko.toml`` names a review backend that is not registered."""
 
 
+def known_backends() -> frozenset[str]:
+    """Return the registered backend names, for config-time validation.
+
+    A names-only view so :mod:`sidecar.fukoconfig` can validate a config's
+    ``backend`` fields without importing backend classes -- ``backends`` imports
+    ``fukoconfig``, so the reverse edge must stay lazy (called from a validator at
+    runtime, never at module import).
+    """
+    return frozenset(_BACKENDS)
+
+
 def get_backend(name: str, config: ReviewConfig | None = None) -> ReviewBackend:
     """Return an instance of the registered backend ``name``, configured, or raise."""
     try:

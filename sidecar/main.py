@@ -260,6 +260,7 @@ def metrics_run_endpoint(req: models.RunMetricRequest) -> dict:
         outcome=req.outcome,
         findings=req.findings,
         detail=req.detail or "",
+        backend=req.backend,
     )
     return {"recorded": True, "persisted": bool(settings.database_url)}
 
