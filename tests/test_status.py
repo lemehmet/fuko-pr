@@ -1,5 +1,7 @@
 """Tests for per-reviewer state detection (fuko status), grounded in survey forms."""
 
+import pytest
+
 from sidecar.signals import RunReceipt, with_run_receipt
 from sidecar.status import (
     DEGRADED_STATES,
@@ -539,6 +541,78 @@ def test_fuko_dead_channel_on_an_older_head_is_still_pending():
         [_receipt_comment(head_sha="0" * 40, channels={"review": "done", "improve": "skipped"})],
     )
     assert rows[0]["state"] == "pending"
+
+
+def test_fuko_receipt_from_a_non_fuko_author_is_not_coverage():
+    """The #105 spoof: a well-formed receipt posted by anyone who can comment.
+
+    A receipt asserts that a reviewer RAN. If any commenter can assert that, a
+    consumer stops waiting on an instance that never started — so coverage would
+    be assertable by a party that never reviewed, including the PR author on a
+    public repo.
+    """
+    spoof = dict(_receipt_comment(), user={"login": "random-contributor"})
+    assert fuko_states(HEAD, [spoof]) == []
+
+
+@pytest.mark.parametrize(
+    "login",
+    [
+        "fukoo-imposter",  # merely CONTAINS "fuko" — a substring match would admit it
+        "fuko-dorian",  # right prefix, not a bot account
+        "not-fuko-dorian[bot]",  # right shape, wrong start — must be anchored
+        "fuko-dorian[bot]-evil",  # right start, trailing junk — must be anchored
+        "github-actions",  # fallback identity without the [bot] suffix
+    ],
+)
+def test_fuko_receipt_from_a_lookalike_author_is_not_coverage(login):
+    """Scoping is on the author, not on the receipt looking plausible.
+
+    The loose `fuko` substring used for finding triage is unsafe here: an extra
+    triaged finding is harmless, forged coverage is not. `fukoo-imposter` is the
+    case that motivated anchoring — GitHub user names cannot contain `[` or `]`,
+    so requiring the `[bot]` suffix puts every match out of a human's reach.
+    """
+    spoof = dict(_receipt_comment(label="zai-coding/glm-5.2"), user={"login": login})
+    assert fuko_states(HEAD, [spoof]) == []
+
+
+def test_fuko_receipt_without_an_author_is_refused():
+    """No identity to check means no coverage — the unsafe direction is accepting."""
+    assert fuko_states(HEAD, [{"user": {}, "body": _receipt_comment()["body"]}]) == []
+    assert fuko_states(HEAD, [{"body": _receipt_comment()["body"]}]) == []
+
+
+def test_fuko_receipt_from_any_fuko_app_instance_is_accepted():
+    """A new slot or an App rename must not silently drop that instance's coverage."""
+    for login in ("fuko-dorian[bot]", "fuko-gray[bot]", "fuko-basil[bot]"):
+        rows = fuko_states(HEAD, [dict(_receipt_comment(), user={"login": login})])
+        assert rows and rows[0]["state"] == "done", login
+
+
+def test_fuko_receipt_from_the_app_less_fallback_identity_is_accepted():
+    """With no App configured the workflow posts as github-actions[bot]."""
+    rows = fuko_states(HEAD, [dict(_receipt_comment(), user={"login": "github-actions[bot]"})])
+    assert rows[0]["state"] == "done"
+
+
+def test_fuko_allowed_authors_overrides_the_default_pattern():
+    comment = dict(_receipt_comment(), user={"login": "my-own-reviewer[bot]"})
+    assert fuko_states(HEAD, [comment]) == []
+    rows = fuko_states(HEAD, [comment], allowed_authors=["My-Own-Reviewer[bot]"])
+    assert rows[0]["state"] == "done"
+
+
+def test_fuko_allowed_authors_excludes_the_default_fuko_apps():
+    """An explicit allowlist REPLACES the default; it does not widen it."""
+    comment = dict(_receipt_comment(), user={"login": "fuko-dorian[bot]"})
+    assert fuko_states(HEAD, [comment], allowed_authors=["other[bot]"]) == []
+
+
+def test_reviewer_states_forwards_allowed_authors():
+    comment = dict(_receipt_comment(), user={"login": "my-own-reviewer[bot]"})
+    rows = reviewer_states(HEAD, [comment], [], allowed_authors=["my-own-reviewer[bot]"])
+    assert any(r["backend"].startswith("fuko:") for r in rows)
 
 
 def test_fuko_newest_receipt_per_instance_wins():

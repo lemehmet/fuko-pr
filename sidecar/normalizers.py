@@ -408,6 +408,24 @@ def normalize_inline_comment(comment: dict, model: str = "") -> ReviewSignal | N
     prose shape, and the PR-Agent format check is deliberately loose enough to match
     decorated bodies. A comment that no recognizer claims is still admitted when it
     carries a fuko-signal marker.
+
+    That last rule is deliberately NOT author-scoped, and it must stay that way --
+    do not "fix" the inconsistency with :func:`sidecar.status.fuko_states`, which
+    IS author-scoped (#105). The two run in opposite fail-safe directions:
+
+    * A forged **receipt** asserts coverage, so it REMOVES review: a consumer
+      stops waiting on an instance that never ran. Scoping it fails closed.
+    * A forged **finding** only adds noise, which someone reads and dismisses.
+      Scoping it fails OPEN, by dropping real findings.
+
+    And on this path the author signal is unreliable *by construction*. Under
+    escalation's identity collapse (#106) a branch's findings legitimately post
+    under another slot's App identity -- three branches published as
+    ``fuko-dorian[bot]`` on #100 -- so an author filter would discard real
+    findings precisely in the round where coverage is already compromised. #95
+    made markers admit a finding on their own for the related reason that
+    published prose drifts. Over-admitting costs noise; under-admitting drops
+    review.
     """
     body = comment.get("body", "") or ""
     if is_copilot_comment(comment):
