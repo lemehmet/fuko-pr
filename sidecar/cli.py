@@ -270,8 +270,12 @@ def _configured_seat_labels(config_path: str) -> list[str] | None:
             file=sys.stderr,
         )
         return None
+    # The label extraction is inside the try on purpose: if resolve_models returns
+    # an unexpected value (e.g. None) or a model lacks provider/name, building the
+    # labels must fail safe to None rather than crash `fuko status`.
     try:
         models = resolve_models(load_config(config_path).review)
+        labels = [f"{m.provider}/{m.name}" for m in models]
     except Exception as e:  # noqa: BLE001 -- any load/parse failure must fail safe to None
         print(
             f"fuko: warning: could not load {config_path} for seat cross-reference "
@@ -279,7 +283,6 @@ def _configured_seat_labels(config_path: str) -> list[str] | None:
             file=sys.stderr,
         )
         return None
-    labels = [f"{m.provider}/{m.name}" for m in models]
     return labels or None
 
 

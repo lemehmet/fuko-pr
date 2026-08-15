@@ -785,8 +785,9 @@ def test_cmd_status_friendly_auth_error(monkeypatch, capsys):
 
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.setattr(runner, "fetch_pr_head", lambda *a: (_ for _ in ()).throw(_http_error(404)))
+    ns = argparse.Namespace(pr_url="https://github.com/o/r/pull/8", config=".fuko.toml")
     with pytest.raises(SystemExit) as e:
-        cli._cmd_status(argparse.Namespace(pr_url="https://github.com/o/r/pull/8", config=".fuko.toml"))
+        cli._cmd_status(ns)
     assert e.value.code == 1
     assert "cannot read o/r#8" in capsys.readouterr().err
 

@@ -813,6 +813,37 @@ def test_fuko_absent_configured_labels_keeps_todays_behavior():
     assert rows[0]["state"] != "superseded"
 
 
+def test_fuko_empty_configured_labels_keeps_pending_not_superseded():
+    """#116 follow-up: an EMPTY configured-label collection must not supersede all.
+
+    An empty set would make every receipt's label 'not configured' and drop every
+    gating `pending` row -- the unsafe direction. `fuko_states` normalizes an empty
+    (or blank-only) collection to None, so a stale receipt stays `pending`, exactly
+    as it would when config is unreadable. Flagged by CodeRabbit + Copilot, and by
+    the glm-5.2 reviewer guide.
+    """
+    rows = fuko_states(
+        HEAD,
+        [
+            _receipt_comment(
+                head_sha="0" * 40, label="openrouter/z-ai/glm-5.2", model="openrouter/z-ai/glm-5.2"
+            )
+        ],
+        configured_labels=[],
+    )
+    assert rows[0]["state"] == "pending"
+    rows_blank = fuko_states(
+        HEAD,
+        [
+            _receipt_comment(
+                head_sha="0" * 40, label="openrouter/z-ai/glm-5.2", model="openrouter/z-ai/glm-5.2"
+            )
+        ],
+        configured_labels=["  ", ""],
+    )
+    assert rows_blank[0]["state"] == "pending"
+
+
 def test_fuko_configured_seat_still_reports_done():
     """A seat whose label is still configured reviews and reports `done` as before."""
     rows = fuko_states(

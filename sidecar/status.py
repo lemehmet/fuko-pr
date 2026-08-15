@@ -502,7 +502,15 @@ def fuko_states(
     granting one.
     """
     allowed = None if allowed_authors is None else {a.strip().lower() for a in allowed_authors}
-    configured = None if configured_labels is None else {c.strip() for c in configured_labels}
+    # Normalize an empty or blank-only collection to None. An empty `configured`
+    # set makes `label not in configured` true for EVERY receipt, so it would
+    # supersede all of them -- dropping genuinely-pending gate rows and letting a
+    # merge proceed past an unreviewed seat, the one unsafe direction this feature
+    # exists to avoid. Only a positively-loaded, non-empty label set may
+    # cross-reference; an empty one is unavailable-config, treated like None.
+    configured = None
+    if configured_labels is not None:
+        configured = {c.strip() for c in configured_labels if c.strip()} or None
     latest: dict[str, RunReceipt] = {}
     for comment in issue_comments:
         login = ((comment.get("user") or {}).get("login") or "").strip()
@@ -519,15 +527,16 @@ def fuko_states(
         # seat's receipt is always off-HEAD -- no future run posts under its
         # label -- so the staleness branch below would report it `pending`
         # forever. Reclassify it as `superseded` first so a deleted seat can
-        # never masquerade as a not-yet-reviewed one. Guarded on `configured is
-        # not None`: an absent config keeps every row, erring toward the gating
-        # `pending` rather than silently dropping a real seat.
+        # never masquerade as a not-yet-reviewed one. Guarded on `configured`
+        # being non-None: an absent OR empty config (both normalized to None
+        # above) keeps every row, erring toward the gating `pending` rather than
+        # silently dropping a real seat.
         if configured is not None and label not in configured:
             row = _row(
                 f"fuko:{label}",
                 "superseded",
                 receipt.head_sha or None,
-                "label is no longer configured in .fuko.toml (seat renamed or removed)",
+                "label is no longer configured (seat renamed or removed)",
             )
             row["role"] = receipt.role
             row["valid"] = False
