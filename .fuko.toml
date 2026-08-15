@@ -2,6 +2,24 @@
 image = "ghcr.io/lemehmet/pr-agent:0.41.0@sha256:7341dc6214be964534ce3e68fc73143f3d642240829fe66894b87864db417223"
 tool_timeout = 600
 optional_tools = ["improve"]
+# Must equal `timeout-minutes` in .github/workflows/fuko-pr-review.yml. The
+# runner uses it to refuse a backup promotion whose sequential worst case
+# (branches * tools * tool_timeout) would not fit the job -- an overrun kills the
+# run mid-review, and a starved round is indistinguishable from a clean one.
+# Keeping the number here means the arithmetic is checked at run time instead of
+# being re-derived by hand whenever a backup is added (#106).
+#
+# THIS CAP IS DELIBERATELY OVERSIZED RIGHT NOW -- do not "correct" it. Neither
+# backup names a token_env, so #106's identity rule refuses both promotions and
+# the achievable worst case is 2 branches * 2 tools * 600s = 2400s = 40 min,
+# i.e. this cap is ~2.75x it. It stays at 110 because #114 (giving backups their
+# own identity) makes promotion possible again: promoting one backup gives
+# 3 * 2 * 600s = 60 min and promoting both gives 4 * 2 * 600s = 80 min, plus
+# setup. Churning the cap down now and up again on #114 is worse than carrying
+# the headroom, and lowering it would silently re-introduce the mid-run kill the
+# moment #114 lands. Every number here is `branches * tools * tool_timeout` and
+# should be recomputed from that formula rather than adjusted by feel.
+job_budget_minutes = 110
 
 # FLEET COMPOSITION (2026-08-14) — two gating seats, two backups.
 #

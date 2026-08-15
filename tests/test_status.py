@@ -553,9 +553,17 @@ def test_copilot_non_quota_bodies_stay_pending():
 
 
 def _receipt_comment(**kw):
-    """An instance's header comment carrying one run receipt."""
+    """An instance's header comment carrying one run receipt.
+
+    ``model`` defaults to ``label`` because that is what a real finalized receipt
+    carries: `_finalize_branch_header` records `result.provider or label`, so a
+    healthy primary run always attributes itself. A receipt whose `model` is
+    empty or differs from `label` is a genuine anomaly and every test that wants
+    one says so explicitly.
+    """
     fields = {"label": "openrouter/x-ai/grok-4.5", "head_sha": HEAD, "state": "done"}
     fields.update(kw)
+    fields.setdefault("model", fields["label"] if fields["state"] == "done" else "")
     return {
         "user": {"login": "fuko-sybil[bot]"},
         "body": with_run_receipt("🤖 **fuko A/B** — model `x`", RunReceipt(**fields)),
@@ -618,9 +626,67 @@ def test_fuko_trial_role_is_reported_so_a_consumer_can_skip_gating():
     assert rows[0]["state"] == "done"
 
 
-def test_fuko_promoted_backup_is_attributed_to_the_model_that_answered():
+def test_fuko_substituted_model_is_void_not_an_annotation():
+    """#106: a seat that did not review as the model it names has NOT covered HEAD.
+
+    Previously reported `done` with an attribution note in `detail`. A substituted
+    seat's output is byte-indistinguishable from a genuine clean review, so a
+    consumer gating on `state == "done"` merged on a review that never validly
+    happened. The round wants re-running, not recording.
+    """
     rows = fuko_states(HEAD, [_receipt_comment(model="ollama-cloud/glm-5.2:cloud")])
-    assert "ollama-cloud/glm-5.2:cloud" in rows[0]["detail"]
+    assert rows[0]["state"] == "degraded"
+    assert rows[0]["valid"] is False
+    assert "VOID" in rows[0]["detail"]
+    # BOTH fields are printed, so the comparison is not left to the consumer.
+    assert rows[0]["label"] == "openrouter/x-ai/grok-4.5"
+    assert rows[0]["model"] == "ollama-cloud/glm-5.2:cloud"
+
+
+def test_fuko_empty_model_is_void_because_the_test_is_a_conjunction():
+    """The formulation matters: an empty model passes "no mismatch detected".
+
+    There is nothing to mismatch against, so a negated test would call this
+    valid. The conjunction requires `model` to be non-empty affirmatively.
+    """
+    rows = fuko_states(HEAD, [_receipt_comment(model="")])
+    assert rows[0]["state"] == "degraded"
+    assert rows[0]["valid"] is False
+
+
+def test_fuko_valid_seat_reports_valid_true():
+    rows = fuko_states(HEAD, [_receipt_comment()])
+    assert rows[0]["valid"] is True
+    assert rows[0]["label"] == rows[0]["model"]
+
+
+def test_fuko_stale_receipt_is_never_valid():
+    """`valid` must not outlive the commit it describes."""
+    rows = fuko_states(HEAD, [_receipt_comment(head_sha="0" * 40)])
+    assert rows[0]["state"] == "pending"
+    assert rows[0]["valid"] is False
+
+
+def test_fuko_dead_channel_seat_is_not_valid_either():
+    """Two distinct faults, still machine-distinguishable.
+
+    Both a substitution and a dead channel report `degraded`, which is right —
+    both are lost coverage — but a consumer must be able to tell them apart, so
+    the substitution names VOID and the channel case carries the `channels` map.
+    """
+    rows = fuko_states(
+        HEAD, [_receipt_comment(channels={"review": "done", "improve": "killed:timeout"})]
+    )
+    assert rows[0]["state"] == "degraded"
+    assert rows[0]["valid"] is False
+    assert "VOID" not in rows[0]["detail"]
+    assert rows[0]["channels"]["improve"] == "killed:timeout"
+
+
+def test_fuko_promoted_backup_is_marked_as_promoted():
+    """#106: `slot: null` beside `role: active` was unattributable on its own."""
+    rows = fuko_states(HEAD, [_receipt_comment(promoted=True, slot=None)])
+    assert rows[0]["promoted"] is True
 
 
 def test_fuko_dead_channel_is_degraded_not_done():

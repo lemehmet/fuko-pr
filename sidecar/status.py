@@ -130,6 +130,35 @@ def _range_heads(body: str) -> list[str]:
     return [m.group(2) for m in _CR_REVIEWING.finditer(body or "")]
 
 
+def receipt_is_valid(receipt: RunReceipt) -> bool:
+    """Whether ``receipt`` is a review validly attributable to the model it names.
+
+    Written as a **conjunction**, never as a negation, and that is load-bearing
+    rather than stylistic -- do not "simplify" it into a mismatch check:
+
+        state == "done"  AND  model is non-empty  AND  model == label
+
+    A negative formulation ("no mismatch detected") PASSES when ``model`` is
+    empty, because an absent value has nothing to mismatch against -- and empty
+    is exactly what a receipt carries when the branch never recorded which model
+    answered, i.e. one of the cases this exists to catch. An affirmative
+    condition must be met rather than merely not-violated, so a broken or missing
+    measurement fails closed. The general rule: a gate fires on an affirmative
+    success condition, never only on an affirmative failure condition, because
+    broken measurements are inevitable and the only controllable variable is what
+    they say when they break.
+
+    ``label != model`` is a HARD INVALIDATION, not an annotation (#106). A
+    substituted seat's output is byte-indistinguishable from a genuine clean
+    review -- the substitute emits the ordinary "no major issues" guide -- so
+    "kimi-k3 reviewed and found nothing" and "glm-5.2 was silently substituted,
+    lost its inline channel, and found nothing" read identically. Such a round
+    should be RE-RUN rather than recorded, and a consumer must not count it as
+    that seat's coverage.
+    """
+    return receipt.state == "done" and bool(receipt.model) and receipt.model == receipt.label
+
+
 def _row(backend: str, state: State, head_reviewed: str | None, detail: str) -> dict:
     return {"backend": backend, "state": state, "head_reviewed": head_reviewed, "detail": detail}
 
@@ -451,6 +480,7 @@ def fuko_states(
 
     rows: list[dict] = []
     for label, receipt in latest.items():
+        dead: list[str] = []
         on_head = _sha_match(receipt.head_sha, head_sha) if receipt.head_sha else False
         # Staleness is asked FIRST, ahead of the outcome. A receipt is anchored to
         # the commit it describes, so a `failed` one for an older commit says
@@ -466,24 +496,38 @@ def fuko_states(
             state = "unavailable"
             detail = receipt.detail or "every model in the branch pool was exhausted"
         elif receipt.state == "done":
-            # A promoted backup answered under a different model than the branch
-            # is named for; say so, since it changes whose findings these are.
-            promoted = receipt.model and receipt.model != label
-            reviewed = f"reviewed HEAD as {receipt.model}" if promoted else "reviewed HEAD"
-            dead = sorted(
+            dead[:] = sorted(
                 f"{name} {value}" for name, value in receipt.channels.items() if value != "done"
             )
-            if dead:
+            if not receipt_is_valid(receipt):
+                # VOID, not an annotation: this branch did not review as the model
+                # it is named for, so its output is not that seat's coverage and
+                # the round wants re-running (#106). Reported as a degraded state
+                # rather than a flag on a `done` row, because a consumer gating on
+                # `state == "done"` would otherwise merge on a review that never
+                # validly happened.
                 state = "degraded"
-                detail = f"{reviewed}, but reduced coverage: {', '.join(dead)}"
+                answered = receipt.model or "an unrecorded model"
+                detail = f"VOID: branch is labelled {label} but {answered} answered"
+            elif dead:
+                state = "degraded"
+                detail = f"reviewed HEAD, but reduced coverage: {', '.join(dead)}"
             else:
                 state = "done"
-                detail = reviewed
+                detail = "reviewed HEAD"
         else:
             state = "in_progress"
             detail = "started on HEAD, no outcome recorded yet"
         row = _row(f"fuko:{label}", state, receipt.head_sha or None, detail)
         row["role"] = receipt.role
+        # BOTH fields are printed, and the verdict is precomputed. A consumer told
+        # to compare two fields itself will eventually stop doing so (#106); one
+        # told to read `valid` cannot forget to.
+        row["valid"] = on_head and receipt_is_valid(receipt) and not dead
+        row["label"] = label
+        row["model"] = receipt.model
+        if receipt.promoted:
+            row["promoted"] = True
         if receipt.channels:
             row["channels"] = dict(receipt.channels)
         rows.append(row)
