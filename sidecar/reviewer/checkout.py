@@ -48,36 +48,57 @@ _DIFF_FILE_RE_PREFIX = "+++ b/"
 _HUNK_NEW_START_RE = re.compile(r"^@@ .*?\+(\d+)")
 
 
-def parse_diff_positions(diff: str) -> frozenset[tuple[str, int]]:
-    """Every ``(path, new-side line)`` the GitHub API will accept as an anchor.
+def parse_diff(diff: str) -> tuple[frozenset[str], frozenset[tuple[str, int]]]:
+    """Parse a unified diff into its file set and its anchorable positions.
 
-    File-level membership is not enough to place an inline comment: the API
-    rejects any line outside a hunk with a 422, and one rejected comment fails
-    the WHOLE review, demoting every finding to the body. Walking the hunks
-    turns that into a check we can make before posting.
+    One pass, because both answers need the same state and getting that state
+    wrong corrupts both. Two properties are load-bearing:
 
-    Both added (``+``) and context (`` ``) lines count -- context lines are part
-    of the diff and are anchorable; removed lines are not, since they do not
-    exist on the new side.
+    * **A ``+++ b/`` line is a file header only OUTSIDE a hunk.** An added
+      source line whose own content starts with ``++ b/`` serializes as
+      ``+++ b/...`` inside the hunk, and treating it as a header silently
+      repoints every subsequent position at an attacker-chosen path. Hunk state
+      is what tells the two apart.
+    * **Only added (``+``) and context lines are anchorable.** Removed lines do
+      not exist on the new side and consume no new-side number; the API rejects
+      any line outside a hunk with a 422, and one rejection fails the WHOLE
+      review, so this set is what keeps a bad line number from demoting every
+      other finding to the body.
     """
+    files: set[str] = set()
     positions: set[tuple[str, int]] = set()
     path: str | None = None
     new_line = 0
+    in_hunk = False
     for line in diff.splitlines():
-        if line.startswith(_DIFF_FILE_RE_PREFIX):
+        if line.startswith("diff --git "):
+            path, in_hunk = None, False
+            continue
+        if not in_hunk and line.startswith(_DIFF_FILE_RE_PREFIX):
             path = line[len(_DIFF_FILE_RE_PREFIX) :].strip()
+            files.add(path)
             continue
         if line.startswith("@@"):
             match = _HUNK_NEW_START_RE.match(line)
             if match:
                 new_line = int(match.group(1))
+                in_hunk = True
             continue
-        if path is None or line.startswith("\\"):  # "\ No newline at end of file"
+        if not in_hunk or path is None:
             continue
-        if line.startswith(("+", " ")):
+        if line.startswith("\\"):  # "\ No newline at end of file"
+            continue
+        # "" is a context line whose trailing space some tools strip; counting
+        # it keeps the new-side numbering aligned with the file.
+        if line == "" or line.startswith(("+", " ")):
             positions.add((path, new_line))
             new_line += 1
-    return frozenset(positions)
+    return frozenset(files), frozenset(positions)
+
+
+def parse_diff_positions(diff: str) -> frozenset[tuple[str, int]]:
+    """The anchorable ``(path, new-side line)`` pairs of ``diff``."""
+    return parse_diff(diff)[1]
 
 
 def _api_headers(token: str) -> dict[str, str]:
@@ -119,14 +140,9 @@ def fetch_pr_context(
         diff_resp.raise_for_status()
         diff = diff_resp.text
 
-    files = frozenset(
-        line[len(_DIFF_FILE_RE_PREFIX) :].strip()
-        for line in diff.splitlines()
-        if line.startswith(_DIFF_FILE_RE_PREFIX)
-    )
-    # Like `files`, parsed from the FULL diff: these are anchor sets for comment
-    # placement, and a truncated tail is still real, anchorable code.
-    positions = parse_diff_positions(diff)
+    # Parsed from the FULL diff: these are anchor sets for comment placement,
+    # and a truncated tail is still real, anchorable code.
+    files, positions = parse_diff(diff)
     truncated = len(diff) > diff_budget
     if truncated:
         # Prefer a file boundary; if the very first file already exceeds the

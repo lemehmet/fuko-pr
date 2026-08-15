@@ -325,6 +325,45 @@ def test_parse_diff_positions_walks_hunks():
     assert ("src/app.py", 13) not in positions
 
 
+def test_parse_diff_ignores_a_file_header_lookalike_inside_a_hunk():
+    """An added line whose content starts `++ b/` serializes as `+++ b/`."""
+    diff = (
+        "diff --git a/src/app.py b/src/app.py\n"
+        "--- a/src/app.py\n"
+        "+++ b/src/app.py\n"
+        "@@ -1,2 +1,4 @@\n"
+        " context\n"
+        "+++ b/etc/passwd\n"  # CONTENT, not a header
+        "+real_added\n"
+    )
+    files, positions = checkout_mod.parse_diff(diff)
+
+    assert files == {"src/app.py"}  # the lookalike must not become a path
+    assert ("src/app.py", 2) in positions  # the lookalike line itself is addable
+    assert ("src/app.py", 3) in positions
+    assert not any(path == "etc/passwd" for path, _ in positions)
+
+
+def test_parse_diff_resets_state_between_files():
+    diff = (
+        "diff --git a/a.py b/a.py\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "+one\n"
+        "diff --git a/b.py b/b.py\n"
+        "--- a/b.py\n"
+        "+++ b/b.py\n"
+        "@@ -5,1 +5,1 @@\n"
+        "+five\n"
+    )
+    files, positions = checkout_mod.parse_diff(diff)
+    assert files == {"a.py", "b.py"}
+    assert ("a.py", 1) in positions
+    assert ("b.py", 5) in positions
+    assert ("a.py", 5) not in positions
+
+
 def test_parse_review_tolerates_braces_inside_finding_text():
     """`rfind('}')` takes the LAST brace, so braces in a body are not a truncation."""
     payload = {
@@ -494,6 +533,26 @@ def test_permission_rules_skip_non_posix_roots_and_say_so(capsys):
     err = capsys.readouterr().err
     assert "NOT applied" in err
     assert "C:/Users/runner/.claude" in err
+
+
+@pytest.mark.parametrize("home", ["//home/runner", "///home/runner", "/home/runner"])
+def test_permission_rules_normalize_repeated_leading_slashes(home):
+    """POSIX allows a leading `//`, and `Read(///...)` matches nothing."""
+    deny = json.loads(harness_mod._permission_settings({"HOME": home}))["permissions"]["deny"]
+    assert deny
+    for rule in deny:
+        assert rule.startswith("Read(//"), rule
+        assert not rule.startswith("Read(///"), rule
+        assert "///" not in rule, rule
+    assert "Read(//home/runner/.claude/**)" in deny
+
+
+def test_permission_rules_normalize_a_doubled_config_dir():
+    deny = json.loads(
+        harness_mod._permission_settings({"HOME": "/h", "CLAUDE_CONFIG_DIR": "//cfg/claude"})
+    )["permissions"]["deny"]
+    assert "Read(//cfg/claude/**)" in deny
+    assert not any(rule.startswith("Read(///") for rule in deny)
 
 
 def test_permission_rules_deny_proc_so_the_agent_cannot_read_its_own_env():

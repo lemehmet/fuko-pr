@@ -137,8 +137,16 @@ def _permission_settings(env: dict[str, str]) -> str:
     # they are the only rules that remain.
     candidates += [(d, True) for d in SENSITIVE_SYSTEM_DIRS]
 
+    # Build the rule from a normalized path rather than by concatenating onto
+    # whatever the environment held: POSIX permits a leading `//` with
+    # implementation-defined meaning, so a HOME of `//home/runner` would
+    # otherwise render `Read(///home/...)` -- the silently non-matching form,
+    # leaving the credential stores undenied with nothing to show for it.
+    # Stripping and re-adding makes exactly one `//` prefix by construction, so
+    # the broken spelling cannot be produced at all rather than merely asserted
+    # against.
     deny = [
-        f"Read(/{path}/**)" if is_dir else f"Read(/{path})"
+        f"Read(//{path.lstrip('/')}/**)" if is_dir else f"Read(//{path.lstrip('/')})"
         for path, is_dir in candidates
         if path.startswith("/")
     ]
