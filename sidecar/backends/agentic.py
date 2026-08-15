@@ -66,9 +66,23 @@ from ..signals import ReviewSignal, make_id, with_marker, with_visible_label
 from ..throttle import is_throttle
 from .base import InvokeResult, PRRef
 
-#: The heading every agentic review body opens with. Used as the read-back
-#: fingerprint that tells OUR review apart from another reviewer's.
+#: The heading every agentic review body opens with.
 _REVIEW_HEADER = "## fuko agentic review"
+
+
+def _review_header(label: str = "") -> str:
+    """The review body's opening line, carrying the branch label when there is one.
+
+    The label is what makes the read-back fingerprint BRANCH-specific. In A/B mode
+    several branches review the same PR through the same backend and post for the
+    same ``commit_id``, so a header alone would let branch A's committed review
+    satisfy branch B's read-back -- and branch B would then report its signals as
+    posted while its review never reached the PR. Losing a review silently is
+    worse than the duplicate the read-back exists to prevent, so the fingerprint
+    has to name the branch.
+    """
+    return f"{_REVIEW_HEADER} — `{label}`" if label else _REVIEW_HEADER
+
 
 #: Statuses worth another attempt: GitHub is briefly unavailable, not refusing.
 #: 4xx is deliberately excluded -- a 422 has its own body-only degrade path, and
@@ -85,6 +99,9 @@ _SAFE_TO_RETRY_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout)
 #: outage.
 _POST_ATTEMPTS = 3
 _BACKOFF_BASE_SECONDS = 0.5
+
+#: Bound on the read-back pagination walk, so a pathological PR cannot spin.
+_READ_BACK_MAX_PAGES = 20
 
 
 def _backoff_delay(attempt: int) -> float:
@@ -530,7 +547,9 @@ class AgenticBackend:
             else:
                 overflow.append((f, body))
 
-        posted = self._post_review(pr, token, api_url, stash, inline, overflow)
+        posted = self._post_review(
+            pr, token, api_url, stash, inline, overflow, label=compare_label or model
+        )
         return signals if posted else []
 
     def _claim(self, pr_url: str, model: str, identity: str = "") -> _PendingReview | None:
@@ -613,6 +632,7 @@ class AgenticBackend:
         stash: _PendingReview,
         inline: list[tuple[AgenticFinding, dict]],
         overflow: list[tuple[AgenticFinding, str]],
+        label: str = "",
     ) -> bool:
         """POST one PR review; retry body-only on a 422; report success."""
         headers = {
@@ -621,7 +641,7 @@ class AgenticBackend:
         }
         if token:
             headers["Authorization"] = "Bearer " + token
-        body_parts = [_REVIEW_HEADER, "", stash.summary or "(no summary)"]
+        body_parts = [_review_header(label), "", stash.summary or "(no summary)"]
         if overflow:
             body_parts += ["", "### Findings without a diff anchor", ""]
             body_parts += [
@@ -647,7 +667,7 @@ class AgenticBackend:
         }
         url = f"{api_url.rstrip('/')}/repos/{pr.repo}/pulls/{pr.number}/reviews"
         try:
-            return self._post(url, headers, payload, inline)
+            return self._post(url, headers, payload, inline, label)
         except httpx.HTTPError as e:
             # A transport failure that survived the retry budget. Report it as a
             # failed post so normalize_output returns no signals rather than
@@ -655,7 +675,9 @@ class AgenticBackend:
             print(f"fuko: agentic review post failed (transport): {e}", file=sys.stderr)
             return False
 
-    def _review_already_posted(self, client: httpx.Client, url: str, payload: dict) -> bool:
+    def _review_already_posted(
+        self, client: httpx.Client, url: str, payload: dict, label: str = ""
+    ) -> bool:
         """Whether OUR review for this commit is already on the PR.
 
         The read-back that makes a retry safe. ``POST /pulls/{n}/reviews`` is NOT
@@ -669,23 +691,42 @@ class AgenticBackend:
         mistake another reviewer's review (or our own review of an earlier HEAD)
         for this one. Costs one request, and only on the failure path.
         """
+        head = payload.get("commit_id")
+        # The fingerprint is the FULL header including this branch's label, so a
+        # sibling A/B branch's review for the same commit cannot satisfy it.
+        fingerprint = _review_header(label)
+        page = 1
         try:
-            resp = client.get(url, params={"per_page": 100})
-            resp.raise_for_status()
-            reviews = resp.json()
+            while page <= _READ_BACK_MAX_PAGES:
+                resp = client.get(url, params={"per_page": 100, "page": page})
+                resp.raise_for_status()
+                batch = resp.json()
+                if not isinstance(batch, list) or not batch:
+                    return False
+                if any(
+                    r.get("commit_id") == head and fingerprint in (r.get("body") or "")
+                    for r in batch
+                    if isinstance(r, dict)
+                ):
+                    return True
+                # Reviews come back oldest-first, so ours -- the newest -- is on
+                # the LAST page. Reading only page 1 of a busy PR would miss it
+                # and retry into a duplicate, which is the outcome this guards.
+                if len(batch) < 100:
+                    return False
+                page += 1
         except (httpx.HTTPError, ValueError) as e:
             # Unknown rather than "no": fail toward NOT retrying, since a
             # duplicate review is worse than a missing one we already logged.
             print(f"fuko: could not read back agentic review state: {e}", file=sys.stderr)
             return True
-        head = payload.get("commit_id")
-        return any(
-            r.get("commit_id") == head and _REVIEW_HEADER in (r.get("body") or "")
-            for r in reviews
-            if isinstance(r, dict)
-        )
+        # Ran out of pages without deciding: same reasoning, decline to retry.
+        print("fuko: review read-back exceeded its page budget; not re-posting", file=sys.stderr)
+        return True
 
-    def _send_review(self, client: httpx.Client, url: str, payload: dict) -> httpx.Response | None:
+    def _send_review(
+        self, client: httpx.Client, url: str, payload: dict, label: str = ""
+    ) -> httpx.Response | None:
         """POST the review with a bounded retry for transient failures only.
 
         Retried: 502/503/504, and connection errors that provably never reached
@@ -711,7 +752,7 @@ class AgenticBackend:
                     file=sys.stderr,
                 )
             except httpx.HTTPError as e:
-                if self._review_already_posted(client, url, payload):
+                if self._review_already_posted(client, url, payload, label):
                     print(
                         f"fuko: review post response lost ({e}) but the review is "
                         "on the PR; not re-posting",
@@ -740,10 +781,11 @@ class AgenticBackend:
         headers: dict[str, str],
         payload: dict,
         inline: list[tuple[AgenticFinding, dict]],
+        label: str = "",
     ) -> bool:
         """Issue the review POST, with the one body-only retry; report success."""
         with httpx.Client(timeout=60.0, headers=headers) as client:
-            resp = self._send_review(client, url, payload)
+            resp = self._send_review(client, url, payload, label)
             if resp is None:
                 return True
             if resp.status_code == 422 and inline:
@@ -764,7 +806,7 @@ class AgenticBackend:
                         for where, (_, comment) in zip(blocks, inline, strict=True)
                     )
                 )
-                resp = self._send_review(client, url, payload)
+                resp = self._send_review(client, url, payload, label)
                 if resp is None:
                     return True
             if resp.status_code >= 300:

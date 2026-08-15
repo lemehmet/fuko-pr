@@ -469,8 +469,9 @@ def _no_sleep(monkeypatch):
     monkeypatch.setattr(agentic_mod.time, "sleep", lambda _s: None)
 
 
-def _posted_review(head="beef"):
-    return {"commit_id": head, "body": "## fuko agentic review\n\nlooked closely"}
+def _posted_review(head="beef", label="claude-x"):
+    """A review already on the PR, as the read-back would see it."""
+    return {"commit_id": head, "body": f"{agentic_mod._review_header(label)}\n\nlooked closely"}
 
 
 @pytest.mark.parametrize("status", [502, 503, 504])
@@ -545,6 +546,83 @@ def test_read_back_ignores_a_review_for_another_commit(monkeypatch, _no_sleep):
     monkeypatch.setattr(agentic_mod, "httpx", fake)
     backend.normalize_output(PR, "claude-x", token="t")
     assert len(fake.posts) == 2  # not ours for this head -> retry
+
+
+def test_read_back_ignores_a_sibling_ab_branch_review(monkeypatch, _no_sleep):
+    """A/B branches post for the SAME commit through the same backend.
+
+    If the fingerprint were the bare header, branch A's committed review would
+    satisfy branch B's read-back — branch B would report its signals as posted
+    while its review never reached the PR. Losing a review silently is worse than
+    the duplicate the read-back exists to prevent.
+    """
+    backend = AgenticBackend()
+    _seed(backend)
+    sibling = _posted_review(head="beef", label="some-other-model")
+    fake = _FakeHttpx([httpx.ReadTimeout("lost"), 200], reviews=[sibling])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    signals = backend.normalize_output(PR, "claude-x", token="t")
+
+    assert len(fake.posts) == 2  # the sibling's review is not ours -> retry
+    assert len(signals) == 2
+
+
+def test_read_back_matches_our_own_branch_in_ab_mode(monkeypatch, _no_sleep):
+    """The converse: our OWN branch's review must still be recognised."""
+    backend = AgenticBackend()
+    _seed(backend)
+    ours = _posted_review(head="beef", label="anthropic/claude-x")
+    fake = _FakeHttpx([httpx.ReadTimeout("lost"), 200], reviews=[ours])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    backend.normalize_output(
+        PR, "anthropic/claude-x", compare_label="anthropic/claude-x", token="t"
+    )
+    assert len(fake.posts) == 1  # recognised as already posted
+
+
+def test_read_back_walks_past_the_first_page(monkeypatch, _no_sleep):
+    """Reviews come back oldest-first, so ours is on the LAST page.
+
+    Reading only page 1 of a busy PR would miss our own review and retry into
+    exactly the duplicate this guard exists to prevent.
+    """
+    backend = AgenticBackend()
+    _seed(backend)
+
+    class _Paged(_FakeHttpx):
+        def Client(self, **kwargs):  # noqa: N802
+            fake = self
+
+            class _C:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def post(self, url, json=None):
+                    fake.posts.append((url, json))
+                    outcome = fake.statuses.pop(0)
+                    if isinstance(outcome, BaseException):
+                        raise outcome
+                    return _FakeResponse(outcome)
+
+                def get(self, url, params=None):
+                    page = (params or {}).get("page", 1)
+                    fake.gets.append(page)
+                    # Page 1 is a full page of unrelated reviews; ours is on page 2.
+                    if page == 1:
+                        return _FakeResponse(200, json_body=[{"commit_id": "old"}] * 100)
+                    return _FakeResponse(200, json_body=[_posted_review()])
+
+            return _C()
+
+    fake = _Paged([httpx.ReadTimeout("lost"), 200])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    backend.normalize_output(PR, "claude-x", token="t")
+
+    assert fake.gets == [1, 2]
+    assert len(fake.posts) == 1  # found on page 2 -> not re-posted
 
 
 def test_read_back_ignores_another_reviewers_review(monkeypatch, _no_sleep):
