@@ -368,7 +368,7 @@ class _FakeHttpx:
             def __exit__(self, *a):
                 return False
 
-            def post(self, url, json=None):
+            def post(self, url, json=None, **kw):
                 fake.posts.append((url, json))
                 outcome = fake.statuses.pop(0)
                 # An entry may be an exception instance, to model a transport
@@ -377,7 +377,7 @@ class _FakeHttpx:
                     raise outcome
                 return _FakeResponse(outcome)
 
-            def get(self, url, params=None):
+            def get(self, url, params=None, **kw):
                 """The read-back GET that decides whether an ambiguous retry is safe."""
                 fake.gets.append(url)
                 return _FakeResponse(200, json_body=getattr(fake, "reviews", None) or [])
@@ -619,14 +619,14 @@ def test_read_back_walks_past_the_first_page(monkeypatch, _no_sleep):
                 def __exit__(self, *a):
                     return False
 
-                def post(self, url, json=None):
+                def post(self, url, json=None, **kw):
                     fake.posts.append((url, json))
                     outcome = fake.statuses.pop(0)
                     if isinstance(outcome, BaseException):
                         raise outcome
                     return _FakeResponse(outcome)
 
-                def get(self, url, params=None):
+                def get(self, url, params=None, **kw):
                     page = (params or {}).get("page", 1)
                     fake.gets.append(page)
                     # Page 1 is a full page of unrelated reviews; ours is on page 2.
@@ -675,18 +675,98 @@ def test_unreadable_read_back_declines_to_retry(monkeypatch, _no_sleep):
                 def __exit__(self, *a):
                     return False
 
-                def post(self, url, json=None):
+                def post(self, url, json=None, **kw):
                     return outer.__enter__().post(url, json=json)
 
-                def get(self, url, params=None):
+                def get(self, url, params=None, **kw):
                     raise httpx.HTTPError("read-back down")
 
             return _C()
 
     fake = _Broken([httpx.ReadTimeout("lost"), 200])
     monkeypatch.setattr(agentic_mod, "httpx", fake)
-    backend.normalize_output(PR, "claude-x", token="t")
-    assert len(fake.posts) == 1  # declined to retry
+    signals = backend.normalize_output(PR, "claude-x", token="t")
+
+    assert len(fake.posts) == 1  # declined to retry — a duplicate is unacceptable
+    # ...and declined to CLAIM it posted. Both directions are unsafe when the
+    # outcome is unknown: retrying risks a duplicate, reporting success reports a
+    # review nobody confirmed. The branch fails instead, which reads as not-done.
+    assert signals == []
+
+
+def test_posting_deadline_stops_the_flow_and_reports_failure(monkeypatch):
+    """The whole posting flow shares ONE budget, independent of tool_timeout.
+
+    `tool_timeout` is passed to `run_review()` inside `invoke()`; the runner calls
+    `normalize_output()` afterwards, so nothing bounded this path. Unbounded, the
+    worst case was 3 attempts x (1 POST + 20 read-back GETs) x 60s ~= 63 minutes —
+    long enough to blow the CI job's cap and get the run killed mid-review, which
+    is the starved round that reads as clean.
+    """
+    monkeypatch.setattr(agentic_mod, "_POST_DEADLINE_SECONDS", 0.0)
+    backend = AgenticBackend()
+    _seed(backend)
+    fake = _FakeHttpx([httpx.ReadTimeout("lost"), 200], reviews=[])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    signals = backend.normalize_output(PR, "claude-x", token="t")
+
+    assert fake.posts == []  # never even started, the budget was already spent
+    assert signals == []  # and did not claim success
+
+
+def test_read_back_stops_paging_when_the_deadline_expires(monkeypatch, _no_sleep):
+    """A deep pagination walk must not outlive the budget either."""
+    backend = AgenticBackend()
+    _seed(backend)
+
+    class _SlowPages(_FakeHttpx):
+        def Client(self, **kwargs):  # noqa: N802
+            fake = self
+
+            class _C:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def post(self, url, json=None, **kw):
+                    fake.posts.append((url, json))
+                    outcome = fake.statuses.pop(0)
+                    if isinstance(outcome, BaseException):
+                        raise outcome
+                    return _FakeResponse(outcome)
+
+                def get(self, url, params=None, **kw):
+                    fake.gets.append((params or {}).get("page", 1))
+                    # Always a full page, so the walk would run to the page cap.
+                    return _FakeResponse(200, json_body=[{"commit_id": "other"}] * 100)
+
+            return _C()
+
+    # A controllable clock: every reading advances 10s, so the walk consumes the
+    # budget the way real requests would. Without this the fake is instantaneous
+    # and the page cap, not the deadline, is what stops it.
+    class _Clock:
+        def __init__(self):
+            self.now = 0.0
+
+        def monotonic(self):
+            self.now += 10.0
+            return self.now
+
+        def sleep(self, _s):
+            pass
+
+    fake = _SlowPages([httpx.ReadTimeout("lost"), 200])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    monkeypatch.setattr(agentic_mod, "time", _Clock())
+    monkeypatch.setattr(agentic_mod, "_READ_BACK_MAX_PAGES", 200)
+    signals = backend.normalize_output(PR, "claude-x", token="t")
+
+    # Bounded by the 120s deadline (~12 clock ticks), not the 200-page cap.
+    assert 0 < len(fake.gets) < 200
+    assert signals == []
 
 
 def test_retry_budget_is_bounded(monkeypatch, _no_sleep):
@@ -938,7 +1018,7 @@ def test_normalize_transport_failure_returns_no_signals(monkeypatch, capsys):
                 def __exit__(self, *a):
                     return False
 
-                def post(self, url, json=None):
+                def post(self, url, json=None, **kw):
                     raise httpx.ConnectError("no route to host")
 
             return _C()

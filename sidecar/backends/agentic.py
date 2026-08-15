@@ -96,14 +96,48 @@ _TRANSIENT_STATUSES = frozenset({502, 503, 504})
 #: mid-response) is AMBIGUOUS and goes through the read-back first.
 _SAFE_TO_RETRY_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout)
 
-#: Small and bounded, so the whole retry budget stays far inside
-#: `[review].tool_timeout` -- this exists to survive a blip, not to wait out an
-#: outage.
+#: Attempt count and backoff base. These bound the RETRIES, not the wall clock --
+#: an earlier version of this comment claimed the budget "stays far inside
+#: `[review].tool_timeout`", which was false twice over: that timeout does not
+#: cover this code path at all (it is passed to `run_review()` inside `invoke()`,
+#: while posting happens later in `normalize_output()`), and the attempt count
+#: alone bounds nothing when each attempt can issue many requests. The actual
+#: wall-clock bound is `_POST_DEADLINE_SECONDS`, shared across every request and
+#: sleep in the flow. This exists to survive a blip, not to wait out an outage.
 _POST_ATTEMPTS = 3
 _BACKOFF_BASE_SECONDS = 0.5
 
 #: Bound on the read-back pagination walk, so a pathological PR cannot spin.
 _READ_BACK_MAX_PAGES = 20
+
+#: Wall-clock ceiling on the ENTIRE posting flow -- every POST attempt, every
+#: read-back GET, and every backoff sleep, sharing one deadline.
+#:
+#: It has to be its own budget because `[review].tool_timeout` does NOT cover
+#: this code. That timeout is passed to `run_review()` inside `invoke()`; the
+#: runner calls `normalize_output()` afterwards, so the posting flow runs
+#: unbounded by it. Without a deadline the worst case is
+#: `_POST_ATTEMPTS * (1 POST + _READ_BACK_MAX_PAGES GETs) * _HTTP_TIMEOUT`
+#: = 3 * 21 * 60s ~= 63 minutes -- long enough to blow the CI job's
+#: `timeout-minutes` and get the run killed mid-review, which is the starved
+#: round that reads as a clean one. The resilience path must not become the
+#: thing that kills the job it was added to protect.
+_POST_DEADLINE_SECONDS = 120.0
+
+#: Per-request ceiling. Deliberately below the whole-flow deadline so one hung
+#: request cannot consume the entire budget on its own.
+_HTTP_TIMEOUT = 30.0
+
+
+def _remaining_timeout(deadline: float) -> float:
+    """Per-request timeout clamped to what is left of the shared budget.
+
+    Never returns zero or negative: the callers already refuse to start a request
+    once the deadline has passed, and this only guards the sliver between that
+    check and the call, where a non-positive timeout would be an error rather
+    than a fast failure.
+    """
+    return max(0.001, min(_HTTP_TIMEOUT, deadline - time.monotonic()))
 
 
 def _backoff_delay(attempt: int) -> float:
@@ -678,9 +712,16 @@ class AgenticBackend:
             return False
 
     def _review_already_posted(
-        self, client: httpx.Client, url: str, payload: dict, label: str = ""
-    ) -> bool:
+        self, client: httpx.Client, url: str, payload: dict, label: str = "", deadline: float = 0.0
+    ) -> bool | None:
         """Whether OUR review for this commit is already on the PR.
+
+        Tri-state on purpose. ``True``/``False`` are answers; ``None`` means the
+        question could not be answered -- the read-back errored, ran out of pages,
+        or ran out of deadline. ``None`` is NOT folded into either answer, because
+        the two failure directions are both real: answering "yes" would report a
+        review we never confirmed, and answering "no" would retry into a duplicate.
+        The caller declines to do either.
 
         The read-back that makes a retry safe. ``POST /pulls/{n}/reviews`` is NOT
         idempotent, and the failure a retry exists to fix -- a response lost after
@@ -700,7 +741,19 @@ class AgenticBackend:
         page = 1
         try:
             while page <= _READ_BACK_MAX_PAGES:
-                resp = client.get(url, params={"per_page": 100, "page": page})
+                if time.monotonic() >= deadline:
+                    print(
+                        "fuko: review read-back ran out of its posting deadline",
+                        file=sys.stderr,
+                    )
+                    return None
+                resp = client.get(
+                    url,
+                    params={"per_page": 100, "page": page},
+                    # Clamp to what is left: a request we cannot afford to finish
+                    # must not be issued with a timeout that outlives the budget.
+                    timeout=_remaining_timeout(deadline),
+                )
                 resp.raise_for_status()
                 batch = resp.json()
                 if not isinstance(batch, list) or not batch:
@@ -718,33 +771,49 @@ class AgenticBackend:
                     return False
                 page += 1
         except (httpx.HTTPError, ValueError) as e:
-            # Unknown rather than "no": fail toward NOT retrying, since a
-            # duplicate review is worse than a missing one we already logged.
             print(f"fuko: could not read back agentic review state: {e}", file=sys.stderr)
-            return True
-        # Ran out of pages without deciding: same reasoning, decline to retry.
-        print("fuko: review read-back exceeded its page budget; not re-posting", file=sys.stderr)
-        return True
+            return None
+        print("fuko: review read-back exceeded its page budget", file=sys.stderr)
+        return None
 
     def _send_review(
-        self, client: httpx.Client, url: str, payload: dict, label: str = ""
+        self,
+        client: httpx.Client,
+        url: str,
+        payload: dict,
+        label: str = "",
+        deadline: float = 0.0,
     ) -> httpx.Response | None:
         """POST the review with a bounded retry for transient failures only.
 
-        Retried: 502/503/504, and connection errors that provably never reached
-        the server. NOT retried: any other 4xx -- a 422 has its own body-only
-        degrade path and a 401/403 will not improve by repetition.
+        Only ONE class is retried blind: connection errors that provably never
+        reached the server, so nothing can have been committed. Everything else
+        that is retried at all -- 502/503/504, a read timeout, a connection broken
+        mid-response -- is AMBIGUOUS about whether the review landed, and consults
+        :meth:`_review_already_posted` first. A gateway status is not evidence the
+        request was refused; it is evidence the response did not come back.
 
-        A read timeout or a broken connection mid-response is AMBIGUOUS: the
-        request may already have been committed. Those consult
-        :meth:`_review_already_posted` before retrying, and stop if the review
-        landed. Returns ``None`` when the review is known (or assumed) to be on
-        the PR already, so the caller reports success without posting twice.
+        Not retried: any other 4xx. A 422 has its own body-only degrade path and a
+        401/403 will not improve by repetition.
+
+        ``deadline`` is a monotonic timestamp shared with the read-back, so POSTs,
+        GETs and backoff all draw on ONE budget.
+
+        Returns ``None`` when the review is confirmed already on the PR, so the
+        caller reports success without posting twice. Raises when the outcome
+        cannot be established -- an unverified review must not be reported as
+        posted.
         """
+
+        def _unverified(reason: str) -> None:
+            raise httpx.HTTPError(f"review post outcome could not be established: {reason}")
+
         last = _POST_ATTEMPTS - 1
         for attempt in range(_POST_ATTEMPTS):
+            if time.monotonic() >= deadline:
+                _unverified("posting deadline exhausted")
             try:
-                resp = client.post(url, json=payload)
+                resp = client.post(url, json=payload, timeout=_remaining_timeout(deadline))
             except _SAFE_TO_RETRY_ERRORS as e:
                 # Never reached the server: nothing can have been committed.
                 if attempt == last:
@@ -754,13 +823,19 @@ class AgenticBackend:
                     file=sys.stderr,
                 )
             except httpx.HTTPError as e:
-                if self._review_already_posted(client, url, payload, label):
+                landed = self._review_already_posted(client, url, payload, label, deadline)
+                if landed is True:
                     print(
                         f"fuko: review post response lost ({e}) but the review is "
                         "on the PR; not re-posting",
                         file=sys.stderr,
                     )
                     return None
+                if landed is None:
+                    # Could not determine. Retrying risks a duplicate; claiming
+                    # success would report a review we never confirmed. Do
+                    # neither -- the branch fails, which reads as NOT done.
+                    _unverified(f"read-back inconclusive after {e}")
                 if attempt == last:
                     raise
                 print(
@@ -775,13 +850,16 @@ class AgenticBackend:
                     # rather than reasoned about per-status -- one rule beats
                     # three fragile ones, and the read-back costs a request only
                     # on a path that has already failed.
-                    if self._review_already_posted(client, url, payload, label):
+                    landed = self._review_already_posted(client, url, payload, label, deadline)
+                    if landed is True:
                         print(
                             f"fuko: review post got {resp.status_code} but the review "
                             "is on the PR; not re-posting",
                             file=sys.stderr,
                         )
                         return None
+                    if landed is None:
+                        _unverified(f"read-back inconclusive after {resp.status_code}")
                     if attempt == last:
                         return resp
                     print(
@@ -790,7 +868,10 @@ class AgenticBackend:
                     )
                 else:
                     return resp
-            time.sleep(_backoff_delay(attempt))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _unverified("posting deadline exhausted")
+            time.sleep(min(_backoff_delay(attempt), remaining))
         raise httpx.HTTPError("review post retries exhausted")  # pragma: no cover
 
     def _post(
@@ -802,8 +883,9 @@ class AgenticBackend:
         label: str = "",
     ) -> bool:
         """Issue the review POST, with the one body-only retry; report success."""
-        with httpx.Client(timeout=60.0, headers=headers) as client:
-            resp = self._send_review(client, url, payload, label)
+        deadline = time.monotonic() + _POST_DEADLINE_SECONDS
+        with httpx.Client(timeout=_HTTP_TIMEOUT, headers=headers) as client:
+            resp = self._send_review(client, url, payload, label, deadline)
             if resp is None:
                 return True
             if resp.status_code == 422 and inline:
@@ -824,7 +906,7 @@ class AgenticBackend:
                         for where, (_, comment) in zip(blocks, inline, strict=True)
                     )
                 )
-                resp = self._send_review(client, url, payload, label)
+                resp = self._send_review(client, url, payload, label, deadline)
                 if resp is None:
                     return True
             if resp.status_code >= 300:
