@@ -67,9 +67,11 @@ _CR_CHECK_NAMES = re.compile(r"coderabbit", re.I)
 # minting a matching App instead requires repo-admin installation, a trusted act.
 # The `fuko-<slot>[bot]` shape still covers every instance (fuko-dorian[bot],
 # fuko-gray[bot], ...) so a new slot or an App rename cannot silently drop
-# coverage. `github-actions[bot]` is fuko's documented App-less fallback: the
-# workflow posts under it when no App is configured, and assuming it requires
-# repo write access, which an untrusted PR author does not have.
+# coverage. `github-actions[bot]` is fuko's documented App-less fallback and MUST
+# STAY accepted: it is the identity of the sequential-fallback path taken whenever
+# App tokens are unavailable, so removing it as "over-permissive" would void
+# coverage for exactly the degraded runs this reporting exists to catch. Assuming
+# it requires repo write access, which an untrusted PR author does not have.
 _FUKO_RECEIPT_AUTHORS = re.compile(r"^(?:fuko-[\w.-]+\[bot\]|github-actions\[bot\])$", re.I)
 
 
