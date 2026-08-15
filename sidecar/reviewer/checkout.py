@@ -97,7 +97,15 @@ def parse_diff(diff: str) -> tuple[frozenset[str], frozenset[tuple[str, int]]]:
 
 
 def parse_diff_positions(diff: str) -> frozenset[tuple[str, int]]:
-    """The anchorable ``(path, new-side line)`` pairs of ``diff``."""
+    """The anchorable ``(path, new-side line)`` pairs of ``diff``.
+
+    A thin projection of :func:`parse_diff` for callers that need only the
+    positions -- comment placement, which asks "may I anchor here?" and has no
+    use for the file set. The parse itself is not duplicated: both answers come
+    from the same hunk-aware pass, because deriving them separately is how the
+    two fall out of agreement, and a position set that disagrees with its file
+    set is exactly what mis-anchors a comment.
+    """
     return parse_diff(diff)[1]
 
 
