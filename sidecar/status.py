@@ -228,7 +228,9 @@ def coderabbit_state(
             ),
         )
 
-    blob = "\n".join(bodies)
+    # No all-bodies blob: every transient-state read is scoped to CR's live issue
+    # comments (see below), and the completion reads use `head_blob`/`bodies`
+    # directly. Reintroducing one would re-open the staleness hole.
     issue_blob = "\n".join(cr_issue_bodies)
     # Every range end-sha, in body order. `walk_on_head` used to scan ALL bodies
     # while `walk_head` was bound from the FIRST one; once a PR has more than one
