@@ -607,9 +607,18 @@ def _read(fetch, fallback):
 
     Same contract the metrics page follows: the store being unreachable must not
     cost the operator the page, only its contents.
+
+    The visitor gets a GENERIC message; the exception text goes to stderr only.
+    Every caller of this helper is an UNAUTHENTICATED route (browse and preview
+    are the two pages without ``security.require``), so whatever a store
+    exception happens to contain would otherwise be rendered to anyone who can
+    reach the console. Store errors are exactly the kind that quote what they
+    failed to connect to -- DSNs, hosts, and, for a URL carrying inline
+    credentials, the credentials themselves. The operator loses nothing: the
+    detail is already logged next to a timestamp on the box that has it.
     """
     try:
         return fetch(), ""
     except Exception as e:
         print(f"fuko: kb console degraded (store unreachable?): {e}", file=sys.stderr)
-        return fallback, str(e)
+        return fallback, "see the sidecar log for details"
