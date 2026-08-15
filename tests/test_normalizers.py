@@ -12,8 +12,10 @@ from sidecar.backends.pragent import PrAgentBackend
 from sidecar.normalizers import (
     coderabbit_signal,
     collect_issue_comment_signals,
+    collect_review_signals,
     collect_signals,
     copilot_signal,
+    copilot_suppressed_signals,
     guide_signals,
     is_coderabbit_comment,
     is_coderabbit_finding,
@@ -136,6 +138,103 @@ def test_copilot_signal_inferred_fields():
     assert sig.line == 6
     assert sig.suggestion is False
     assert sig.title.startswith("`completedFocusCount % 4 == 0`")
+
+
+# --- Copilot's collapsed "Suppressed comments" block (#109) -------------------
+#
+# The body below is TRIMMED FROM A REAL REVIEW on this repo's PR #100, where
+# Copilot's visible prose read "generated no new comments" while the collapsed
+# block carried three real findings — one of them a symlink-attack security
+# issue. That review is why this is not a hypothetical channel.
+
+_REAL_SUPPRESSED_BODY = """\
+## Pull request overview
+
+Copilot reviewed 13 out of 13 changed files in this pull request and generated \
+no new comments.
+
+<details>
+<summary>Suppressed comments (3)</summary>
+
+**sidecar/reviewer/checkout.py:6**
+* Module docstring says the checkout is a "blob-filtered fetch", but \
+`checkout_pr_head()` explicitly avoids blob filters. This is misleading.
+```
+sites and verify claims). The checkout is a shallow, blob-filtered fetch of the
+```
+**sidecar/reviewer/checkout.py:137**
+* `strip_agent_config()` can follow symlinks: `Path.is_dir()` follows symlinks \
+by default, so a malicious PR could commit `.claude` as a symlink to some \
+sensitive directory and `shutil.rmtree()` would delete the target outside the \
+checkout. This is a classic symlink attack on cleanup code.
+**sidecar/backends/agentic.py:420**
+* Unanchored findings are only rendered as plain markdown bullets.
+</details>
+"""
+
+
+def _copilot_review(body):
+    return {
+        "user": {"login": "copilot-pull-request-reviewer[bot]"},
+        "body": body,
+        "html_url": "https://github.com/o/r/pull/100#pullrequestreview-1",
+    }
+
+
+def test_copilot_suppressed_block_yields_every_finding():
+    """A review saying "no new comments" is not clean until this block is read."""
+    signals = copilot_suppressed_signals(_copilot_review(_REAL_SUPPRESSED_BODY))
+    assert len(signals) == 3
+    assert [s.file for s in signals] == [
+        "sidecar/reviewer/checkout.py",
+        "sidecar/reviewer/checkout.py",
+        "sidecar/backends/agentic.py",
+    ]
+    assert [s.line for s in signals] == [6, 137, 420]
+    assert all(s.backend == "copilot" for s in signals)
+
+
+def test_copilot_suppressed_findings_are_marked_suppressed():
+    """Visible as a distinct sub-source: weighable, but not hideable."""
+    signals = copilot_suppressed_signals(_copilot_review(_REAL_SUPPRESSED_BODY))
+    assert all(s.suppressed is True for s in signals)
+
+
+def test_copilot_suppressed_security_finding_infers_security():
+    """The symlink-attack item is the one that most needed surfacing."""
+    signals = copilot_suppressed_signals(_copilot_review(_REAL_SUPPRESSED_BODY))
+    symlink = signals[1]
+    assert symlink.category == "security"
+    assert "symlink" in symlink.body
+
+
+def test_copilot_suppressed_entry_body_stops_at_the_next_anchor():
+    """Each finding gets its own text, not the remainder of the block."""
+    signals = copilot_suppressed_signals(_copilot_review(_REAL_SUPPRESSED_BODY))
+    assert "agentic.py" not in signals[1].body
+    assert signals[0].title.startswith("Module docstring says")
+    # The bullet marker is presentation; it must not leak into the title.
+    assert not signals[0].title.startswith("*")
+
+
+def test_copilot_review_without_a_suppressed_block_yields_nothing():
+    body = "## Pull request overview\n\nCopilot reviewed 2 files and generated 1 comment."
+    assert copilot_suppressed_signals(_copilot_review(body)) == []
+
+
+def test_collect_review_signals_ignores_non_copilot_reviews():
+    """CodeRabbit's review bodies are handled elsewhere; this channel is Copilot's."""
+    cr = {"user": {"login": "coderabbitai[bot]"}, "body": _REAL_SUPPRESSED_BODY}
+    assert collect_review_signals([cr]) == []
+    assert len(collect_review_signals([_copilot_review(_REAL_SUPPRESSED_BODY)])) == 3
+
+
+def test_suppressed_signal_ids_are_stable_and_distinct():
+    """Same inputs -> same id, so a consumer can dedupe across runs."""
+    first = copilot_suppressed_signals(_copilot_review(_REAL_SUPPRESSED_BODY))
+    second = copilot_suppressed_signals(_copilot_review(_REAL_SUPPRESSED_BODY))
+    assert [s.id for s in first] == [s.id for s in second]
+    assert len({s.id for s in first}) == 3
 
 
 def test_copilot_category_inference():
