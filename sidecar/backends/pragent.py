@@ -167,6 +167,11 @@ class PrAgentBackend:
 
         rc = 0
         details: list[str] = []
+        # Pre-seeded so a tool that never ran is `skipped` rather than absent:
+        # the early returns below abandon the remaining tools, and an absent key
+        # would be indistinguishable from a healthy one to a consumer reading
+        # the map (#108). Every tool therefore has a verdict before the loop.
+        channels: dict[str, str] = dict.fromkeys(tools, "skipped")
 
         def _record(tool: str, code: int, what: str) -> None:
             """Record a tool failure — fatal unless the tool is marked optional."""
@@ -187,24 +192,33 @@ class PrAgentBackend:
             )
             if timed_out:
                 what = f"{tool} timed out after {self.tool_timeout}s (container killed)"
+                channels[tool] = "killed:timeout"
                 if not optional:
                     return InvokeResult(
-                        returncode=124, detail="; ".join([*details, what]), throttled=True
+                        returncode=124,
+                        detail="; ".join([*details, what]),
+                        throttled=True,
+                        channels=channels,
                     )
                 _record(tool, 124, what)
                 continue
 
             if code != 0:
                 throttled = is_throttle(code, blob)
+                channels[tool] = f"throttled:exit {code}" if throttled else f"failed:exit {code}"
                 if throttled and not optional:
                     return InvokeResult(
                         returncode=code,
                         detail="; ".join([*details, f"{tool} throttled (exit {code})"]),
                         throttled=True,
+                        channels=channels,
                     )
                 suffix = " (throttled)" if throttled else ""
                 _record(tool, code, f"{tool} exited {code}{suffix}")
-        return InvokeResult(returncode=rc, detail="; ".join(details))
+                continue
+
+            channels[tool] = "done"
+        return InvokeResult(returncode=rc, detail="; ".join(details), channels=channels)
 
     def _stream_tool(
         self, cmd: list[str], full_env: dict[str, str], container: str

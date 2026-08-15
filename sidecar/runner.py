@@ -561,12 +561,23 @@ _FRESH_COMMENT_ENV = {
 
 
 def _branch_header_body(label: str, role: str, receipt: RunReceipt) -> str:
-    """Render the visible branch header plus its embedded run receipt."""
+    """Render the visible branch header plus its embedded run receipt.
+
+    A degraded channel is surfaced in the VISIBLE text, not only in the embedded
+    marker: the failure this guards against is a human reading a branch header
+    that looks clean and gating on it, so the reduced coverage has to be legible
+    without decoding the receipt (#108).
+    """
     body = f"🤖 **fuko A/B** — model `{label}`"
     if role != "active":
         body += f" · {role}"
     if receipt.state == "failed":
         body += " · ⚠️ failed"
+    dead = [
+        f"{name} {state}" for name, state in sorted(receipt.channels.items()) if state != "done"
+    ]
+    if dead:
+        body += f" · ⚠️ reduced coverage: {', '.join(dead)}"
     return with_run_receipt(body, receipt)
 
 
@@ -657,6 +668,9 @@ def _finalize_branch_header(
         # `provider` is the pool entry that actually answered, so a promoted
         # backup is attributed to itself rather than to the primary it replaced.
         model=result.provider or label,
+        # Carried verbatim: `returncode` tolerates an optional tool dying, so the
+        # per-channel map is the only place that failure is still visible (#108).
+        channels=dict(result.channels),
         detail=result.detail or "",
     )
     base = api_url.rstrip("/")

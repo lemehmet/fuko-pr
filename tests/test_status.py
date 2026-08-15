@@ -473,6 +473,74 @@ def test_fuko_promoted_backup_is_attributed_to_the_model_that_answered():
     assert "ollama-cloud/glm-5.2:cloud" in rows[0]["detail"]
 
 
+def test_fuko_dead_channel_is_degraded_not_done():
+    """The #108 defect: a seat with a working guide and a dead suggestions channel.
+
+    `improve` is optional, so its container being killed leaves the branch's
+    return code at zero and the receipt at `state: done`. A seat that published
+    only half its channels is NOT a clean pass, and must not read as one.
+    """
+    rows = fuko_states(
+        HEAD, [_receipt_comment(channels={"review": "done", "improve": "killed:timeout"})]
+    )
+    assert rows[0]["state"] == "degraded"
+    assert rows[0]["state"] != "done"
+    assert "improve killed:timeout" in rows[0]["detail"]
+
+
+def test_fuko_dead_channel_escalates_like_any_lost_coverage():
+    rows = fuko_states(
+        HEAD, [_receipt_comment(channels={"review": "done", "improve": "killed:timeout"})]
+    )
+    assert rows[0]["state"] in DEGRADED_STATES
+    assert escalation_needed(rows) is True
+
+
+def test_fuko_all_channels_done_is_still_done():
+    """The map must not make a genuinely healthy seat look degraded."""
+    rows = fuko_states(HEAD, [_receipt_comment(channels={"review": "done", "improve": "done"})])
+    assert rows[0]["state"] == "done"
+    assert rows[0]["channels"] == {"review": "done", "improve": "done"}
+
+
+def test_fuko_receipt_without_channels_keeps_its_old_meaning():
+    """A receipt written before channel reporting has nothing to judge.
+
+    Empty must mean "not reported", never "every channel was healthy" — but it
+    also must not retroactively degrade every pre-upgrade receipt.
+    """
+    rows = fuko_states(HEAD, [_receipt_comment()])
+    assert rows[0]["state"] == "done"
+    assert "channels" not in rows[0]
+
+
+def test_fuko_in_flight_receipt_has_no_channels_and_is_not_degraded():
+    """An empty map does not identify "old receipt" — an in-flight one is empty too.
+
+    `_post_branch_header` writes the opening receipt before any tool has run, so
+    it carries no channels. That must report `in_progress` on its own terms, not
+    be mistaken for either a healthy seat or a degraded one.
+    """
+    rows = fuko_states(HEAD, [_receipt_comment(state="in_progress")])
+    assert rows[0]["state"] == "in_progress"
+    assert "channels" not in rows[0]
+
+
+def test_fuko_channel_that_never_ran_is_degraded():
+    """`skipped` is a dead channel too — an unreached tool produced nothing."""
+    rows = fuko_states(HEAD, [_receipt_comment(channels={"review": "done", "improve": "skipped"})])
+    assert rows[0]["state"] == "degraded"
+
+
+def test_fuko_dead_channel_on_an_older_head_is_still_pending():
+    """Staleness outranks the channel map, as it already outranks the outcome."""
+    rows = fuko_states(
+        HEAD,
+        [_receipt_comment(head_sha="0" * 40, channels={"review": "done", "improve": "skipped"})],
+    )
+    assert rows[0]["state"] == "pending"
+
+
 def test_fuko_newest_receipt_per_instance_wins():
     """A re-run leaves an older receipt behind; later comments are later runs."""
     stale = _receipt_comment(head_sha="0" * 40, state="done")
