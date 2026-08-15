@@ -260,6 +260,44 @@ def test_escalation_promotes_a_backup_that_has_its_own_identity(monkeypatch):
     assert _identities_are_distinct([*actives, *promote])
 
 
+def test_escalation_rescues_in_a_total_outage(monkeypatch):
+    """With no surviving active, a backup still promotes -- the case rescue is for.
+
+    An empty `existing` used to fail the same-backend gate's `len != 1` and block
+    every promotion with a misleading "does not match []" reason, defeating
+    escalation exactly when it matters most.
+    """
+    from sidecar.fukoconfig import ReviewConfig
+
+    monkeypatch.setenv("T_BASIL", "tok-c")
+    backups = _models(("ollama-cloud", "glm-5.2:cloud", "backup", "T_BASIL"))
+
+    promote, reasons = runner.plan_escalation([], backups, ReviewConfig(), concurrent=True)
+
+    assert [f"{m.provider}/{m.name}" for m in promote] == ["ollama-cloud/glm-5.2:cloud"]
+    assert reasons == []
+
+
+def test_escalation_keeps_a_total_outage_round_single_backend():
+    """The first promoted backup defines the round's backend; later ones must match.
+
+    Without this, an empty `existing` would let two different-backend backups both
+    promote into one mixed-driver round -- the very thing the same-backend gate
+    exists to prevent.
+    """
+    from sidecar.fukoconfig import ReviewConfig, ReviewModel
+
+    backups = [
+        ReviewModel(provider="zai-coding", name="glm-5.2", role="backup"),  # inherits pr-agent
+        ReviewModel(provider="anthropic", name="claude-x", role="backup", backend="agentic"),
+    ]
+
+    promote, reasons = runner.plan_escalation([], backups, ReviewConfig(), concurrent=False)
+
+    assert [f"{m.provider}/{m.name}" for m in promote] == ["zai-coding/glm-5.2"]
+    assert len(reasons) == 1 and "does not match" in reasons[0]
+
+
 def test_escalation_promotes_identity_less_backup_when_already_sequential(monkeypatch):
     """If the actives cannot run concurrently anyway, promotion costs nothing.
 

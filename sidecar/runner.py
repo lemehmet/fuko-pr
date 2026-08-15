@@ -793,7 +793,7 @@ def _run_pool(
                 outcome="ok" if result.returncode == 0 else "failed",
                 findings=findings,
                 detail=result.detail or "",
-                backend=getattr(backend, "name", "pr-agent"),
+                backend=getattr(model, "backend", None) or review.backend,
             )
             return result
 
@@ -814,7 +814,7 @@ def _run_pool(
             outcome="throttled_out",
             findings=None,
             detail=result.detail or "",
-            backend=getattr(backend, "name", "pr-agent"),
+            backend=getattr(model, "backend", None) or review.backend,
         )
     return result
 
@@ -914,10 +914,19 @@ def plan_escalation(
             )
             continue
         backup_backend = entry.backend or review.backend
-        if len(active_backends) != 1 or backup_backend not in active_backends:
+        # The round's backend set is the existing fleet's -- or, in a TOTAL OUTAGE
+        # where no active/trial survives to start a branch (the case escalation
+        # most needs to rescue), whatever earlier backups have already established
+        # this round. Empty means the first promotion is free to define the
+        # backend; once one is promoted the rest must match it, so a fleet made
+        # entirely of promoted backups never goes mixed either. Without this an
+        # empty `existing` fails `len != 1` and blocks every rescue with a
+        # misleading "does not match []" reason.
+        round_backends = active_backends or {(p.backend or review.backend) for p in promote}
+        if round_backends and (len(round_backends) != 1 or backup_backend not in round_backends):
             reasons.append(
                 f"{label}: backend {backup_backend!r} does not match the round's active "
-                f"backend(s) {sorted(active_backends)}; a promoted backup must join a "
+                f"backend(s) {sorted(round_backends)}; a promoted backup must join a "
                 "single shared backend"
             )
             continue
@@ -1007,7 +1016,13 @@ def _run_compare_branch(
             head_sha=head_sha,
             slot=slot,
             promoted=bool(getattr(entry, "promoted", False)),
-            backend=getattr(backend, "name", "pr-agent"),
+            # The branch's CONFIGURED backend, not the driver instance: this is
+            # written on every exit including the death path, where `backend`
+            # may be None (the branch died before a driver resolved). Same value
+            # as `backend.name` whenever a driver exists -- same-backend failover
+            # keeps a branch's pool single-backend -- but always available and
+            # never silently mis-attributed.
+            backend=entry.backend or review.backend,
         )
         result = _run_pool(
             backend,
@@ -1041,7 +1056,13 @@ def _run_compare_branch(
             slot=slot,
             result=failed,
             promoted=bool(getattr(entry, "promoted", False)),
-            backend=getattr(backend, "name", "pr-agent"),
+            # The branch's CONFIGURED backend, not the driver instance: this is
+            # written on every exit including the death path, where `backend`
+            # may be None (the branch died before a driver resolved). Same value
+            # as `backend.name` whenever a driver exists -- same-backend failover
+            # keeps a branch's pool single-backend -- but always available and
+            # never silently mis-attributed.
+            backend=entry.backend or review.backend,
         )
         return label, failed
     _finalize_branch_header(
@@ -1055,7 +1076,7 @@ def _run_compare_branch(
         slot=slot,
         result=result,
         promoted=bool(getattr(entry, "promoted", False)),
-        backend=getattr(backend, "name", "pr-agent"),
+        backend=entry.backend or review.backend,
     )
     return label, result
 
