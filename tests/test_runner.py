@@ -696,7 +696,11 @@ def test_cmd_status_emits_json(monkeypatch, capsys):
     )
     # No CodeRabbit check-run present -> falls back to the zero-finding walkthrough marker.
     monkeypatch.setattr(runner, "fetch_check_runs", lambda pr, ref, t, a: [])
-    cli._cmd_status(argparse.Namespace(pr_url="https://github.com/o/r/pull/8"))
+    # Pin the seat cross-reference so the test does not read whatever real
+    # `.fuko.toml` sits in the pytest CWD (hermetic + deterministic; there are no
+    # fuko receipts here anyway, so None changes nothing about the assertion).
+    monkeypatch.setattr(cli, "_configured_seat_labels", lambda path: None)
+    cli._cmd_status(argparse.Namespace(pr_url="https://github.com/o/r/pull/8", config=".fuko.toml"))
     out = {r["backend"]: r["state"] for r in json.loads(capsys.readouterr().out)}
     assert out == {"coderabbit": "done", "copilot": "done"}
 
@@ -723,7 +727,8 @@ def test_cmd_status_uses_check_run_to_gate_coderabbit(monkeypatch, capsys):
         "fetch_check_runs",
         lambda pr, ref, t, a: [{"name": "CodeRabbit", "status": "in_progress", "conclusion": None}],
     )
-    cli._cmd_status(argparse.Namespace(pr_url="https://github.com/o/r/pull/8"))
+    monkeypatch.setattr(cli, "_configured_seat_labels", lambda path: None)
+    cli._cmd_status(argparse.Namespace(pr_url="https://github.com/o/r/pull/8", config=".fuko.toml"))
     out = {r["backend"]: r["state"] for r in json.loads(capsys.readouterr().out)}
     assert out["coderabbit"] == "in_progress"
 
@@ -750,7 +755,8 @@ def test_cmd_status_degrades_when_check_runs_forbidden(monkeypatch, capsys):
     monkeypatch.setattr(
         runner, "fetch_check_runs", lambda *a: (_ for _ in ()).throw(_http_error(403))
     )
-    cli._cmd_status(argparse.Namespace(pr_url="https://github.com/o/r/pull/8"))
+    monkeypatch.setattr(cli, "_configured_seat_labels", lambda path: None)
+    cli._cmd_status(argparse.Namespace(pr_url="https://github.com/o/r/pull/8", config=".fuko.toml"))
     out = {r["backend"]: r["state"] for r in json.loads(capsys.readouterr().out)}
     assert out["coderabbit"] == "done"
 
@@ -785,8 +791,9 @@ def test_cmd_status_friendly_auth_error(monkeypatch, capsys):
 
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.setattr(runner, "fetch_pr_head", lambda *a: (_ for _ in ()).throw(_http_error(404)))
+    ns = argparse.Namespace(pr_url="https://github.com/o/r/pull/8", config=".fuko.toml")
     with pytest.raises(SystemExit) as e:
-        cli._cmd_status(argparse.Namespace(pr_url="https://github.com/o/r/pull/8"))
+        cli._cmd_status(ns)
     assert e.value.code == 1
     assert "cannot read o/r#8" in capsys.readouterr().err
 

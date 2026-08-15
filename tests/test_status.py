@@ -757,6 +757,103 @@ def test_fuko_dead_channel_on_an_older_head_is_still_pending():
     assert rows[0]["state"] == "pending"
 
 
+def test_fuko_removed_seat_is_superseded_not_a_stuck_pending():
+    """#116: a receipt whose seat was renamed/removed must not gate forever.
+
+    Its receipt is anchored to a HEAD that can never recur, so without the
+    cross-reference it would report `pending` on every later round — a gate that
+    can never open. Given the current seat labels, the absent one downgrades to
+    `superseded`, the one deliberately-non-gating state.
+    """
+    rows = fuko_states(
+        HEAD,
+        [_receipt_comment(label="openrouter/z-ai/glm-5.2", model="openrouter/z-ai/glm-5.2")],
+        configured_labels=["openrouter/qwen/qwen3.8-max"],
+    )
+    assert rows[0]["state"] == "superseded"
+    assert rows[0]["valid"] is False
+
+
+def test_fuko_superseded_does_not_gate_or_escalate():
+    """`superseded` is neither `pending` (waited on) nor a DEGRADED state (escalated)."""
+    rows = fuko_states(
+        HEAD,
+        [_receipt_comment(label="openrouter/z-ai/glm-5.2", model="openrouter/z-ai/glm-5.2")],
+        configured_labels=["openrouter/qwen/qwen3.8-max"],
+    )
+    assert rows[0]["state"] not in DEGRADED_STATES
+    assert escalation_needed(rows) is False
+
+
+def test_fuko_still_configured_seat_that_has_not_run_stays_pending():
+    """A genuinely not-yet-reviewed seat is untouched by the cross-reference.
+
+    The receipt is on an older HEAD but its label IS still configured, so it must
+    keep gating as `pending` rather than being mistaken for a removed seat.
+    """
+    rows = fuko_states(
+        HEAD,
+        [_receipt_comment(head_sha="0" * 40)],
+        configured_labels=["openrouter/x-ai/grok-4.5"],
+    )
+    assert rows[0]["state"] == "pending"
+
+
+def test_fuko_absent_configured_labels_keeps_todays_behavior():
+    """The fail-safe guard: with no config to cross-reference, no row is dropped.
+
+    A config-read failure passes `configured_labels=None`; the removed seat then
+    still reports its stale `pending` rather than being silently reclassified —
+    erring toward the gating state, never past an unreviewed seat.
+    """
+    rows = fuko_states(
+        HEAD,
+        [_receipt_comment(label="openrouter/z-ai/glm-5.2", model="openrouter/z-ai/glm-5.2")],
+    )
+    assert rows[0]["state"] != "superseded"
+
+
+def test_fuko_empty_configured_labels_keeps_pending_not_superseded():
+    """#116 follow-up: an EMPTY configured-label collection must not supersede all.
+
+    An empty set would make every receipt's label 'not configured' and drop every
+    gating `pending` row -- the unsafe direction. `fuko_states` normalizes an empty
+    (or blank-only) collection to None, so a stale receipt stays `pending`, exactly
+    as it would when config is unreadable. Flagged by CodeRabbit + Copilot, and by
+    the glm-5.2 reviewer guide.
+    """
+    rows = fuko_states(
+        HEAD,
+        [
+            _receipt_comment(
+                head_sha="0" * 40, label="openrouter/z-ai/glm-5.2", model="openrouter/z-ai/glm-5.2"
+            )
+        ],
+        configured_labels=[],
+    )
+    assert rows[0]["state"] == "pending"
+    rows_blank = fuko_states(
+        HEAD,
+        [
+            _receipt_comment(
+                head_sha="0" * 40, label="openrouter/z-ai/glm-5.2", model="openrouter/z-ai/glm-5.2"
+            )
+        ],
+        configured_labels=["  ", ""],
+    )
+    assert rows_blank[0]["state"] == "pending"
+
+
+def test_fuko_configured_seat_still_reports_done():
+    """A seat whose label is still configured reviews and reports `done` as before."""
+    rows = fuko_states(
+        HEAD,
+        [_receipt_comment()],
+        configured_labels=["openrouter/x-ai/grok-4.5"],
+    )
+    assert rows[0]["state"] == "done"
+
+
 def test_fuko_receipt_from_a_non_fuko_author_is_not_coverage():
     """The #105 spoof: a well-formed receipt posted by anyone who can comment.
 

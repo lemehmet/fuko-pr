@@ -30,7 +30,15 @@ from typing import Literal
 from .signals import RunReceipt, extract_run_receipts
 
 State = Literal[
-    "done", "degraded", "pending", "in_progress", "rate_limited", "paused", "unavailable", "none"
+    "done",
+    "degraded",
+    "pending",
+    "in_progress",
+    "rate_limited",
+    "paused",
+    "unavailable",
+    "superseded",
+    "none",
 ]
 
 DEGRADED_STATES: frozenset[str] = frozenset({"rate_limited", "paused", "unavailable", "degraded"})
@@ -403,6 +411,7 @@ def fuko_states(
     issue_comments: list[dict],
     *,
     allowed_authors: Iterable[str] | None = None,
+    configured_labels: Iterable[str] | None = None,
 ) -> list[dict]:
     """Return one state row per fuko instance, from the run receipts on this PR.
 
@@ -431,6 +440,29 @@ def fuko_states(
     - ``unavailable`` -- the branch finalized as failed: every model in its pool
       was exhausted. A DEGRADED state, so :func:`escalation_needed` fires on it.
     - ``pending`` -- the newest receipt is for an older commit.
+    - ``superseded`` -- the receipt's label is not among ``configured_labels``,
+      so the seat that produced it was renamed or removed from ``.fuko.toml``.
+
+    ``superseded`` inverts the usual fail-safe direction, and that is the whole
+    point of it. A receipt is anchored to the commit it reviewed, so a seat that
+    no longer exists keeps producing a row anchored to a HEAD that can never
+    recur -- ``pending`` forever, because no future run will ever post a receipt
+    under a label that is no longer configured (#116). ``pending`` is the state a
+    consumer WAITS on, so a strict "proceed when every fuko row is ``done``" gate
+    would wait forever on a deleted seat. The danger here is therefore waiting
+    forever, not merging early: a label absent from the current config must NOT
+    gate. ``superseded`` is deliberately kept OUT of :data:`DEGRADED_STATES` too,
+    so it neither blocks a merge nor triggers escalation -- a retired seat is not
+    a coverage loss to react to, it is a row to disregard.
+
+    The cross-reference happens ONLY when the caller supplies ``configured_labels``
+    (the CLI, which already loads ``.fuko.toml``, passes the ``provider/name`` of
+    every configured entry). When it is ``None`` -- config unreadable, or a caller
+    that has no config -- today's behavior is kept and no receipt is reclassified,
+    because dropping a genuinely-pending row on a failed config read would be the
+    unsafe direction: it would let a merge proceed past a seat that really has not
+    reviewed HEAD. Absent config, err toward the gating ``pending``; only a
+    positively-confirmed absence from a loaded config downgrades to ``superseded``.
 
     ``degraded`` is a distinct STATE rather than an extra key on a ``done`` row
     on purpose. A seat publishes on several channels (the PR-level guide from
@@ -470,6 +502,15 @@ def fuko_states(
     granting one.
     """
     allowed = None if allowed_authors is None else {a.strip().lower() for a in allowed_authors}
+    # Normalize an empty or blank-only collection to None. An empty `configured`
+    # set makes `label not in configured` true for EVERY receipt, so it would
+    # supersede all of them -- dropping genuinely-pending gate rows and letting a
+    # merge proceed past an unreviewed seat, the one unsafe direction this feature
+    # exists to avoid. Only a positively-loaded, non-empty label set may
+    # cross-reference; an empty one is unavailable-config, treated like None.
+    configured = None
+    if configured_labels is not None:
+        configured = {c.strip() for c in configured_labels if c.strip()} or None
     latest: dict[str, RunReceipt] = {}
     for comment in issue_comments:
         login = ((comment.get("user") or {}).get("login") or "").strip()
@@ -482,6 +523,29 @@ def fuko_states(
     for label, receipt in latest.items():
         dead: list[str] = []
         on_head = _sha_match(receipt.head_sha, head_sha) if receipt.head_sha else False
+        # Config membership is asked BEFORE staleness (#116). A removed/renamed
+        # seat's receipt is always off-HEAD -- no future run posts under its
+        # label -- so the staleness branch below would report it `pending`
+        # forever. Reclassify it as `superseded` first so a deleted seat can
+        # never masquerade as a not-yet-reviewed one. Guarded on `configured`
+        # being non-None: an absent OR empty config (both normalized to None
+        # above) keeps every row, erring toward the gating `pending` rather than
+        # silently dropping a real seat.
+        if configured is not None and label not in configured:
+            row = _row(
+                f"fuko:{label}",
+                "superseded",
+                receipt.head_sha or None,
+                "label is no longer configured (seat renamed or removed)",
+            )
+            row["role"] = receipt.role
+            row["valid"] = False
+            row["label"] = label
+            row["model"] = receipt.model
+            if receipt.channels:
+                row["channels"] = dict(receipt.channels)
+            rows.append(row)
+            continue
         # Staleness is asked FIRST, ahead of the outcome. A receipt is anchored to
         # the commit it describes, so a `failed` one for an older commit says
         # nothing about HEAD -- reporting it as `unavailable` would keep firing
@@ -542,6 +606,7 @@ def reviewer_states(
     *,
     include_fuko: bool = True,
     allowed_authors: Iterable[str] | None = None,
+    configured_labels: Iterable[str] | None = None,
 ) -> list[dict]:
     """Return the normalized state of each reviewer on ``head_sha``.
 
@@ -557,13 +622,23 @@ def reviewer_states(
 
     ``allowed_authors`` is forwarded to :func:`fuko_states` for deployments whose
     reviewer identities don't match the default fuko-App pattern.
+    ``configured_labels`` is likewise forwarded so a receipt whose seat was
+    renamed or removed reports ``superseded`` rather than an unreachable
+    ``pending`` (#116); it is ``None`` when the caller has no config to supply.
     """
     rows = [
         coderabbit_state(head_sha, issue_comments, reviews, check_runs),
         copilot_state(head_sha, reviews, issue_comments),
     ]
     if include_fuko:
-        rows.extend(fuko_states(head_sha, issue_comments, allowed_authors=allowed_authors))
+        rows.extend(
+            fuko_states(
+                head_sha,
+                issue_comments,
+                allowed_authors=allowed_authors,
+                configured_labels=configured_labels,
+            )
+        )
     return rows
 
 
