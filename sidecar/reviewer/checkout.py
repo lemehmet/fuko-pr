@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -38,10 +39,45 @@ class PRContext:
     base_ref: str
     diff: str
     diff_files: frozenset[str]
+    #: (path, new-side line) pairs the API will accept as inline anchors.
+    diff_positions: frozenset[tuple[str, int]] = frozenset()
     truncated: bool = False
 
 
 _DIFF_FILE_RE_PREFIX = "+++ b/"
+_HUNK_NEW_START_RE = re.compile(r"^@@ .*?\+(\d+)")
+
+
+def parse_diff_positions(diff: str) -> frozenset[tuple[str, int]]:
+    """Every ``(path, new-side line)`` the GitHub API will accept as an anchor.
+
+    File-level membership is not enough to place an inline comment: the API
+    rejects any line outside a hunk with a 422, and one rejected comment fails
+    the WHOLE review, demoting every finding to the body. Walking the hunks
+    turns that into a check we can make before posting.
+
+    Both added (``+``) and context (`` ``) lines count -- context lines are part
+    of the diff and are anchorable; removed lines are not, since they do not
+    exist on the new side.
+    """
+    positions: set[tuple[str, int]] = set()
+    path: str | None = None
+    new_line = 0
+    for line in diff.splitlines():
+        if line.startswith(_DIFF_FILE_RE_PREFIX):
+            path = line[len(_DIFF_FILE_RE_PREFIX) :].strip()
+            continue
+        if line.startswith("@@"):
+            match = _HUNK_NEW_START_RE.match(line)
+            if match:
+                new_line = int(match.group(1))
+            continue
+        if path is None or line.startswith("\\"):  # "\ No newline at end of file"
+            continue
+        if line.startswith(("+", " ")):
+            positions.add((path, new_line))
+            new_line += 1
+    return frozenset(positions)
 
 
 def _api_headers(token: str) -> dict[str, str]:
@@ -88,6 +124,9 @@ def fetch_pr_context(
         for line in diff.splitlines()
         if line.startswith(_DIFF_FILE_RE_PREFIX)
     )
+    # Like `files`, parsed from the FULL diff: these are anchor sets for comment
+    # placement, and a truncated tail is still real, anchorable code.
+    positions = parse_diff_positions(diff)
     truncated = len(diff) > diff_budget
     if truncated:
         # Prefer a file boundary; if the very first file already exceeds the
@@ -105,6 +144,7 @@ def fetch_pr_context(
         base_ref=pull["base"]["ref"],
         diff=diff,
         diff_files=files,
+        diff_positions=positions,
         truncated=truncated,
     )
 

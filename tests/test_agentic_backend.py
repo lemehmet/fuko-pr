@@ -519,6 +519,73 @@ def test_claim_tolerates_prefixed_spelling_of_the_same_model(monkeypatch):
     assert len(backend.normalize_output(PR, "anthropic/claude-x", token="t")) == 2
 
 
+def test_a_hallucinated_line_does_not_demote_every_other_finding(monkeypatch):
+    """One out-of-hunk line 422s the whole review, so filter before posting."""
+    from sidecar.backends.agentic import _PendingReview
+    from sidecar.reviewer.prompt import AgenticFinding
+
+    backend = AgenticBackend()
+    backend._pending[(PR.url, "claude-x", TOKEN_ID)] = _PendingReview(
+        findings=[
+            AgenticFinding(file="src/app.py", line=11, title="real", body="b"),
+            AgenticFinding(file="src/app.py", line=900, title="hallucinated", body="b"),
+        ],
+        summary="s",
+        head_sha="beef",
+        diff_files=frozenset({"src/app.py"}),
+        diff_positions=frozenset({("src/app.py", 10), ("src/app.py", 11)}),
+    )
+    fake = _FakeHttpx([200])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    backend.normalize_output(PR, "claude-x", token="t")
+
+    payload = fake.posts[0][1]
+    (comment,) = payload["comments"]  # only the in-hunk one is anchored
+    assert comment["line"] == 11
+    assert "hallucinated" in payload["body"]  # the other still reaches the reader
+    assert len(fake.posts) == 1  # and no 422 round-trip was needed
+
+
+def test_anchoring_falls_back_to_file_membership_without_positions(monkeypatch):
+    """An unparsed diff must not silently send every finding to the body."""
+    backend = AgenticBackend()
+    _seed(backend)  # seeded with no diff_positions
+    fake = _FakeHttpx([200])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    backend.normalize_output(PR, "claude-x", token="t")
+    assert len(fake.posts[0][1]["comments"]) == 1
+
+
+def test_pending_stash_is_bounded(monkeypatch):
+    """A branch that dies before egress must not pin its findings forever."""
+    backend = AgenticBackend()
+    monkeypatch.setattr(agentic_mod, "_MAX_PENDING", 3)
+    for i in range(6):
+        _invoke(
+            monkeypatch,
+            backend,
+            HarnessResult(0, REVIEW_JSON),
+            env={"FUKO_AGENTIC_MODEL": f"model-{i}", "FUKO_AGENTIC_AUTH": "api-key"},
+        )
+    assert len(backend._pending) <= 3
+    # The survivors are the most recent arrivals.
+    assert any(k[1] == "model-5" for k in backend._pending)
+    assert not any(k[1] == "model-0" for k in backend._pending)
+
+
+def test_normalize_token_fallback_matches_invoke(monkeypatch):
+    """A runner with only GITHUB__USER_TOKEN must still be able to claim its stash."""
+    monkeypatch.setenv("GITHUB__USER_TOKEN", "runner-tok")
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    backend = AgenticBackend()
+    _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    fake = _FakeHttpx([200])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+
+    # token=None -> normalize must resolve it the same way invoke did.
+    assert len(backend.normalize_output(PR, "claude-x")) == 2
+
+
 def test_two_identities_of_the_same_model_do_not_collide(monkeypatch):
     """Two [[review.models]] entries may share provider/name and differ by token_env."""
     backend = AgenticBackend()

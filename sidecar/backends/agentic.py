@@ -90,6 +90,12 @@ _GITHUB_CRED_VARS = (
 )
 
 
+#: How many completed-but-unclaimed reviews to retain. Generous next to any real
+#: fleet (a PR runs one branch per active model), small enough that a leak stays
+#: a bounded one.
+_MAX_PENDING = 32
+
+
 def _identity(token: str) -> str:
     """Fingerprint the branch's posting token, to key its stash without holding it.
 
@@ -131,6 +137,8 @@ class _PendingReview:
     summary: str
     head_sha: str
     diff_files: frozenset[str]
+    #: (path, new-side line) the API will anchor; empty means "unknown, fall back".
+    diff_positions: frozenset[tuple[str, int]] = frozenset()
     #: Findings the agent itself rated low-confidence -- the pressure valve the
     #: strategy promises it, reported as "withheld".
     withheld_low: int = 0
@@ -158,6 +166,12 @@ class AgenticBackend:
         # invoke silently overwrites the other's stash. The identity component
         # is a fingerprint of the posting token, which is exactly what makes the
         # branches distinct.
+        #
+        # Bounded: entries leave on a successful claim, but a branch that dies
+        # between invoke and normalize_output, or a claim that misses on an id
+        # we did not anticipate, would otherwise pin its findings for the life
+        # of the sidecar process. Insertion order is arrival order, so the
+        # oldest unclaimed entry is the one to shed.
         self._pending: dict[tuple[str, str, str], _PendingReview] = {}
         self._lock = threading.Lock()
 
@@ -262,7 +276,15 @@ class AgenticBackend:
         does NOT, because failing over would burn every remaining provider on
         what is a one-line runner fix.
         """
-        token = env.get(_ENV_GH_TOKEN) or os.environ.get("GITHUB_TOKEN", "")
+        # Must stay in lockstep with normalize_output's fallback: this value
+        # fingerprints the stash key, so any divergence makes a completed review
+        # unclaimable. Branch env first (the runner sets it per identity), then
+        # the same two process vars egress falls back to.
+        token = (
+            env.get(_ENV_GH_TOKEN)
+            or os.environ.get(_ENV_GH_TOKEN)
+            or os.environ.get("GITHUB_TOKEN", "")
+        )
         api_url = os.environ.get("GITHUB_API_URL", "https://api.github.com")
         server_url = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
         model_name = env.get(_ENV_MODEL, "")
@@ -375,11 +397,24 @@ class AgenticBackend:
         confident = [f for f in review.findings if f.confidence.strip().lower() != "low"]
         kept = confident[:MAX_FINDINGS]
         with self._lock:
-            self._pending[(pr.url, model_name, _identity(token))] = _PendingReview(
+            key = (pr.url, model_name, _identity(token))
+            while len(self._pending) >= _MAX_PENDING and key not in self._pending:
+                # dicts preserve insertion order, so the first key is the oldest
+                # unclaimed review -- the one whose branch is least likely to
+                # still be coming back for it.
+                stale = next(iter(self._pending))
+                del self._pending[stale]
+                print(
+                    f"fuko: dropped an unclaimed agentic review for {stale[1]} "
+                    f"(pending cap {_MAX_PENDING} reached)",
+                    file=sys.stderr,
+                )
+            self._pending[key] = _PendingReview(
                 findings=kept,
                 summary=review.summary,
                 head_sha=ctx.head_sha,
                 diff_files=ctx.diff_files,
+                diff_positions=ctx.diff_positions,
                 withheld_low=len(review.findings) - len(confident),
                 over_cap=len(confident) - len(kept),
             )
@@ -415,7 +450,11 @@ class AgenticBackend:
         # Resolve the token FIRST: it fingerprints the branch, and the stash is
         # keyed by that fingerprint (see __init__), so it is an input to the
         # claim rather than something needed only for posting.
-        token = os.environ.get("GITHUB_TOKEN", "") if token is None else token
+        if token is None:
+            # Same precedence invoke uses. A runner that supplies only
+            # GITHUB__USER_TOKEN would otherwise fingerprint differently here
+            # than at stash time, and the review would be silently unclaimable.
+            token = os.environ.get(_ENV_GH_TOKEN) or os.environ.get("GITHUB_TOKEN", "")
         if api_url is None:
             api_url = os.environ.get("GITHUB_API_URL", "https://api.github.com")
         stash = self._claim(pr.url, model, _identity(token))
@@ -424,7 +463,7 @@ class AgenticBackend:
 
         signals: list[ReviewSignal] = []
         inline: list[tuple[AgenticFinding, dict]] = []
-        overflow: list[AgenticFinding] = []
+        overflow: list[tuple[AgenticFinding, str]] = []
         for f in stash.findings:
             signal = ReviewSignal(
                 id=make_id(pr.url, f.file, str(f.line or 0), f.title),
@@ -453,7 +492,7 @@ class AgenticBackend:
                 body = with_visible_label(body, compare_label, signal)
             else:
                 body = with_marker(body, signal)
-            if f.line is not None and f.file in stash.diff_files:
+            if f.line is not None and self._anchorable(stash, f):
                 comment = {"path": f.file, "line": f.line, "side": "RIGHT", "body": body}
                 if f.end_line is not None and f.end_line > f.line:
                     comment.update(
@@ -502,6 +541,27 @@ class AgenticBackend:
                 if bare and bare == stashed_bare:
                     return self._pending.pop(mine[0])
         return None
+
+    @staticmethod
+    def _anchorable(stash: _PendingReview, f: AgenticFinding) -> bool:
+        """Whether GitHub will accept ``f`` as an inline comment on this diff.
+
+        File membership is too weak: the API rejects any line outside a hunk,
+        and ONE rejected comment 422s the whole review, so a single hallucinated
+        line number would demote every other finding to the review body. Check
+        the actual hunk positions instead, and check the end line too, since a
+        multi-line comment must span anchorable lines.
+
+        Falls back to file membership when positions are empty -- an unparsed
+        diff should not silently send every finding to the body.
+        """
+        if not stash.diff_positions:
+            return f.file in stash.diff_files
+        if (f.file, f.line) not in stash.diff_positions:
+            return False
+        if f.end_line is not None and f.end_line > (f.line or 0):
+            return (f.file, f.end_line) in stash.diff_positions
+        return True
 
     @staticmethod
     def _finding_line(f: AgenticFinding) -> str:
