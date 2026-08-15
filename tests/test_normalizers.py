@@ -217,6 +217,69 @@ def test_copilot_suppressed_entry_body_stops_at_the_next_anchor():
     assert not signals[0].title.startswith("*")
 
 
+_LOW_CONFIDENCE_BODY = """\
+Copilot reviewed 4 out of 4 changed files and generated no new comments.
+
+<details>
+<summary>Comments suppressed due to low confidence (1)</summary>
+
+**sidecar/web/kb.py:615**
+* The KB UI degrades by returning `str(e)` from store exceptions and then \
+rendering it into the page. Because browsing/preview are unauthenticated, this \
+can leak internal details to any visitor.
+</details>
+"""
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "Suppressed comments (1)",
+        "Comments suppressed due to low confidence (1)",
+        "SUPPRESSED COMMENTS (1)",
+    ],
+)
+def test_both_known_summary_wordings_are_parsed(summary):
+    """Copilot writes at least two wordings for the same block.
+
+    Keying on the exact phrase "Suppressed comments" reported ZERO for #80 and
+    #92 — and #92's hidden finding was a live unauthenticated info leak. A parser
+    keyed to vendor prose reports absence indistinguishably from a real zero,
+    which is the same failure as #86's rate-limit pattern.
+    """
+    body = (
+        "no new comments.\n\n<details>\n"
+        f"<summary>{summary}</summary>\n\n"
+        "**src/a.py:1**\n* something\n</details>\n"
+    )
+    (sig,) = copilot_suppressed_signals(_copilot_review(body))
+    assert sig.file == "src/a.py"
+
+
+def test_the_real_low_confidence_block_from_pr_92_parses():
+    """Trimmed from the actual #92 review body — the one nothing ever read."""
+    (sig,) = copilot_suppressed_signals(_copilot_review(_LOW_CONFIDENCE_BODY))
+    assert sig.file == "sidecar/web/kb.py"
+    assert sig.line == 615
+    assert sig.suppressed is True
+
+
+def test_the_word_suppressed_in_finding_text_does_not_invent_a_block():
+    """Decoy: the match is scoped to <summary>, and must stay there.
+
+    Loosening it to the whole body would make any review that merely discusses
+    suppression parse as if it carried a block. This test is what stops that.
+    """
+    body = (
+        "Copilot reviewed 2 files and generated 1 comment.\n\n"
+        "<details>\n<summary>Show a summary per file</summary>\n\n"
+        "| File | Description |\n| --- | --- |\n"
+        "| a.py | Notes that warnings are suppressed here, see Suppressed comments docs. |\n"
+        "</details>\n"
+    )
+    assert copilot_suppressed_signals(_copilot_review(body)) == []
+
+
 def test_copilot_review_without_a_suppressed_block_yields_nothing():
     body = "## Pull request overview\n\nCopilot reviewed 2 files and generated 1 comment."
     assert copilot_suppressed_signals(_copilot_review(body)) == []
