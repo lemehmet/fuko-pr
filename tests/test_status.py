@@ -206,6 +206,84 @@ def test_coderabbit_reads_every_range_line_within_one_body():
     assert s["head_reviewed"] == HEAD
 
 
+# --- throttle visibility (#19 control flow + #86 pattern coverage) ------------
+
+_FAIR_USAGE = (
+    "<!-- This is an auto-generated comment: summarize by coderabbit.ai -->\n"
+    "<!-- This is an auto-generated comment: rate limited by coderabbit.ai -->\n\n"
+    "> [!WARNING]\n> ## Review limit reached\n>\n"
+    "> You've reached a temporary PR review limit under our Fair Usage Limits Policy.\n"
+    "> Your recent review volume is higher than typical usage, so adaptive limits "
+    "are currently applied.\n>\n"
+    "> **Next review available in:** **28 minutes**\n"
+    "<!-- end of auto-generated comment: rate limited by coderabbit.ai -->"
+)
+
+
+def test_coderabbit_fair_usage_limit_with_head_walkthrough_is_rate_limited():
+    """#19 + #86 together, from mepro #1584.
+
+    The adaptive-limit notice contains NO "Rate limit exceeded" text (#86) and
+    rides in the summary comment that also carries the HEAD range line, so the
+    old code took the head-scanned path and reported `pending` (#19). CR never
+    reviewed that PR at all; `rate_limited` was accurate for two hours.
+    """
+    body = _walk(HEAD)["body"] + "\n" + _FAIR_USAGE
+    s = coderabbit_state(HEAD, [_cr(body)], [])
+    assert s["state"] == "rate_limited"
+    assert s["state"] in DEGRADED_STATES
+    assert escalation_needed([s]) is True
+
+
+def test_coderabbit_hourly_rate_limit_with_head_walkthrough_is_rate_limited():
+    """#19 on its own: the hourly wording, which the pattern already matched."""
+    body = _walk(HEAD)["body"] + "\nRate limit exceeded. Try again later."
+    assert coderabbit_state(HEAD, [_cr(body)], [])["state"] == "rate_limited"
+
+
+def test_coderabbit_paused_with_head_walkthrough_is_paused():
+    body = _walk(HEAD)["body"] + "\nReviews paused by coderabbit.ai"
+    assert coderabbit_state(HEAD, [_cr(body)], [])["state"] == "paused"
+
+
+def test_coderabbit_fair_usage_marker_alone_is_enough():
+    """The machine marker is the stable anchor; prose may change under us."""
+    body = _walk(HEAD)["body"] + (
+        "\n<!-- This is an auto-generated comment: rate limited by coderabbit.ai -->"
+    )
+    assert coderabbit_state(HEAD, [_cr(body)], [])["state"] == "rate_limited"
+
+
+def test_coderabbit_throttle_outranks_a_stale_in_progress_phrase():
+    """A throttled CR is not scanning, whatever an older phrase in the same body says."""
+    body = _walk(HEAD)["body"] + "\nreview in progress\n" + _FAIR_USAGE
+    assert coderabbit_state(HEAD, [_cr(body)], [])["state"] == "rate_limited"
+
+
+def test_coderabbit_earlier_rate_limit_does_not_mask_a_later_completed_scan():
+    """The sticky-guard, preserved: a completed scan on HEAD still wins.
+
+    This is the assertion that keeps the #19 fix from making throttle states
+    sticky — the throttle check sits INSIDE the not-yet-completed branch.
+    """
+    throttled = _cr("Rate limit exceeded\n" + _FAIR_USAGE)
+    done = _walk(HEAD, posted=2)
+    assert coderabbit_state(HEAD, [throttled, done], [])["state"] == "done"
+
+
+def test_coderabbit_completed_review_on_head_outranks_a_live_throttle_notice():
+    """A submitted review on HEAD is terminal even while a throttle notice sits above."""
+    throttled = _cr(_FAIR_USAGE)
+    s = coderabbit_state(HEAD, [throttled], [_cr_review(HEAD, state="APPROVED")])
+    assert s["state"] == "done"
+
+
+def test_coderabbit_throttle_notice_in_a_stale_review_body_does_not_throttle_head():
+    """Scoped to CR's live issue comments, matching the in-progress rule."""
+    stale = _cr_review("0000aaa", body=_FAIR_USAGE)
+    assert coderabbit_state(HEAD, [_walk(HEAD)], [stale])["state"] == "pending"
+
+
 def test_coderabbit_done_via_review_commit_id_with_marker():
     # #1333/#1326 shape: walkthrough lacks the "between … and …" line, but the CR
     # review object is on HEAD. With a terminal marker present this resolves to done.

@@ -47,7 +47,23 @@ _COPILOT_QUOTA = re.compile(
 )
 
 _CR_IN_PROGRESS = re.compile(r"review in progress|Currently processing new changes", re.I)
-_CR_RATE_LIMIT = re.compile(r"Rate limit exceeded", re.I)
+# CodeRabbit throttles under at least two different notices with different prose:
+# the hourly "Rate limit exceeded", and the Fair Usage ADAPTIVE limit, whose body
+# says "Review limit reached" and never contains the hourly wording. Matching only
+# the hourly text read a throttled CR as `pending` for the whole window.
+#
+# The machine-emitted HTML marker is listed FIRST because it is the stable anchor:
+# CR emits `<!-- ... rate limited by coderabbit.ai -->` around BOTH variants (the
+# same class of anchor the code already trusts for "summarize by coderabbit.ai"),
+# while the visible prose differs per variant and is plainly subject to change.
+# Bodies are stored raw, so HTML comments are present in the blob. The prose
+# alternatives stay as belt-and-braces if CR ever drops the marker.
+_CR_RATE_LIMIT = re.compile(
+    r"auto-generated comment: rate limited by coderabbit\.ai"
+    r"|Rate limit exceeded"
+    r"|Review limit reached",
+    re.I,
+)
 _CR_PAUSED = re.compile(r"Reviews paused|review paused by coderabbit\.ai", re.I)
 _CR_DONE_ZERO = re.compile(r"(?im)^[>\s*_]*No actionable comments(?: were generated)?\b")
 _CR_DONE_MARKER = re.compile(
@@ -168,6 +184,19 @@ def coderabbit_state(
     status *issue comment* (the in-progress text is scoped to ``cr_issue_bodies`` so a
     stale phrase in an older submitted review body for a prior HEAD cannot spuriously
     flip the current HEAD back to ``in_progress``).
+
+    A throttle notice is surfaced whether or not HEAD has been scanned (#19). CR's
+    rate-limit notice lives in its *summary* comment, which also carries the
+    walkthrough range line and is rewritten to the newest HEAD on every push, so
+    ``walk_on_head`` stays true for the entire throttle window: masking the notice
+    once HEAD is named is the steady state while throttled, not a transient race.
+    The gate stays closed either way, but ``rate_limited``/``paused`` carry a
+    recovery path (a resume nudge, a longer wait) that ``in_progress``/``pending``
+    do not, and a consumer that cannot tell them apart burns its full unresponsive
+    timeout instead. ``_CR_RATE_LIMIT`` matches CR's machine-emitted
+    "rate limited by coderabbit.ai" marker as well as the prose, because the
+    hourly and Fair-Usage-adaptive notices word themselves differently (#86) and
+    matching only the hourly text read a throttled CR as ``pending``.
     """
     cr_issue_bodies = [
         c.get("body", "") or ""
@@ -238,6 +267,35 @@ def coderabbit_state(
         + (cr_issue_bodies if review_on_head else [])
     )
     if not review_on_head and not _CR_DONE_MARKER.search(head_blob):
+        # A throttle notice is asked about BEFORE `in_progress`/`pending`, and it
+        # is asked here rather than only in the not-yet-scanned branch above
+        # (#19). CR's throttle notice lives in its summary comment, which also
+        # carries the walkthrough range line and is rewritten to the newest HEAD
+        # on every push -- so `walk_on_head` stays true for the whole throttle
+        # window and this branch is the STEADY STATE while throttled, not a
+        # transient race. Reporting `in_progress`/`pending` here loses the one
+        # fact a consumer can act on: the wait is a cooldown with its own
+        # recovery path (a resume nudge, a longer window), not an active scan.
+        #
+        # The sticky-guard still holds: this is reached only when CR has NOT
+        # completed HEAD (no terminal marker, no submitted review on HEAD), so an
+        # earlier throttle cannot mask a later completed scan. Scoped to
+        # `issue_blob` -- CR's live status comments -- like the in-progress check
+        # below, so a stale notice in an old review body cannot resurrect it.
+        if _CR_RATE_LIMIT.search(issue_blob):
+            return _row(
+                "coderabbit",
+                "rate_limited",
+                head_sha,
+                "rate-limit notice on this PR and HEAD not yet completed",
+            )
+        if _CR_PAUSED.search(issue_blob):
+            return _row(
+                "coderabbit",
+                "paused",
+                head_sha,
+                "reviews paused and HEAD not yet completed",
+            )
         if _CR_IN_PROGRESS.search(issue_blob):
             return _row(
                 "coderabbit",
