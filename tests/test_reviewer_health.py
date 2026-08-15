@@ -354,6 +354,92 @@ def test_escalation_without_a_budget_promotes_but_still_reports_the_cost(monkeyp
     assert runner.sequential_cost_minutes(2, 2, 600) == 40.0
 
 
+def test_config_parsed_backup_with_token_env_is_promoted(monkeypatch, tmp_path):
+    """#114 end-to-end: a role="backup" entry may carry token_env through TOML
+    parsing, and such an identity'd backup is then promoted under escalation.
+
+    The runtime for this shipped in #123 (identity-aware promotion, plus the
+    direct-object tests above). What was NOT pinned: those tests hand-build
+    ReviewModel objects, so none prove token_env survives config PARSING on a
+    backup entry -- the literal precondition for the owner's 3rd-App provisioning
+    to pay off. Without this, "provisioned the App, escalation still promotes
+    nothing" is a silent, assumed-path-never-exercised failure. This walks the
+    real path: load_config -> resolve_models -> partition_roles -> plan_escalation.
+
+    NOTE for #99 Part A: promotion eligibility becomes `identity AND same-backend`.
+    Every entry here is left on the default (pr-agent) backend, so the backup
+    matches its actives' backend and stays promotable under the stricter rule --
+    Part A should EXTEND this test, not contradict it.
+    """
+    from sidecar.fukoconfig import load_config
+    from sidecar.pool import partition_roles, resolve_models
+
+    monkeypatch.setenv("FUKO_GITHUB_TOKEN_DORIAN", "tok-a")
+    monkeypatch.setenv("FUKO_GITHUB_TOKEN_GRAY", "tok-b")
+    monkeypatch.setenv("FUKO_GITHUB_TOKEN_BASIL", "tok-c")
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text(
+        "[[review.models]]\n"
+        'provider = "zai-coding"\nname = "glm-5.2"\nrole = "active"\n'
+        'token_env = "FUKO_GITHUB_TOKEN_DORIAN"\n'
+        "[[review.models]]\n"
+        'provider = "openrouter"\nname = "qwen/qwen3.8-max"\nrole = "active"\n'
+        'token_env = "FUKO_GITHUB_TOKEN_GRAY"\n'
+        "[[review.models]]\n"
+        'provider = "ollama-cloud"\nname = "glm-5.2:cloud"\nrole = "backup"\n'
+        'token_env = "FUKO_GITHUB_TOKEN_BASIL"\n',
+        encoding="utf-8",
+    )
+    review = load_config(cfg).review
+    actives, backups, trials = partition_roles(resolve_models(review))
+    # token_env is inherited onto backup entries via CompareModel (#114 confirms it
+    # is already allowed and must not be re-added) -- assert it parsed, end to end.
+    assert backups[0].token_env == "FUKO_GITHUB_TOKEN_BASIL"
+
+    existing = [*actives, *trials]
+    promote, reasons = runner.plan_escalation(existing, backups, review, concurrent=True)
+
+    assert [f"{m.provider}/{m.name}" for m in promote] == ["ollama-cloud/glm-5.2:cloud"]
+    assert reasons == []
+    assert promote[0].role == "active" and promote[0].promoted is True
+    assert _identities_are_distinct([*existing, *promote])
+
+
+def test_config_parsed_backup_without_token_env_still_skips(monkeypatch, tmp_path):
+    """The identity-less counterpart, through the same config path, still skips.
+
+    Guards the invariant from the other side: a parsed backup with no token_env
+    must not be promoted into a concurrent round (it would collapse every branch
+    onto one identity, #106).
+    """
+    from sidecar.fukoconfig import load_config
+    from sidecar.pool import partition_roles, resolve_models
+
+    monkeypatch.setenv("FUKO_GITHUB_TOKEN_DORIAN", "tok-a")
+    monkeypatch.setenv("FUKO_GITHUB_TOKEN_GRAY", "tok-b")
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text(
+        "[[review.models]]\n"
+        'provider = "zai-coding"\nname = "glm-5.2"\nrole = "active"\n'
+        'token_env = "FUKO_GITHUB_TOKEN_DORIAN"\n'
+        "[[review.models]]\n"
+        'provider = "openrouter"\nname = "qwen/qwen3.8-max"\nrole = "active"\n'
+        'token_env = "FUKO_GITHUB_TOKEN_GRAY"\n'
+        "[[review.models]]\n"
+        'provider = "ollama-cloud"\nname = "glm-5.2:cloud"\nrole = "backup"\n',
+        encoding="utf-8",
+    )
+    review = load_config(cfg).review
+    actives, backups, trials = partition_roles(resolve_models(review))
+    assert backups[0].token_env is None
+
+    existing = [*actives, *trials]
+    promote, reasons = runner.plan_escalation(existing, backups, review, concurrent=True)
+
+    assert promote == []
+    assert reasons and "collapse" in reasons[0]
+
+
 def test_review_keeps_backups_in_reserve_when_healthy(monkeypatch, tmp_path):
     cfg = _one_active_one_backup(tmp_path)
     monkeypatch.setenv("ANTHROPIC_KEY", "k")
