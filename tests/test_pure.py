@@ -1,6 +1,11 @@
 """Unit tests for pure logic (no database or embeddings backend required)."""
 
-from sidecar.cli import _collect_files, chunk_markdown, format_extra_instructions
+from sidecar.cli import (
+    _collect_files,
+    _configured_seat_labels,
+    chunk_markdown,
+    format_extra_instructions,
+)
 from sidecar.db import vector_literal
 from sidecar.ingest import _parse_dt
 from sidecar.models import ForgetRequest, IngestItem, IngestRequest, QueryRequest
@@ -77,3 +82,38 @@ def test_forget_invalid_uuid_is_noop():
 
     assert forget("owner/repo", id="not-a-uuid") == 0
     assert forget("owner/repo", id="/forget all") == 0
+
+
+def test_configured_seat_labels_from_a_models_config(tmp_path):
+    """#116: labels are the `provider/name` of every configured entry, all roles."""
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text(
+        "[[review.models]]\n"
+        'provider = "openrouter"\n'
+        'name = "x-ai/grok-4.5"\n'
+        'role = "active"\n'
+        "[[review.models]]\n"
+        'provider = "openrouter"\n'
+        'name = "qwen/qwen3.8-max"\n'
+        'role = "backup"\n'
+    )
+    labels = _configured_seat_labels(str(cfg))
+    assert labels == ["openrouter/x-ai/grok-4.5", "openrouter/qwen/qwen3.8-max"]
+
+
+def test_configured_seat_labels_fails_safe_to_none_when_missing(capsys):
+    """A missing config yields None so `fuko_states` keeps every pending row.
+
+    Crucially it must NOT fall back to `load_config`'s built-in defaults, whose
+    single entry would wrongly supersede every real seat.
+    """
+    assert _configured_seat_labels("/no/such/.fuko.toml") is None
+    assert "not found" in capsys.readouterr().err
+
+
+def test_configured_seat_labels_fails_safe_to_none_on_a_malformed_file(tmp_path, capsys):
+    """A present-but-unparseable config also fails safe to None."""
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text("this = is = not = valid = toml\n")
+    assert _configured_seat_labels(str(cfg)) is None
+    assert "could not load" in capsys.readouterr().err

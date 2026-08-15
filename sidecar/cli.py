@@ -32,6 +32,12 @@ def main() -> None:
         "(external bots plus fuko's own instances)",
     )
     p_status.add_argument("--pr-url", required=True, help="full pull request URL")
+    p_status.add_argument(
+        "--config",
+        default=".fuko.toml",
+        help="path to .fuko.toml; its configured seat labels let a receipt whose "
+        "seat was renamed or removed report 'superseded' instead of a stuck 'pending'",
+    )
 
     p_query = sub.add_parser("query", help="query learnings for a set of changed files")
     p_query.add_argument("--repo", required=True)
@@ -218,7 +224,63 @@ def _cmd_status(args) -> None:
     except httpx.HTTPError:
         check_runs = None
 
-    print(json.dumps(reviewer_states(head, issue_comments, reviews, check_runs), indent=2))
+    # Cross-reference receipt labels against the currently-configured seats so a
+    # renamed/removed seat reports `superseded` rather than a stuck `pending`
+    # (#116). On ANY failure to load config, pass None: `fuko_states` then keeps
+    # today's behavior instead of dropping a genuinely-pending row -- erring
+    # toward the gating state is the safe direction when the config is unreadable.
+    configured_labels = _configured_seat_labels(args.config)
+
+    print(
+        json.dumps(
+            reviewer_states(
+                head, issue_comments, reviews, check_runs, configured_labels=configured_labels
+            ),
+            indent=2,
+        )
+    )
+
+
+def _configured_seat_labels(config_path: str) -> list[str] | None:
+    """Return the ``provider/name`` label of every configured review entry, or None.
+
+    None is returned when the config file is absent, cannot be parsed, or
+    resolves to no entries, so :func:`sidecar.status.fuko_states` skips its
+    cross-reference and keeps every receipt row -- the fail-safe direction, since
+    dropping a real pending row on a config-read failure could let a merge
+    proceed past an unreviewed seat. A label matches a receipt when it equals the
+    receipt's ``provider/name`` (see :func:`sidecar.runner`), so every role is
+    included: membership only needs to prove the seat still exists, and including
+    backups avoids ever misreading a still-configured seat as removed.
+
+    A MISSING file must map to None, not to the built-in defaults: ``load_config``
+    returns a default ``FukoConfig()`` when the path does not exist, whose single
+    fallback entry would then wrongly supersede every real seat. So absence is
+    checked explicitly here rather than trusting the loader's defaults.
+    """
+    from pathlib import Path
+
+    from .fukoconfig import load_config
+    from .pool import resolve_models
+
+    if not Path(config_path).exists():
+        print(
+            f"fuko: warning: {config_path} not found for seat cross-reference; "
+            "receipts for renamed/removed seats will still report 'pending'.",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        models = resolve_models(load_config(config_path).review)
+    except Exception as e:  # noqa: BLE001 -- any load/parse failure must fail safe to None
+        print(
+            f"fuko: warning: could not load {config_path} for seat cross-reference "
+            f"({e}); receipts for renamed/removed seats will still report 'pending'.",
+            file=sys.stderr,
+        )
+        return None
+    labels = [f"{m.provider}/{m.name}" for m in models]
+    return labels or None
 
 
 def _store(config_path: str):
