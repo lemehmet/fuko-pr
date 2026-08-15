@@ -6,11 +6,13 @@ backend is registering it here; the rest of the system depends only on the
 """
 
 from ..fukoconfig import ReviewConfig
+from .agentic import AgenticBackend
 from .base import ReviewBackend
 from .pragent import PrAgentBackend
 
 _BACKENDS: dict[str, type] = {
     PrAgentBackend.name: PrAgentBackend,
+    AgenticBackend.name: AgenticBackend,
 }
 
 

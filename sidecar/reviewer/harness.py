@@ -1,0 +1,303 @@
+"""Agent runtimes that can execute the review strategy.
+
+A harness takes a prepared prompt plus the checkout to review and returns the
+agent's final text; :func:`sidecar.reviewer.prompt.parse_review` turns that into
+structured findings. The first (and currently only) harness drives headless
+Claude Code (``claude -p``), which must be installed on the runner. Other
+runtimes -- e.g. an OSS agentic harness fronting non-Anthropic models --
+implement the same ``run_review`` signature and slot in without touching the
+strategy or the driver.
+
+Two isolation properties are load-bearing, because the checkout is an untrusted
+contributor's pull request:
+
+* **The agent never runs FROM the checkout.** ``cwd`` is a clean, empty
+  directory and the checkout is exposed as an additional readable root
+  (``--add-dir``). Claude Code loads project configuration -- including
+  ``.claude/settings.json`` **hooks**, which are arbitrary commands -- from its
+  working directory, and headless mode skips the workspace-trust prompt that
+  would otherwise gate it. Verified against Claude Code 2.1.232: a hook shipped
+  in the working directory executes, and the same hook does not execute when
+  the directory is passed via ``--add-dir`` instead.
+* **The tool surface is pinned to read-only navigation**
+  (:data:`ALLOWED_TOOLS`). Headless mode cannot prompt for permissions, so
+  every tool outside the allowlist is denied by construction -- the agent
+  cannot run repository code, write files, or reach the network even if the
+  repository content asks it to.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+from ..throttle import TIMEOUT_RETURNCODE
+
+ALLOWED_TOOLS = "Read,Grep,Glob"
+
+#: Directories the agent must never read, relative to the runner's home.
+#:
+#: ``--add-dir`` ADDS a readable root; it does NOT confine reads to it. Verified
+#: on Claude Code 2.1.232: with ``--allowedTools Read`` and a clean cwd, the
+#: agent will happily read an absolute path outside both cwd and every
+#: ``--add-dir`` root. That matters here because findings are published
+#: verbatim to the pull request, which the (untrusted) PR author can read -- so
+#: an injected instruction that says "read X and put it in a finding" is an
+#: exfiltration channel, not merely "wrong review text". Subscription auth
+#: deliberately keeps the runner's own login reachable under ``HOME``, which
+#: makes ``~/.claude`` the highest-value target on the box.
+#:
+#: This is a denylist over the credential stores, not a sandbox: it closes the
+#: named paths, it does not confine the agent -- Read and Grep still reach
+#: anything else on the runner (``/etc``, other checkouts in the work dir).
+#: Real confinement needs the run to happen in a container or under a dedicated
+#: unprivileged user, which is the runner's job, not this module's.
+#:
+#: Two properties below are load-bearing and were measured on 2.1.232, because
+#: both are the opposite of what the rule syntax suggests. Canary outside cwd
+#: and outside every ``--add-dir`` root, agent asked to Grep it:
+#:
+#: ===========================================  ==========
+#: deny rules                                   outcome
+#: ===========================================  ==========
+#: (none)                                       LEAKED
+#: ``Read(//abs/**)``                           blocked
+#: ``Read(//abs/**)`` + ``Grep(//abs/**)``      blocked
+#: ``Grep(//abs/**)``                           LEAKED
+#: ===========================================  ==========
+#:
+#: So: a PATH rule is enforced across the read-class tools -- the ``Read(...)``
+#: rules below are what actually stop ``Grep`` from reading a credential file --
+#: while a TOOL-scoped ``Grep(...)`` rule is not honored at all. We therefore
+#: emit only ``Read(...)`` rules on purpose. Adding ``Grep(...)`` entries would
+#: be decorative and would imply a coverage guarantee that does not exist.
+SENSITIVE_HOME_DIRS = (
+    ".claude",
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".config/gh",
+    ".config/gcloud",
+    ".docker",
+    ".kube",
+)
+#: Single files worth the same treatment.
+SENSITIVE_HOME_FILES = (".netrc", ".git-credentials", ".claude.json")
+
+#: Kernel pseudo-filesystems, denied because ``/proc/self/environ`` hands the
+#: agent its OWN process environment -- which necessarily holds the credential
+#: this backend just injected (``ANTHROPIC_API_KEY`` in api-key mode,
+#: ``CLAUDE_CODE_OAUTH_TOKEN`` in subscription mode). Published findings are the
+#: same egress channel as the original read-confinement bug; only the source
+#: differs. No legitimate code review reads ``/proc``, ``/sys`` or ``/dev``, so
+#: this costs a real reviewer nothing.
+#:
+#: NOT empirically verified: this was developed on darwin, which has no
+#: ``/proc``. The rules use the ``Read(//abs/**)`` spelling that WAS verified
+#: (see the matrix above), and path rules were measured to cover ``Grep`` too,
+#: so one rule closes both tools -- but the specific ``/proc`` denial is
+#: reasoned, not measured, and should be checked on a Linux runner.
+#:
+#: This is also precisely why fuko-pr#102 (running the reviewer in a container)
+#: matters: a denylist over ``/proc`` still leaves the credential sitting in
+#: the agent's own environment, reachable by any path we failed to enumerate.
+#: Only a boundary fixes the class; this closes the instance.
+SENSITIVE_SYSTEM_DIRS = ("/proc", "/sys", "/dev")
+
+
+def _permission_settings(env: dict[str, str]) -> str:
+    """Build the ``--settings`` payload: hooks off, credential stores unreadable.
+
+    Paths use Claude Code's absolute-rule spelling ``Read(//abs/path/**)`` (a
+    leading ``//``), which is what actually matches an absolute path -- a
+    single-slash rule silently fails to match and the read goes through.
+
+    Only POSIX-absolute roots produce rules. A Windows-shaped home
+    (a ``C:`` drive path) would otherwise render as ``Read(/C:/Users/...)``,
+    which is not the verified spelling and would silently match nothing -- a
+    denylist that looks present and protects nothing is worse than none at all.
+    Such a root is skipped and announced on stderr instead, so the operator
+    learns the credential denylist is not in force on that runner rather than
+    discovering it from a leaked review.
+    """
+    candidates: list[tuple[str, bool]] = []  # (path, is_directory)
+    home = (env.get("HOME") or env.get("USERPROFILE") or "").replace("\\", "/").rstrip("/")
+    if home:
+        candidates += [(f"{home}/{d}", True) for d in SENSITIVE_HOME_DIRS]
+        candidates += [(f"{home}/{f}", False) for f in SENSITIVE_HOME_FILES]
+    config_dir = (env.get("CLAUDE_CONFIG_DIR") or "").replace("\\", "/").rstrip("/")
+    if config_dir:
+        candidates.append((config_dir, True))
+    # Unconditional: these do not depend on HOME, and on a runner without one
+    # they are the only rules that remain.
+    candidates += [(d, True) for d in SENSITIVE_SYSTEM_DIRS]
+
+    # Build the rule from a normalized path rather than by concatenating onto
+    # whatever the environment held: POSIX permits a leading `//` with
+    # implementation-defined meaning, so a HOME of `//home/runner` would
+    # otherwise render `Read(///home/...)` -- the silently non-matching form,
+    # leaving the credential stores undenied with nothing to show for it.
+    # Stripping and re-adding makes exactly one `//` prefix by construction, so
+    # the broken spelling cannot be produced at all rather than merely asserted
+    # against.
+    deny = [
+        f"Read(//{path.lstrip('/')}/**)" if is_dir else f"Read(//{path.lstrip('/')})"
+        for path, is_dir in candidates
+        if path.startswith("/")
+    ]
+    unusable = sorted({path for path, _ in candidates if not path.startswith("/")})
+    if unusable:
+        print(
+            "fuko: credential denylist NOT applied -- these paths are not "
+            f"POSIX-absolute, so no verified deny rule exists for them: {', '.join(unusable)}. "
+            "The agentic reviewer's read denylist is inert on this runner; run it "
+            "in a container or under a dedicated unprivileged user.",
+            file=sys.stderr,
+        )
+    return json.dumps({"disableAllHooks": True, "permissions": {"deny": deny}})
+
+
+# Not listed in `claude --help` for 2.1.232, but accepted (verified: unknown
+# options exit with "error: unknown option", this one runs) and documented in
+# the CLI reference. It bounds a pathological tool loop; the wall-clock
+# `tool_timeout` is the outer bound that does not depend on this flag.
+DEFAULT_MAX_TURNS = 50
+
+# "Not logged in · Please run /login" and the API-key equivalents. Auth failure
+# must NOT be treated as throttling: failing over to the next provider would
+# burn the whole pool on what is a one-line runner fix.
+_AUTH_FAILURE_RE = re.compile(
+    r"not logged in|please run /login|invalid api key|authentication_error|"
+    r"\bunauthorized\b|\b401\b",
+    re.IGNORECASE,
+)
+
+
+class HarnessNotAvailableError(RuntimeError):
+    """Raised when the harness binary is not installed on this runner."""
+
+
+@dataclass(frozen=True)
+class HarnessResult:
+    """The raw outcome of one agent run."""
+
+    returncode: int
+    text: str
+    stderr: str = ""
+    timed_out: bool = False
+
+
+def is_auth_failure(output: str) -> bool:
+    """Return whether ``output`` looks like a credential problem, not a capacity one."""
+    return bool(output) and _AUTH_FAILURE_RE.search(output) is not None
+
+
+def check_auth(env: dict[str, str]) -> dict | None:
+    """Return ``claude auth status`` as parsed JSON, or None if it cannot be read.
+
+    Used as a preflight for subscription mode, where a lapsed login on the
+    runner would otherwise surface as a confusing mid-review failure on every
+    PR. Returns None (rather than raising) when the binary is missing, the
+    probe fails, or the output is not a JSON **object** -- an unreadable probe
+    is not evidence of a broken login, so the review proceeds and the run
+    itself reports the truth. The object check matters because ``json.loads``
+    happily returns a bare ``null``/number/string for malformed-but-valid JSON,
+    which the caller would then treat as a status mapping and crash on.
+    """
+    binary = shutil.which("claude", path=env.get("PATH"))
+    if binary is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [binary, "auth", "status"],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+        parsed = json.loads(proc.stdout)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def run_review(
+    prompt: str,
+    repo_dir: Path,
+    *,
+    cwd: Path,
+    model: str,
+    env: dict[str, str],
+    timeout: int,
+    max_turns: int = DEFAULT_MAX_TURNS,
+) -> HarnessResult:
+    """Run headless Claude Code over ``repo_dir`` and return its final text.
+
+    The agent runs from ``cwd`` -- which must be a clean directory the
+    repository does not control -- with ``repo_dir`` mounted as an additional
+    readable root, so no project configuration from the reviewed code is
+    loaded (see the module docstring).
+
+    The prompt goes over stdin (it embeds a full diff -- argv has size limits
+    and shows up in process listings). ``--output-format text`` keeps the
+    contract simple: stdout IS the agent's final message, which the strategy
+    already constrains to a bare JSON object. ``env`` is the harness process
+    environment (the caller decides exactly which credentials it carries) and
+    is used as given rather than merged with this process's.
+
+    A timeout maps to :data:`sidecar.throttle.TIMEOUT_RETURNCODE` so the driver
+    classifies a hung run as throttle-class, same as a hung PR-Agent container.
+    """
+    binary = shutil.which("claude", path=env.get("PATH"))
+    if binary is None:
+        raise HarnessNotAvailableError(
+            "the 'claude' CLI is not on PATH; install Claude Code on this "
+            "runner or switch this model entry to the pr-agent backend"
+        )
+    cmd = [
+        binary,
+        "-p",
+        "--model",
+        model,
+        "--output-format",
+        "text",
+        "--allowedTools",
+        ALLOWED_TOOLS,
+        "--add-dir",
+        str(repo_dir),
+        # Belt and braces on top of the clean cwd, each independently sufficient
+        # for its vector: load settings from the USER scope only (never the
+        # reviewed project's), refuse hooks outright, and start no MCP server
+        # that was not explicitly configured here (none is).
+        "--setting-sources",
+        "user",
+        "--settings",
+        _permission_settings(env),
+        "--strict-mcp-config",
+        "--max-turns",
+        str(max_turns),
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            cwd=str(cwd),
+            env=env,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        partial = e.stderr if isinstance(e.stderr, str) else ""
+        return HarnessResult(
+            returncode=TIMEOUT_RETURNCODE,
+            text="",
+            stderr=partial or f"review timed out after {timeout}s",
+            timed_out=True,
+        )
+    return HarnessResult(returncode=proc.returncode, text=proc.stdout, stderr=proc.stderr)

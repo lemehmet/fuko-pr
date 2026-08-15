@@ -3,7 +3,9 @@
 # (supplied as a CI secret). See docs/design.md for the full schema.
 
 [review]
-backend = "pr-agent"            # review engine (driver)
+backend = "pr-agent"            # review engine (driver): pr-agent | agentic
+                                # (agentic = fuko's own checkout-based reviewer,
+                                # headless Claude Code; see docs/agentic-reviewer.md)
 tools = ["review", "improve"]   # PR-Agent tools to run
 # PR-Agent runs from its Docker image (it is not pip-installable). Defaults to
 # codiumai/pr-agent:latest; point at a pinned tag in your own registry once you
@@ -45,6 +47,12 @@ tools = ["review", "improve"]   # PR-Agent tools to run
 # value and point base_url at the host. prodia = a rented OpenAI-compatible
 # GPU box, key from PRODIA_KEY; it has no default base_url, so each model
 # entry must set base_url to the rental's endpoint.)
+#
+# `auth` (agentic backend only): "auto" (default) | "api-key" | "subscription".
+# api-key reads the preset's key env var; subscription runs as the runner's own
+# logged-in Claude session and passes NO key. Pin it explicitly on a runner
+# where a key is also present — an ambient key outranks the subscription and
+# would silently bill per token. See docs/agentic-reviewer.md.
 #
 # Per-entry review steering: an optional `extra_instructions` string on any
 # entry is prepended to the shared knowledge blob for THAT entry's runs only —

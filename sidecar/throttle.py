@@ -19,7 +19,15 @@ _THROTTLE_RE = re.compile(
     r"|over_?capacity"
     r"|resource[_ ]?exhausted"
     r"|insufficient_quota"
-    r"|throttl",
+    r"|throttl"
+    # Subscription/spend exhaustion, which reads nothing like "rate limit":
+    # Claude Code says "You've hit your session limit" / "weekly limit", and
+    # credit/spend caps are the API-key equivalent. All are "this credential is
+    # spent, try another", i.e. exactly what failover is for.
+    r"|you.?ve hit your \w+ limit"
+    r"|usage limit"
+    r"|credit balance is too low"
+    r"|spend limit",
     re.IGNORECASE,
 )
 

@@ -187,12 +187,23 @@ class ReviewBackend(Protocol):
     def build_env(self, preset: ProviderPreset, model: ModelConfig,
                   knowledge: str, tools: list[str]) -> dict[str, str]: ...
 
-    def invoke(self, pr_url: str, env: dict[str, str]) -> InvokeResult: ...
+    def invoke(self, pr: PRRef, env: dict[str, str],
+               tools: list[str]) -> InvokeResult: ...
 
-    def normalize_output(self, pr: PRRef) -> list[ReviewSignal]: ...
+    # `model`/`compare_label` label the branch on the diff; `token`/`api_url`
+    # pin the identity that posts; `role` rides each marker (active vs trial).
+    def normalize_output(self, pr: PRRef, model: str = "", *,
+                         compare_label: str | None = None,
+                         token: str | None = None,
+                         api_url: str | None = None,
+                         actor: str | None = None,
+                         role: str = "active") -> list[ReviewSignal]: ...
 ```
 
-The **pr-agent driver** (first and only implementation for now):
+(`sidecar/backends/base.py` is authoritative; this block is a readable copy of
+it and should move when it does.)
+
+The **pr-agent driver** (first implementation):
 
 - `build_env` emits dynaconf **dunder** env vars (`CONFIG__MODEL`,
   `CONFIG__CUSTOM_MODEL_MAX_TOKENS`, `CONFIG__AI_TIMEOUT`, `OPENAI__API_BASE` /
@@ -206,8 +217,14 @@ The **pr-agent driver** (first and only implementation for now):
 - `normalize_output` reads back the comments PR-Agent posted (author = the bot/app),
   maps them to signals, and edits each thread to embed a marker.
 
-**Do not build a second backend driver until a real one exists.** The contract is
-defined independently so PR-Agent's shape doesn't leak into "generic".
+The **agentic driver** (second implementation; see
+[`docs/agentic-reviewer.md`](agentic-reviewer.md)) drives fuko's own
+checkout-based reviewer and posts Review Signals natively — no scrape/PATCH
+egress. It is the existence proof the previous rule here ("do not build a
+second backend driver until a real one exists") was waiting for; the remaining
+pr-agent shapes still leaking through the seam (`build_env`'s env-dict, the
+runner-side GitHub env merge, the single global `backend` scalar, receipts
+without a backend field) are tracked in #99.
 
 ### Store
 
