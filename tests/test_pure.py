@@ -117,3 +117,17 @@ def test_configured_seat_labels_fails_safe_to_none_on_a_malformed_file(tmp_path,
     cfg.write_text("this = is = not = valid = toml\n")
     assert _configured_seat_labels(str(cfg)) is None
     assert "could not load" in capsys.readouterr().err
+
+
+def test_configured_seat_labels_fails_safe_on_a_blank_provider(tmp_path, capsys):
+    """A blank provider/name must fail safe to None, not emit a junk `/name` label.
+
+    pydantic types provider/name as `str` but permits `""`, and a junk label that
+    matches no real receipt would supersede every genuine seat (a receipt is
+    superseded when its label is absent from the configured set) — the exact
+    merge-past-unreviewed-seat direction the function fails safe against.
+    """
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text('[[review.models]]\nprovider = ""\nname = "x"\nrole = "active"\n')
+    assert _configured_seat_labels(str(cfg)) is None
+    assert "could not load" in capsys.readouterr().err

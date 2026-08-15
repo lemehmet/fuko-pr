@@ -273,9 +273,23 @@ def _configured_seat_labels(config_path: str) -> list[str] | None:
     # The label extraction is inside the try on purpose: if resolve_models returns
     # an unexpected value (e.g. None) or a model lacks provider/name, building the
     # labels must fail safe to None rather than crash `fuko status`.
+    #
+    # An empty `provider`/`name` is rejected rather than emitted: pydantic types
+    # them as `str` but does not forbid `""`, so a malformed entry (`provider = ""`)
+    # would otherwise yield a junk label like `"/name"` or `"/"`. A junk label that
+    # matches no real receipt would then supersede every genuine seat (a receipt is
+    # superseded when its label is NOT in the configured set) -- the exact
+    # merge-past-unreviewed-seat direction this function fails safe against. So a
+    # blank component raises, and the `except` below turns it into a safe `None`.
     try:
         models = resolve_models(load_config(config_path).review)
-        labels = [f"{m.provider}/{m.name}" for m in models]
+        labels = []
+        for m in models:
+            provider = (m.provider or "").strip()
+            name = (m.name or "").strip()
+            if not provider or not name:
+                raise ValueError(f"configured model has a blank provider/name: {m!r}")
+            labels.append(f"{provider}/{name}")
     except Exception as e:  # noqa: BLE001 -- any load/parse failure must fail safe to None
         print(
             f"fuko: warning: could not load {config_path} for seat cross-reference "
