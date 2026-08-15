@@ -8,6 +8,15 @@ optional_tools = ["improve"]
 # run mid-review, and a starved round is indistinguishable from a clean one.
 # Keeping the number here means the arithmetic is checked at run time instead of
 # being re-derived by hand whenever a backup is added (#106).
+#
+# THIS CAP IS DELIBERATELY OVERSIZED RIGHT NOW -- do not "correct" it. Neither
+# backup names a token_env, so #106's identity rule refuses both promotions and
+# the achievable worst case is 2 branches * 2 tools * 600s ~= 45 min, roughly
+# 2.4x under this number. It stays at 110 because #114 (giving backups their own
+# identity) will make promotions possible again and take the worst case straight
+# back to ~85 min. Churning the cap down now and up again on #114 is worse than
+# carrying the headroom, and lowering it would silently re-introduce the mid-run
+# kill the moment #114 lands.
 job_budget_minutes = 110
 
 # FLEET COMPOSITION (2026-08-14) — two gating seats, two backups.
