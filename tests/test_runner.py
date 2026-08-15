@@ -241,6 +241,127 @@ def test_invoke_optional_tool_nonzero_exit_is_nonfatal(monkeypatch):
     assert "improve exited 5 [optional]" in result.detail
 
 
+def test_branch_header_shows_reduced_coverage_visibly():
+    """A human gating on the header must see the dead channel without decoding it.
+
+    The receipt is an invisible HTML comment; if reduced coverage lived only
+    there, a maintainer reading "fuko A/B — model X" would read a half-dead seat
+    as clean, which is how #108 was missed in the field.
+    """
+    from sidecar.runner import _branch_header_body
+    from sidecar.signals import RunReceipt
+
+    body = _branch_header_body(
+        "zai-coding/glm-5.2",
+        "active",
+        RunReceipt(
+            label="zai-coding/glm-5.2",
+            state="done",
+            channels={"review": "done", "improve": "killed:timeout"},
+        ),
+    )
+    assert "reduced coverage" in body
+    assert "improve killed:timeout" in body
+
+
+def test_branch_header_stays_quiet_when_every_channel_finished():
+    from sidecar.runner import _branch_header_body
+    from sidecar.signals import RunReceipt
+
+    body = _branch_header_body(
+        "zai-coding/glm-5.2",
+        "active",
+        RunReceipt(
+            label="zai-coding/glm-5.2", state="done", channels={"review": "done", "improve": "done"}
+        ),
+    )
+    assert "reduced coverage" not in body
+
+
+def test_invoke_records_a_killed_optional_tool_as_its_own_channel(monkeypatch):
+    """rc stays 0 (correct for failover) but the dead channel must still be visible.
+
+    This is the #108 regression pin: before the channel map, the ONLY trace of a
+    killed `improve` was a substring in the free-text `detail`.
+    """
+    from sidecar.fukoconfig import ReviewConfig
+
+    from tests.fakes import popen_factory
+
+    class _Ok:
+        returncode = 0
+
+    monkeypatch.setattr(pragent.subprocess, "run", lambda cmd, **kw: _Ok())
+    monkeypatch.setattr(
+        pragent.subprocess,
+        "Popen",
+        popen_factory(behavior=lambda tool: {} if tool == "review" else {"hang": True}),
+    )
+    pr = PRRef(repo="o/r", number=1, url="https://github.com/o/r/pull/1")
+    cfg = ReviewConfig(tool_timeout=5, optional_tools=["improve"])
+    result = pragent.PrAgentBackend(cfg).invoke(pr, {}, ["review", "improve"])
+
+    assert result.returncode == 0
+    assert result.channels == {"review": "done", "improve": "killed:timeout"}
+
+
+def test_invoke_records_an_optional_nonzero_exit_as_its_own_channel(monkeypatch):
+    from sidecar.fukoconfig import ReviewConfig
+
+    from tests.fakes import popen_factory
+
+    monkeypatch.setattr(
+        pragent.subprocess,
+        "Popen",
+        popen_factory(behavior=lambda tool: {"rc": 0} if tool == "review" else {"rc": 5}),
+    )
+    pr = PRRef(repo="o/r", number=1, url="https://github.com/o/r/pull/1")
+    cfg = ReviewConfig(optional_tools=["improve"])
+    result = pragent.PrAgentBackend(cfg).invoke(pr, {}, ["review", "improve"])
+
+    assert result.returncode == 0
+    assert result.channels == {"review": "done", "improve": "failed:exit 5"}
+
+
+def test_invoke_marks_every_channel_done_when_all_tools_succeed(monkeypatch):
+    from sidecar.fukoconfig import ReviewConfig
+
+    from tests.fakes import popen_factory
+
+    monkeypatch.setattr(pragent.subprocess, "Popen", popen_factory(behavior=lambda tool: {"rc": 0}))
+    pr = PRRef(repo="o/r", number=1, url="https://github.com/o/r/pull/1")
+    result = pragent.PrAgentBackend(ReviewConfig()).invoke(pr, {}, ["review", "improve"])
+
+    assert result.channels == {"review": "done", "improve": "done"}
+
+
+def test_invoke_marks_unreached_tools_skipped_not_absent(monkeypatch):
+    """A required tool failing abandons the rest; they must not look healthy.
+
+    An absent key and a healthy key are indistinguishable to a consumer reading
+    the map, so tools that never ran are pre-seeded as `skipped`.
+    """
+    from sidecar.fukoconfig import ReviewConfig
+
+    from tests.fakes import popen_factory
+
+    class _Ok:
+        returncode = 0
+
+    monkeypatch.setattr(pragent.subprocess, "run", lambda cmd, **kw: _Ok())
+    monkeypatch.setattr(
+        pragent.subprocess,
+        "Popen",
+        popen_factory(behavior=lambda tool: {"hang": True} if tool == "review" else {"rc": 0}),
+    )
+    pr = PRRef(repo="o/r", number=1, url="https://github.com/o/r/pull/1")
+    cfg = ReviewConfig(tool_timeout=5)  # `review` is REQUIRED here — no optional_tools
+    result = pragent.PrAgentBackend(cfg).invoke(pr, {}, ["review", "improve"])
+
+    assert result.throttled is True
+    assert result.channels == {"review": "killed:timeout", "improve": "skipped"}
+
+
 def test_build_env_disables_ticket_analysis():
     from sidecar.fukoconfig import ModelConfig
     from sidecar.presets import get_preset

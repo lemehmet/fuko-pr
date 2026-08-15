@@ -123,6 +123,18 @@ class RunReceipt(BaseModel):
     findings: int | None = Field(
         default=None, description="Signals this branch produced; None when not counted."
     )
+    channels: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Per-tool terminal outcome ('review' -> 'done', 'improve' -> "
+            "'killed:timeout', ...). A seat publishes on more than one channel, so "
+            "a single branch-level state cannot say that the guide posted while the "
+            "suggestions channel died -- and an optional tool's failure leaves the "
+            "branch at 'done'. Anything other than 'done' here is REDUCED COVERAGE, "
+            "not a clean pass. Empty means the receipt predates channel reporting, "
+            "NOT that every channel was healthy: writers always populate it."
+        ),
+    )
     detail: str = Field(default="", description="Human-readable outcome or failure reason.")
 
 

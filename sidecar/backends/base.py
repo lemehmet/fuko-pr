@@ -8,7 +8,7 @@ store persists and retrieves learnings. Implementations live in sibling modules.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
 
 from ..fukoconfig import ModelConfig
@@ -34,12 +34,20 @@ class InvokeResult:
     quota, overload, or a container timeout) -- the signal the runner uses to
     fail over to the next provider and trip that provider's breaker. ``provider``
     records which pool entry produced this result.
+
+    ``returncode`` is a whole-branch verdict and deliberately tolerates an
+    optional tool failing, because failover decisions should not be made on a
+    channel the operator marked non-essential. ``channels`` is what keeps that
+    tolerance from becoming a blind spot: it records each tool's own terminal
+    outcome, so "the branch succeeded" and "every channel the branch produces
+    ran" stay separable facts (#108).
     """
 
     returncode: int
     detail: str = ""
     throttled: bool = False
     provider: str | None = None
+    channels: dict[str, str] = field(default_factory=dict)
 
 
 @runtime_checkable

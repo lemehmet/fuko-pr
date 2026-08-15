@@ -29,9 +29,11 @@ from typing import Literal
 
 from .signals import RunReceipt, extract_run_receipts
 
-State = Literal["done", "pending", "in_progress", "rate_limited", "paused", "unavailable", "none"]
+State = Literal[
+    "done", "degraded", "pending", "in_progress", "rate_limited", "paused", "unavailable", "none"
+]
 
-DEGRADED_STATES: frozenset[str] = frozenset({"rate_limited", "paused", "unavailable"})
+DEGRADED_STATES: frozenset[str] = frozenset({"rate_limited", "paused", "unavailable", "degraded"})
 
 _CR_LOGIN = "coderabbitai[bot]"
 _COPILOT_LOGINS = {"copilot", "copilot-pull-request-reviewer[bot]"}
@@ -269,7 +271,9 @@ def fuko_states(head_sha: str, issue_comments: list[dict]) -> list[dict]:
     States map so that only a receipt finalized as ``done`` *on this HEAD* reads
     as ``done``:
 
-    - ``done`` -- reviewed this HEAD.
+    - ``done`` -- reviewed this HEAD on every channel it publishes.
+    - ``degraded`` -- reviewed this HEAD, but at least one channel did not finish
+      (see below). A DEGRADED state, so :func:`escalation_needed` fires on it.
     - ``in_progress`` -- started this HEAD, no outcome recorded yet. Also what a
       branch that died mid-run leaves behind, so a consumer's own timeout governs
       rather than an implied never-ending run (the same choice
@@ -277,6 +281,21 @@ def fuko_states(head_sha: str, issue_comments: list[dict]) -> list[dict]:
     - ``unavailable`` -- the branch finalized as failed: every model in its pool
       was exhausted. A DEGRADED state, so :func:`escalation_needed` fires on it.
     - ``pending`` -- the newest receipt is for an older commit.
+
+    ``degraded`` is a distinct STATE rather than an extra key on a ``done`` row
+    on purpose. A seat publishes on several channels (the PR-level guide from
+    ``review``, inline suggestions from ``improve``), and an optional tool's
+    death leaves the branch's return code at zero -- so the branch reports
+    ``done`` while one of its channels produced nothing. Signalling that only
+    through a new ``channels`` key would leave every consumer that gates on
+    ``state == "done"`` -- the common case -- reading a half-dead seat as a clean
+    pass, which is the defect itself (#108). An unrecognized state value instead
+    reads as not-done, withholding a merge rather than granting one.
+
+    A receipt with an EMPTY channel map keeps its old meaning: it predates
+    channel reporting, so there is nothing to judge. Writers always populate the
+    map, so absence means an older fuko wrote the receipt, not that every channel
+    was healthy.
 
     Only the newest receipt per instance is reported. Receipts are rewritten in
     place, but a force-push or a re-run can leave an older one behind, and later
@@ -304,16 +323,26 @@ def fuko_states(head_sha: str, issue_comments: list[dict]) -> list[dict]:
             state = "unavailable"
             detail = receipt.detail or "every model in the branch pool was exhausted"
         elif receipt.state == "done":
-            state = "done"
             # A promoted backup answered under a different model than the branch
             # is named for; say so, since it changes whose findings these are.
             promoted = receipt.model and receipt.model != label
-            detail = f"reviewed HEAD as {receipt.model}" if promoted else "reviewed HEAD"
+            reviewed = f"reviewed HEAD as {receipt.model}" if promoted else "reviewed HEAD"
+            dead = sorted(
+                f"{name} {value}" for name, value in receipt.channels.items() if value != "done"
+            )
+            if dead:
+                state = "degraded"
+                detail = f"{reviewed}, but reduced coverage: {', '.join(dead)}"
+            else:
+                state = "done"
+                detail = reviewed
         else:
             state = "in_progress"
             detail = "started on HEAD, no outcome recorded yet"
         row = _row(f"fuko:{label}", state, receipt.head_sha or None, detail)
         row["role"] = receipt.role
+        if receipt.channels:
+            row["channels"] = dict(receipt.channels)
         rows.append(row)
     return sorted(rows, key=lambda r: r["backend"])
 
@@ -353,9 +382,12 @@ def escalation_needed(rows: Iterable[Mapping]) -> bool:
     THE single policy shared by every consumer (the runner's next-round backup
     promotion today; anything reading ``fuko status`` can apply the same set),
     so detection and policy can never drift apart across consumers: a reviewer
-    row in any :data:`DEGRADED_STATES` state -- explicitly throttled, paused, or
-    quota-exhausted -- means the PR is losing external review coverage and
-    fuko's backup models should join the round. ``pending``/``none`` are NOT
+    row in any :data:`DEGRADED_STATES` state -- explicitly throttled, paused,
+    quota-exhausted, or finished with a dead channel -- means the PR is losing
+    review coverage and fuko's backup models should join the round. Including
+    ``degraded`` cannot make fuko escalate in response to itself: the runner's
+    promotion path feeds this from :mod:`sidecar.reviewer_health` rows (external
+    reviewers only), never from :func:`fuko_states`. ``pending``/``none`` are NOT
     degraded: they are normal early-round states and a single snapshot cannot
     distinguish "slow" from "silent-because-broke"; a staleness-aware policy
     can tighten this once run metrics exist. Accepts both
