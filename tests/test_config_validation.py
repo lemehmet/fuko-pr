@@ -18,6 +18,17 @@ def test_unknown_backend_on_model_entry_is_rejected():
         ReviewConfig(models=[ReviewModel(provider="p", name="m", role="active", backend="nope")])
 
 
+def test_empty_string_backend_on_model_entry_is_rejected():
+    """An explicit `backend = ""` is a mistake, not an inherit request.
+
+    Truthiness-based filtering would drop "" from validation and let
+    `_backend_for`'s `entry.backend or review.backend` silently treat it as
+    unset; validation must reject it instead.
+    """
+    with pytest.raises(ValidationError, match="unknown review backend"):
+        ReviewConfig(models=[ReviewModel(provider="p", name="m", role="active", backend="")])
+
+
 def test_known_backends_accepted():
     """Both registered drivers parse, whole-config and per-entry."""
     assert ReviewConfig(backend="agentic").backend == "agentic"

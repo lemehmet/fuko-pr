@@ -194,7 +194,11 @@ class ReviewConfig(BaseModel):
         from .backends import known_backends
 
         known = known_backends()
-        named = {self.backend, *(m.backend for m in self.models if m.backend)}
+        # Filter on ``is not None``, not truthiness: an explicit ``backend = ""``
+        # is a mistake, not an inherit request, so it must reach ``named`` and be
+        # rejected here rather than silently falling back to ``self.backend`` in
+        # ``_backend_for`` (which treats "" as "unset" via ``or``).
+        named = {self.backend, *(m.backend for m in self.models if m.backend is not None)}
         unknown = sorted(n for n in named if n not in known)
         if unknown:
             raise ValueError(

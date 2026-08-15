@@ -223,7 +223,7 @@ checkout-based reviewer and posts Review Signals natively — no scrape/PATCH
 egress. It is the existence proof the previous rule here ("do not build a
 second backend driver until a real one exists") was waiting for.
 
-#99 Part A closed the receipts-only seam gaps: `[[review.models]]` entries take a
+Part A of #99 closed the receipts-only seam gaps: `[[review.models]]` entries take a
 per-entry `backend` (resolved **per branch**, not one global scalar), validated
 against the registry at config-load time; `RunReceipt` and the `review_runs`
 table carry a `backend` field (pre-existing rows/receipts backfill to `pr-agent`),
