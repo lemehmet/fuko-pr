@@ -278,6 +278,34 @@ def test_coderabbit_completed_review_on_head_outranks_a_live_throttle_notice():
     assert s["state"] == "done"
 
 
+@pytest.mark.parametrize(
+    "notice,label",
+    [(_FAIR_USAGE, "rate_limited"), ("Rate limit exceeded", "rate_limited")],
+)
+def test_stale_review_body_throttle_does_not_resurrect_on_an_unscanned_head(notice, label):
+    """The unscanned-HEAD path was sourcing throttles from review bodies too.
+
+    A submitted review body is never rewritten, so a notice inside one is
+    permanently stale — a PR throttled once would keep reporting `rate_limited`
+    on every later HEAD with no walkthrough. Only CR's live status comments count.
+    """
+    stale = _cr_review("0000aaa", body=notice)
+    s = coderabbit_state(HEAD, [], [stale])
+    assert s["state"] == "pending"
+    assert s["state"] != label
+
+
+def test_stale_review_body_pause_does_not_resurrect_on_an_unscanned_head():
+    stale = _cr_review("0000aaa", body="Reviews paused by coderabbit.ai")
+    assert coderabbit_state(HEAD, [], [stale])["state"] == "pending"
+
+
+def test_a_live_throttle_notice_still_reports_on_an_unscanned_head():
+    """The scoping must not make the unscanned path blind to a real throttle."""
+    s = coderabbit_state(HEAD, [_cr(_FAIR_USAGE)], [])
+    assert s["state"] == "rate_limited"
+
+
 def test_coderabbit_throttle_notice_in_a_stale_review_body_does_not_throttle_head():
     """Scoped to CR's live issue comments, matching the in-progress rule."""
     stale = _cr_review("0000aaa", body=_FAIR_USAGE)

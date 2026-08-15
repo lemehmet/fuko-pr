@@ -245,11 +245,18 @@ def coderabbit_state(
     review_on_head = any(r.get("commit_id") == head_sha for r in cr_reviews)
 
     if not (walk_on_head or review_on_head):
-        if _CR_RATE_LIMIT.search(blob):
+        # `issue_blob`, not `blob`: every transient state is read from CR's LIVE
+        # status comments only. A submitted review body is never rewritten, so a
+        # throttle notice inside one is permanently stale -- sourcing these from
+        # `blob` let a PR that was throttled once keep reporting `rate_limited`
+        # on every later HEAD that had no walkthrough. The in-progress check
+        # below was already scoped this way; the other two were not, and the
+        # inconsistency predates #19/#86.
+        if _CR_RATE_LIMIT.search(issue_blob):
             return _row(
                 "coderabbit", "rate_limited", walk_head, "rate-limit notice; HEAD not yet scanned"
             )
-        if _CR_PAUSED.search(blob):
+        if _CR_PAUSED.search(issue_blob):
             return _row("coderabbit", "paused", walk_head, "reviews paused; HEAD not yet scanned")
         if _CR_IN_PROGRESS.search(issue_blob):
             return _row("coderabbit", "in_progress", walk_head, "review in progress")
