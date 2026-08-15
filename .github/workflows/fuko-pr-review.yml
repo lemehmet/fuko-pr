@@ -40,7 +40,16 @@ jobs:
     # sequential-fallback A/B is 2 branches * 2 tools * 600s = 40m + ~5m setup
     # ≈ 45m (the concurrent path is ~2 * 600s + setup ≈ 23m). Found on
     # mepro#1455, where every reviewer flagged the zero-headroom 40m cap.
-    timeout-minutes: 50
+    #
+    # STOPGAP for #106 — 50 -> 90. When CodeRabbit pauses, backup escalation
+    # promotes the backup entry to active; that entry carries no token_env, so
+    # identity resolution fails and the WHOLE run degrades to sequential at 3
+    # branches * 2 tools * 600s = 60m, which blows through the 50m cap and
+    # kills the run mid-review — a starved round that looks like a clean one.
+    # 90 restores headroom until #106 makes the promotion identity-aware.
+    # Deliberately NOT paired with a tool_timeout raise: the per-tool budget is
+    # the thing keeping a wedged tool from eating the whole job.
+    timeout-minutes: 90
     permissions:
       contents: read # reads PR data + posts comments only; no commits/pushes
       pull-requests: write

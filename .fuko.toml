@@ -3,19 +3,42 @@ image = "ghcr.io/lemehmet/pr-agent:0.41.0@sha256:7341dc6214be964534ce3e68fc73143
 tool_timeout = 600
 optional_tools = ["improve"]
 
+# FLEET NOTE (2026-08-14) — this fleet is deliberately NOT model-diverse.
+# Both actives are the same model (glm-5.2) reached through different
+# providers, so what we buy is provider diversity + failover, not a second
+# opinion from a second model family. That is a real loss and it is recorded
+# here on purpose rather than papered over.
+#
+# Why we took it: on PR #100 glm-5.2 produced every substantive finding while
+# deepseek-v4-pro produced noise — including a critical-severity false positive
+# whose suggested patch would have broken the very security control it claimed
+# to be fixing. A second opinion is only worth a seat if it is worth reading.
+# Kimi K3 was the obvious model-diverse replacement and was rejected on cost.
+#
+# Revisit when a second model family clears the quality bar; restoring model
+# diversity is a one-line change to the `gray` entry below.
+
+# dorian — active. glm-5.2 direct from z.ai.
 [[review.models]]
 provider = "zai-coding"
 name = "glm-5.2"
 max_context = 1000000
 token_env = "FUKO_GITHUB_TOKEN_DORIAN"
 
-[[review.models]]
-provider = "openrouter"
-name = "deepseek/deepseek-v4-pro"
-max_context = 1048576
-token_env = "FUKO_GITHUB_TOKEN_GRAY"
-
+# gray — active. Same model as dorian, reached via OpenRouter: an independent
+# provider path, independent throttle bucket, and a distinct App identity.
 [[review.models]]
 provider = "openrouter"
 name = "z-ai/glm-5.2"
+max_context = 1048576
+token_env = "FUKO_GITHUB_TOKEN_GRAY"
+
+# Backup. Deliberately NOT another OpenRouter entry: gray already routes
+# through OpenRouter, so an OpenRouter outage would take out the backup and the
+# active it is meant to cover in the same stroke. ollama-cloud is the only
+# failover left that survives that outage.
+[[review.models]]
+provider = "ollama-cloud"
+name = "glm-5.2:cloud"
+max_context = 976000
 role = "backup"
