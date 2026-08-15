@@ -180,7 +180,156 @@ def test_review_promotes_backups_when_degraded(monkeypatch, tmp_path, capsys):
     assert backend.models == ["anthropic/a", "ollama/b"]
     assert observed == ["o/r"]
     err = capsys.readouterr().err
-    assert "promoting backup" in err
+    assert "promoted ollama/b" in err
+    # The budget arithmetic is PRINTED, not carried in a comment: it is a function
+    # of the backup count and has gone stale every time a human held it (#106).
+    assert "sequential worst case" in err
+    assert "branches x" in err
+
+
+# --- escalation invariants (#106) --------------------------------------------
+#
+# These assert a PROPERTY of the branch set the runner actually builds -- every
+# entry that starts a branch resolves to a distinct identity, evaluated after
+# role partitioning and after promotion -- rather than the shape of any one
+# `.fuko.toml`. A config-shape assertion would have passed on the run that broke:
+# the config was fine, and escalation introduced the identity-less branch at
+# runtime.
+
+
+def _models(*specs):
+    """Build ReviewModel entries from ``(provider, name, role, token_env)`` tuples."""
+    from sidecar.fukoconfig import ReviewModel
+
+    return [ReviewModel(provider=p, name=n, role=r, token_env=t) for p, n, r, t in specs]
+
+
+def _identities_are_distinct(entries) -> bool:
+    """The invariant: every branch-starting entry has its own resolvable identity."""
+    envs = [e.token_env for e in entries]
+    if not all(envs):
+        return False
+    values = [runner.os.environ.get(e, "") for e in envs]
+    return all(values) and len(set(values)) == len(values)
+
+
+def test_escalation_skips_a_promotion_that_would_collapse_concurrency(monkeypatch):
+    """The case that failed live: promotion adds a branch with no identity.
+
+    Concurrency is all-or-nothing, so ONE token-less branch collapses every
+    branch onto a single token — the escalation meant to ADD a reviewer removes
+    identity separation from the whole fleet. The invariant must hold by SKIPPING
+    the promotion, not by degrading the run to sequential.
+    """
+    from sidecar.fukoconfig import ReviewConfig
+
+    monkeypatch.setenv("T_DORIAN", "tok-a")
+    monkeypatch.setenv("T_GRAY", "tok-b")
+    actives = _models(
+        ("zai-coding", "glm-5.2", "active", "T_DORIAN"),
+        ("openrouter", "qwen/qwen3.8-max", "active", "T_GRAY"),
+    )
+    backups = _models(("ollama-cloud", "glm-5.2:cloud", "backup", None))
+
+    promote, reasons = runner.plan_escalation(actives, backups, ReviewConfig(), concurrent=True)
+
+    assert promote == []
+    assert reasons and "collapse" in reasons[0]
+    # The invariant holds over the post-promotion branch set.
+    assert _identities_are_distinct([*actives, *promote])
+
+
+def test_escalation_promotes_a_backup_that_has_its_own_identity(monkeypatch):
+    """The invariant permits the promotion when it does not break identity."""
+    from sidecar.fukoconfig import ReviewConfig
+
+    monkeypatch.setenv("T_DORIAN", "tok-a")
+    monkeypatch.setenv("T_GRAY", "tok-b")
+    monkeypatch.setenv("T_BASIL", "tok-c")
+    actives = _models(
+        ("zai-coding", "glm-5.2", "active", "T_DORIAN"),
+        ("openrouter", "qwen/qwen3.8-max", "active", "T_GRAY"),
+    )
+    backups = _models(("ollama-cloud", "glm-5.2:cloud", "backup", "T_BASIL"))
+
+    promote, reasons = runner.plan_escalation(actives, backups, ReviewConfig(), concurrent=True)
+
+    assert [f"{m.provider}/{m.name}" for m in promote] == ["ollama-cloud/glm-5.2:cloud"]
+    assert reasons == []
+    assert promote[0].role == "active" and promote[0].promoted is True
+    assert _identities_are_distinct([*actives, *promote])
+
+
+def test_escalation_promotes_identity_less_backup_when_already_sequential(monkeypatch):
+    """If the actives cannot run concurrently anyway, promotion costs nothing.
+
+    The identity rule exists to protect concurrency; with none to protect,
+    declining the extra reviewer would be a pure loss.
+    """
+    from sidecar.fukoconfig import ReviewConfig
+
+    actives = _models(("zai-coding", "glm-5.2", "active", None))
+    backups = _models(("ollama-cloud", "glm-5.2:cloud", "backup", None))
+
+    promote, reasons = runner.plan_escalation(actives, backups, ReviewConfig(), concurrent=False)
+
+    assert len(promote) == 1
+    assert reasons == []
+
+
+def test_escalation_refuses_a_promotion_the_job_budget_cannot_hold(monkeypatch):
+    """Budget is computed, not remembered: branches x tools x tool_timeout."""
+    from sidecar.fukoconfig import ReviewConfig
+
+    monkeypatch.setenv("T_A", "tok-a")
+    monkeypatch.setenv("T_B", "tok-b")
+    monkeypatch.setenv("T_C", "tok-c")
+    actives = _models(
+        ("p", "a", "active", "T_A"),
+        ("p", "b", "active", "T_B"),
+    )
+    backups = _models(("p", "c", "backup", "T_C"))
+    # 3 branches x 2 tools x 600s = 60m, over a 50m budget.
+    review = ReviewConfig(tool_timeout=600, job_budget_minutes=50)
+
+    promote, reasons = runner.plan_escalation(actives, backups, review, concurrent=True)
+
+    assert promote == []
+    assert reasons and "over the 50m job budget" in reasons[0]
+
+
+def test_escalation_promotes_what_the_budget_holds_not_all_or_nothing(monkeypatch):
+    """A budget that holds one of two backups promotes one rather than refusing both."""
+    from sidecar.fukoconfig import ReviewConfig
+
+    for name in ("T_A", "T_B", "T_C", "T_D"):
+        monkeypatch.setenv(name, f"tok-{name}")
+    actives = _models(("p", "a", "active", "T_A"), ("p", "b", "active", "T_B"))
+    backups = _models(("p", "c", "backup", "T_C"), ("p", "d", "backup", "T_D"))
+    # 3 branches x 2 x 600s = 60m fits; 4 branches = 80m does not.
+    review = ReviewConfig(tool_timeout=600, job_budget_minutes=70)
+
+    promote, reasons = runner.plan_escalation(actives, backups, review, concurrent=True)
+
+    assert [m.name for m in promote] == ["c"]
+    assert len(reasons) == 1 and "over the 70m job budget" in reasons[0]
+
+
+def test_escalation_without_a_budget_promotes_but_still_reports_the_cost(monkeypatch):
+    """An unset budget must not mean an unmeasured one."""
+    from sidecar.fukoconfig import ReviewConfig
+
+    monkeypatch.setenv("T_A", "tok-a")
+    monkeypatch.setenv("T_C", "tok-c")
+    actives = _models(("p", "a", "active", "T_A"))
+    backups = _models(("p", "c", "backup", "T_C"))
+
+    promote, reasons = runner.plan_escalation(
+        actives, backups, ReviewConfig(job_budget_minutes=None), concurrent=True
+    )
+
+    assert len(promote) == 1 and reasons == []
+    assert runner.sequential_cost_minutes(2, 2, 600) == 40.0
 
 
 def test_review_keeps_backups_in_reserve_when_healthy(monkeypatch, tmp_path):

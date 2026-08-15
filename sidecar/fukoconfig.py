@@ -110,6 +110,17 @@ class ReviewModel(CompareModel):
     """
 
     role: Literal["active", "backup", "trial"] = "active"
+    promoted: bool = Field(
+        default=False,
+        description=(
+            "RUNTIME-set, not user config: marks an entry the escalation path copied "
+            "from 'backup' to 'active' for one round. Escalation used to forge "
+            "role='active' with nothing recording that it had done so, leaving a "
+            "receipt with a null slot and an 'active' role that no configured active "
+            "matched. Carrying the fact forward keeps a promoted branch attributable "
+            "as what it is."
+        ),
+    )
 
 
 class ReviewConfig(BaseModel):
@@ -191,6 +202,20 @@ class ReviewConfig(BaseModel):
             "Tools whose failure (incl. timeout) is a warning, not a fuko-review "
             "failure -- e.g. ['improve'] so a stalled code-suggestions pass doesn't "
             "red an observe-only review check once 'review' has posted."
+        ),
+    )
+    job_budget_minutes: int | None = Field(
+        default=None,
+        description=(
+            "Wall-clock the CI job allows this review, i.e. the workflow's "
+            "`timeout-minutes`. Escalation promotes backups into extra branches, and "
+            "the sequential worst case is branches * len(tools) * tool_timeout -- so "
+            "adding one backup can push a round past a cap that was computed without "
+            "it, and an overrun kills the run MID-REVIEW, which is worse than a slow "
+            "round because a starved round is indistinguishable from a clean one. "
+            "When set, the runner refuses a promotion the budget cannot hold and "
+            "says so. Left unset, promotions are unrestricted and the computed cost "
+            "is logged anyway, so the arithmetic is printed rather than remembered."
         ),
     )
 

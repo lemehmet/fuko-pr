@@ -590,6 +590,7 @@ def _post_branch_header(
     *,
     head_sha: str = "",
     slot: str | None = None,
+    promoted: bool = False,
 ) -> tuple[str | None, int | None]:
     """Post a model-labelled header issue comment for one A/B branch (best-effort).
 
@@ -612,7 +613,14 @@ def _post_branch_header(
     if not token:
         return None, None
     base = api_url.rstrip("/")
-    receipt = RunReceipt(label=label, role=role, slot=slot, head_sha=head_sha, state="in_progress")
+    receipt = RunReceipt(
+        label=label,
+        role=role,
+        slot=slot,
+        promoted=promoted,
+        head_sha=head_sha,
+        state="in_progress",
+    )
     try:
         resp = httpx.post(
             f"{base}/repos/{pr.repo}/issues/{pr.number}/comments",
@@ -644,6 +652,7 @@ def _finalize_branch_header(
     head_sha: str,
     slot: str | None,
     result: InvokeResult,
+    promoted: bool = False,
 ) -> None:
     """Rewrite the branch header's receipt with the branch's outcome (best-effort).
 
@@ -663,6 +672,7 @@ def _finalize_branch_header(
         label=label,
         role=role,
         slot=slot,
+        promoted=promoted,
         head_sha=head_sha,
         state="done" if result.returncode == 0 else "failed",
         # `provider` is the pool entry that actually answered, so a promoted
@@ -796,6 +806,88 @@ def _run_pool(
     return result
 
 
+def _has_identity(entry: ModelConfig) -> bool:
+    """Whether ``entry`` names a ``token_env`` that resolves to a non-empty token.
+
+    A cheap, offline pre-check. :func:`_resolve_branch_identities` remains the
+    authority (it also proves the tokens map to *distinct* actors, which needs
+    the network); this exists so :func:`plan_escalation` can decide whether a
+    promotion would destroy concurrency without making an API call per candidate.
+    """
+    token_env = getattr(entry, "token_env", None)
+    return bool(token_env and os.environ.get(token_env, ""))
+
+
+def sequential_cost_minutes(branches: int, tools: int, tool_timeout: int) -> float:
+    """Worst-case wall-clock, in minutes, of running ``branches`` sequentially.
+
+    The concurrent path costs roughly one branch's time; this is what the run
+    degrades to when identity resolution fails, and it is the number that has to
+    fit inside the CI job's cap.
+    """
+    return branches * tools * tool_timeout / 60.0
+
+
+def plan_escalation(
+    actives: list[ReviewModel],
+    backups: list[ReviewModel],
+    review: ReviewConfig,
+    *,
+    concurrent: bool,
+) -> tuple[list[ReviewModel], list[str]]:
+    """Return ``(backups_to_promote, reasons_skipped)`` for one escalated round.
+
+    Escalation exists to ADD review coverage when external reviewers degrade. It
+    used to promote every backup unconditionally, which could remove more than it
+    added (#106):
+
+    * **Identity.** A backup carries no ``token_env`` by design -- it posts under
+      the identity of the branch it rescues. Promoting it to a branch of its own
+      gives the run an identity-less branch, and concurrency is all-or-nothing, so
+      :func:`_resolve_branch_identities` returns ``None`` and *every* branch
+      collapses onto one token. One extra reviewer is bought by making the whole
+      fleet post under a single App -- the property that makes multi-instance
+      review legible. Skipping the promotion is the fail-closed choice: it
+      declines the addition rather than silently degrading what already works.
+    * **Budget.** Sequential cost is ``branches * len(tools) * tool_timeout``.
+      Promotion adds branches the configured cap was never computed against, and
+      overrunning kills the job mid-review -- a starved round that is
+      indistinguishable from a clean one.
+
+    ``concurrent`` says whether the *unescalated* actives can run concurrently. If
+    they cannot, the run is already sequential and an identity-less promotion
+    costs nothing, so the identity rule does not apply -- the budget rule still
+    does.
+
+    Promotions are considered in config order and accepted one at a time, so a
+    budget that holds two of three backups promotes those two rather than
+    refusing all of them.
+    """
+    tools = len(review.tools) or 1
+    budget = review.job_budget_minutes
+    promote: list[ReviewModel] = []
+    reasons: list[str] = []
+
+    for entry in backups:
+        label = f"{entry.provider}/{entry.name}"
+        if concurrent and not _has_identity(entry):
+            reasons.append(
+                f"{label}: no resolvable token_env, and promoting it would collapse "
+                "the whole round to a single identity (concurrency is all-or-nothing). "
+                "Give this entry its own token_env to let escalation use it"
+            )
+            continue
+        cost = sequential_cost_minutes(len(actives) + len(promote) + 1, tools, review.tool_timeout)
+        if budget is not None and cost > budget:
+            reasons.append(
+                f"{label}: promoting it needs ~{cost:.0f}m sequential worst case, over "
+                f"the {budget}m job budget"
+            )
+            continue
+        promote.append(entry.model_copy(update={"role": "active", "promoted": True}))
+    return promote, reasons
+
+
 def _resolve_branch_identities(actives: list[ReviewModel], api_url: str) -> list[str] | None:
     """Return one distinct-identity GitHub token per branch, or ``None`` (sequential).
 
@@ -863,7 +955,14 @@ def _run_compare_branch(
     comment_id: int | None = None
     try:
         actor, comment_id = _post_branch_header(
-            pr, token, api_url, label, entry.role, head_sha=head_sha, slot=slot
+            pr,
+            token,
+            api_url,
+            label,
+            entry.role,
+            head_sha=head_sha,
+            slot=slot,
+            promoted=bool(getattr(entry, "promoted", False)),
         )
         result = _run_pool(
             backend,
@@ -896,6 +995,7 @@ def _run_compare_branch(
             head_sha=head_sha,
             slot=slot,
             result=failed,
+            promoted=bool(getattr(entry, "promoted", False)),
         )
         return label, failed
     _finalize_branch_header(
@@ -908,6 +1008,7 @@ def _run_compare_branch(
         head_sha=head_sha,
         slot=slot,
         result=result,
+        promoted=bool(getattr(entry, "promoted", False)),
     )
     return label, result
 
@@ -1007,7 +1108,14 @@ def _review_compare(
             # no receipt to rewrite because none was ever created.
             try:
                 actor, comment_id = _post_branch_header(
-                    pr, token, api_url, label, entry.role, head_sha=head_sha, slot=slot
+                    pr,
+                    token,
+                    api_url,
+                    label,
+                    entry.role,
+                    head_sha=head_sha,
+                    slot=slot,
+                    promoted=bool(getattr(entry, "promoted", False)),
                 )
                 result = _run_pool(
                     backend,
@@ -1040,6 +1148,7 @@ def _review_compare(
                 head_sha=head_sha,
                 slot=slot,
                 result=result,
+                promoted=bool(getattr(entry, "promoted", False)),
             )
             outcomes.append((label, result))
 
@@ -1096,14 +1205,18 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
 
     Next-round escalation: when the previous round observed an external reviewer
     in a degraded state (:func:`sidecar.status.escalation_needed` over the
-    persisted :mod:`sidecar.reviewer_health` rows), every backup is promoted to
-    active for this round -- the PR is losing outside review coverage, so the
-    extra models run as their own branches instead of waiting for a throttle.
-    A promoted backup without a distinct ``token_env`` identity makes the round
-    run sequentially (the concurrency gate is all-or-nothing); escalated rounds
-    are expected to be rare enough that this is an acceptable trade. At the end
-    of every run the current reviewer states are observed and persisted for the
-    next round (:func:`_observe_reviewer_health`).
+    persisted :mod:`sidecar.reviewer_health` rows), backups are promoted to active
+    for this round -- the PR is losing outside review coverage, so the extra
+    models run as their own branches instead of waiting for a throttle.
+
+    Which backups is decided by :func:`plan_escalation`, not "all of them" (#106).
+    A promotion is declined when it would collapse concurrency (a backup carries
+    no ``token_env``, and the concurrency gate is all-or-nothing, so one
+    identity-less branch makes the WHOLE fleet post under a single App) or when it
+    would push the sequential worst case past ``[review].job_budget_minutes``. The
+    computed arithmetic is logged either way, so the budget is printed rather than
+    remembered. At the end of every run the current reviewer states are observed
+    and persisted for the next round (:func:`_observe_reviewer_health`).
     """
     cfg: FukoConfig = load_config(config_path)
     pr = parse_pr_url(pr_url)
@@ -1121,14 +1234,39 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
     actives, backups, trials = partition_roles(resolve_models(cfg.review))
 
     if backups and escalation_needed(_rh_states(pr.repo)):
-        promoted = ", ".join(f"{m.provider}/{m.name}" for m in backups)
+        # Whether the UNESCALATED actives can run concurrently decides whether an
+        # identity-less promotion costs anything; resolved before promoting so the
+        # answer describes the fleet as configured, not as escalation left it.
+        concurrent = len(actives) > 1 and _resolve_branch_identities(actives, api_url) is not None
+        promote, skipped = plan_escalation(actives, backups, cfg.review, concurrent=concurrent)
+        # Print the arithmetic either way. This budget is a function of the backup
+        # count, and every time it has been carried in a human's head instead it
+        # has gone stale (#106).
+        tools = len(cfg.review.tools) or 1
+        branches = len(actives) + len(promote)
+        cost = sequential_cost_minutes(branches, tools, cfg.review.tool_timeout)
         print(
-            "fuko: external reviewers degraded last round — promoting backup "
-            f"model(s) to active for this round: {promoted}",
+            "fuko: external reviewers degraded last round — escalation considered "
+            f"{len(backups)} backup(s), promoting {len(promote)}; sequential worst "
+            f"case {cost:.0f}m ({branches} branches x {tools} tools x "
+            f"{cfg.review.tool_timeout}s), budget "
+            f"{cfg.review.job_budget_minutes or 'unset'}",
             file=sys.stderr,
         )
-        actives = [*actives, *(m.model_copy(update={"role": "active"}) for m in backups)]
-        backups = []
+        for reason in skipped:
+            print(f"fuko: promotion SKIPPED — {reason}", file=sys.stderr)
+        if promote:
+            print(
+                "fuko: promoted "
+                + ", ".join(f"{m.provider}/{m.name}" for m in promote)
+                + " to active for this round",
+                file=sys.stderr,
+            )
+        actives = [*actives, *promote]
+        # Only entries that were NOT promoted stay available as shared failover
+        # targets; a promoted one is now running as its own branch.
+        promoted_labels = {f"{m.provider}/{m.name}" for m in promote}
+        backups = [m for m in backups if f"{m.provider}/{m.name}" not in promoted_labels]
 
     reviewers = [*actives, *trials]
 

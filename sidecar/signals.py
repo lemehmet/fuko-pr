@@ -106,6 +106,15 @@ class RunReceipt(BaseModel):
     slot: str | None = Field(
         default=None, description="A/B slot identifier, when the branch occupies one."
     )
+    promoted: bool = Field(
+        default=False,
+        description=(
+            "Whether this branch is a backup that escalation promoted to active for "
+            "the round. Such a branch has no slot of its own, so without this a "
+            "consumer sees a null slot beside role='active' and cannot tell a "
+            "promoted backup from a misconfigured active."
+        ),
+    )
     head_sha: str = Field(
         default="",
         description=(
