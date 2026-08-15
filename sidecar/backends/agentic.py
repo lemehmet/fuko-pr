@@ -28,8 +28,10 @@ than errors so a shared ``[review].tools`` list keeps working.
 from __future__ import annotations
 
 import os
+import random
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -63,6 +65,32 @@ from ..reviewer.prompt import (
 from ..signals import ReviewSignal, make_id, with_marker, with_visible_label
 from ..throttle import is_throttle
 from .base import InvokeResult, PRRef
+
+#: The heading every agentic review body opens with. Used as the read-back
+#: fingerprint that tells OUR review apart from another reviewer's.
+_REVIEW_HEADER = "## fuko agentic review"
+
+#: Statuses worth another attempt: GitHub is briefly unavailable, not refusing.
+#: 4xx is deliberately excluded -- a 422 has its own body-only degrade path, and
+#: a 401/403 will not improve by repetition.
+_TRANSIENT_STATUSES = frozenset({502, 503, 504})
+
+#: Errors that provably never reached the server, so a retry cannot duplicate a
+#: committed review. Anything else (a read timeout, a connection broken
+#: mid-response) is AMBIGUOUS and goes through the read-back first.
+_SAFE_TO_RETRY_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout)
+
+#: Small and bounded, so the whole retry budget stays far inside
+#: `[review].tool_timeout` -- this exists to survive a blip, not to wait out an
+#: outage.
+_POST_ATTEMPTS = 3
+_BACKOFF_BASE_SECONDS = 0.5
+
+
+def _backoff_delay(attempt: int) -> float:
+    """Exponential backoff with jitter, in seconds, for retry ``attempt``."""
+    return _BACKOFF_BASE_SECONDS * (2**attempt) * (0.5 + random.random() / 2)
+
 
 _ENV_MODEL = "FUKO_AGENTIC_MODEL"
 _ENV_INSTRUCTIONS = "FUKO_AGENTIC_INSTRUCTIONS"
@@ -593,7 +621,7 @@ class AgenticBackend:
         }
         if token:
             headers["Authorization"] = "Bearer " + token
-        body_parts = ["## fuko agentic review", "", stash.summary or "(no summary)"]
+        body_parts = [_REVIEW_HEADER, "", stash.summary or "(no summary)"]
         if overflow:
             body_parts += ["", "### Findings without a diff anchor", ""]
             body_parts += [
@@ -621,11 +649,90 @@ class AgenticBackend:
         try:
             return self._post(url, headers, payload, inline)
         except httpx.HTTPError as e:
-            # A transport failure (DNS, reset, read timeout) is the same outcome
-            # as a rejected post: nothing reached the PR. Report it like one, so
-            # normalize_output returns no signals rather than phantom findings.
+            # A transport failure that survived the retry budget. Report it as a
+            # failed post so normalize_output returns no signals rather than
+            # phantom findings.
             print(f"fuko: agentic review post failed (transport): {e}", file=sys.stderr)
             return False
+
+    def _review_already_posted(self, client: httpx.Client, url: str, payload: dict) -> bool:
+        """Whether OUR review for this commit is already on the PR.
+
+        The read-back that makes a retry safe. ``POST /pulls/{n}/reviews`` is NOT
+        idempotent, and the failure a retry exists to fix -- a response lost after
+        the server committed -- is exactly the one where you cannot tell whether
+        the first attempt landed. Retrying blindly would duplicate every inline
+        comment and every marker, which downstream signal extraction would then
+        read as two findings where there is one (#103).
+
+        Matching is on ``commit_id`` plus our own review header, so it cannot
+        mistake another reviewer's review (or our own review of an earlier HEAD)
+        for this one. Costs one request, and only on the failure path.
+        """
+        try:
+            resp = client.get(url, params={"per_page": 100})
+            resp.raise_for_status()
+            reviews = resp.json()
+        except (httpx.HTTPError, ValueError) as e:
+            # Unknown rather than "no": fail toward NOT retrying, since a
+            # duplicate review is worse than a missing one we already logged.
+            print(f"fuko: could not read back agentic review state: {e}", file=sys.stderr)
+            return True
+        head = payload.get("commit_id")
+        return any(
+            r.get("commit_id") == head and _REVIEW_HEADER in (r.get("body") or "")
+            for r in reviews
+            if isinstance(r, dict)
+        )
+
+    def _send_review(self, client: httpx.Client, url: str, payload: dict) -> httpx.Response | None:
+        """POST the review with a bounded retry for transient failures only.
+
+        Retried: 502/503/504, and connection errors that provably never reached
+        the server. NOT retried: any other 4xx -- a 422 has its own body-only
+        degrade path and a 401/403 will not improve by repetition.
+
+        A read timeout or a broken connection mid-response is AMBIGUOUS: the
+        request may already have been committed. Those consult
+        :meth:`_review_already_posted` before retrying, and stop if the review
+        landed. Returns ``None`` when the review is known (or assumed) to be on
+        the PR already, so the caller reports success without posting twice.
+        """
+        last = _POST_ATTEMPTS - 1
+        for attempt in range(_POST_ATTEMPTS):
+            try:
+                resp = client.post(url, json=payload)
+            except _SAFE_TO_RETRY_ERRORS as e:
+                # Never reached the server: nothing can have been committed.
+                if attempt == last:
+                    raise
+                print(
+                    f"fuko: review post attempt {attempt + 1} failed ({e}); retrying",
+                    file=sys.stderr,
+                )
+            except httpx.HTTPError as e:
+                if self._review_already_posted(client, url, payload):
+                    print(
+                        f"fuko: review post response lost ({e}) but the review is "
+                        "on the PR; not re-posting",
+                        file=sys.stderr,
+                    )
+                    return None
+                if attempt == last:
+                    raise
+                print(
+                    f"fuko: review post attempt {attempt + 1} lost ({e}); retrying", file=sys.stderr
+                )
+            else:
+                if resp.status_code in _TRANSIENT_STATUSES and attempt != last:
+                    print(
+                        f"fuko: review post attempt {attempt + 1} got {resp.status_code}; retrying",
+                        file=sys.stderr,
+                    )
+                else:
+                    return resp
+            time.sleep(_backoff_delay(attempt))
+        raise httpx.HTTPError("review post retries exhausted")  # pragma: no cover
 
     def _post(
         self,
@@ -636,7 +743,9 @@ class AgenticBackend:
     ) -> bool:
         """Issue the review POST, with the one body-only retry; report success."""
         with httpx.Client(timeout=60.0, headers=headers) as client:
-            resp = client.post(url, json=payload)
+            resp = self._send_review(client, url, payload)
+            if resp is None:
+                return True
             if resp.status_code == 422 and inline:
                 # A single unanchorable line 422s the whole review; degrade to
                 # body-only rather than dropping the run's findings. Re-use each
@@ -655,7 +764,9 @@ class AgenticBackend:
                         for where, (_, comment) in zip(blocks, inline, strict=True)
                     )
                 )
-                resp = client.post(url, json=payload)
+                resp = self._send_review(client, url, payload)
+                if resp is None:
+                    return True
             if resp.status_code >= 300:
                 print(
                     f"fuko: agentic review post failed ({resp.status_code}): {resp.text[:300]}",

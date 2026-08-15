@@ -336,17 +336,27 @@ def test_invoke_parse_failure_is_not_throttle(monkeypatch):
 
 
 class _FakeResponse:
-    def __init__(self, status_code, text=""):
+    def __init__(self, status_code, text="", json_body=None):
         self.status_code = status_code
         self.text = text
+        self._json = json_body
+
+    def json(self):
+        return self._json
+
+    def raise_for_status(self):
+        if self.status_code >= 300:
+            raise httpx.HTTPError(f"status {self.status_code}")
 
 
 class _FakeHttpx:
     HTTPError = httpx.HTTPError
 
-    def __init__(self, statuses):
+    def __init__(self, statuses, reviews=None):
         self.statuses = list(statuses)
         self.posts = []
+        self.gets = []
+        self.reviews = reviews or []
 
     def Client(self, **kwargs):  # noqa: N802 - mimics httpx.Client
         fake = self
@@ -360,7 +370,17 @@ class _FakeHttpx:
 
             def post(self, url, json=None):
                 fake.posts.append((url, json))
-                return _FakeResponse(fake.statuses.pop(0))
+                outcome = fake.statuses.pop(0)
+                # An entry may be an exception instance, to model a transport
+                # failure rather than an HTTP status.
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                return _FakeResponse(outcome)
+
+            def get(self, url, params=None):
+                """The read-back GET that decides whether an ambiguous retry is safe."""
+                fake.gets.append(url)
+                return _FakeResponse(200, json_body=getattr(fake, "reviews", None) or [])
 
         return _C()
 
@@ -438,6 +458,148 @@ def test_normalize_retries_body_only_on_422(monkeypatch):
     assert retry_payload["comments"] == []
     assert "leak" in retry_payload["body"]
     assert "src/app.py" in retry_payload["body"]  # the anchor it could not attach to
+
+
+# --- transient-failure retry around the NON-idempotent review POST (#103) -----
+
+
+@pytest.fixture
+def _no_sleep(monkeypatch):
+    """Retries are real code paths; their backoff is not worth real seconds."""
+    monkeypatch.setattr(agentic_mod.time, "sleep", lambda _s: None)
+
+
+def _posted_review(head="beef"):
+    return {"commit_id": head, "body": "## fuko agentic review\n\nlooked closely"}
+
+
+@pytest.mark.parametrize("status", [502, 503, 504])
+def test_normalize_retries_transient_5xx(monkeypatch, _no_sleep, status):
+    """A completed review must survive a blip, not be discarded with it."""
+    backend = AgenticBackend()
+    _seed(backend)
+    fake = _FakeHttpx([status, 200])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    signals = backend.normalize_output(PR, "claude-x", token="t")
+    assert len(signals) == 2
+    assert len(fake.posts) == 2
+
+
+def test_normalize_does_not_retry_a_4xx(monkeypatch, _no_sleep):
+    """A 403 will not improve by repetition, and a 422 has its own path."""
+    backend = AgenticBackend()
+    _seed(backend)
+    fake = _FakeHttpx([403])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    assert backend.normalize_output(PR, "claude-x", token="t") == []
+    assert len(fake.posts) == 1
+
+
+def test_normalize_retries_a_connect_error_without_reading_back(monkeypatch, _no_sleep):
+    """A connection that never opened cannot have committed a review."""
+    backend = AgenticBackend()
+    _seed(backend)
+    fake = _FakeHttpx([httpx.ConnectError("refused"), 200])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    signals = backend.normalize_output(PR, "claude-x", token="t")
+    assert len(signals) == 2
+    assert len(fake.posts) == 2
+    assert fake.gets == []  # no read-back needed for the provably-safe class
+
+
+def test_normalize_does_not_repost_when_the_lost_response_had_landed(monkeypatch, _no_sleep):
+    """THE hazard: POST /reviews is not idempotent.
+
+    A read timeout after the server committed is indistinguishable from one
+    before, so a naive retry would post the whole review twice — duplicating
+    every inline comment and every marker, which downstream extraction would
+    read as two findings where there is one.
+    """
+    backend = AgenticBackend()
+    _seed(backend)
+    fake = _FakeHttpx([httpx.ReadTimeout("lost"), 200], reviews=[_posted_review()])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    signals = backend.normalize_output(PR, "claude-x", token="t")
+
+    assert len(fake.posts) == 1  # NOT re-posted
+    assert len(fake.gets) == 1  # the read-back happened
+    assert len(signals) == 2  # and the findings are still reported
+
+
+def test_normalize_retries_a_lost_response_that_did_not_land(monkeypatch, _no_sleep):
+    """Ambiguous, but the read-back proves nothing was committed: retry is safe."""
+    backend = AgenticBackend()
+    _seed(backend)
+    fake = _FakeHttpx([httpx.ReadTimeout("lost"), 200], reviews=[])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    signals = backend.normalize_output(PR, "claude-x", token="t")
+    assert len(fake.posts) == 2
+    assert len(signals) == 2
+
+
+def test_read_back_ignores_a_review_for_another_commit(monkeypatch, _no_sleep):
+    """Our review of an EARLIER head must not be mistaken for this one."""
+    backend = AgenticBackend()
+    _seed(backend)
+    fake = _FakeHttpx([httpx.ReadTimeout("lost"), 200], reviews=[_posted_review(head="older")])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    backend.normalize_output(PR, "claude-x", token="t")
+    assert len(fake.posts) == 2  # not ours for this head -> retry
+
+
+def test_read_back_ignores_another_reviewers_review(monkeypatch, _no_sleep):
+    """CodeRabbit reviewing the same commit is not evidence that we posted."""
+    backend = AgenticBackend()
+    _seed(backend)
+    other = {"commit_id": "beef", "body": "**Actionable comments posted: 2**"}
+    fake = _FakeHttpx([httpx.ReadTimeout("lost"), 200], reviews=[other])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    backend.normalize_output(PR, "claude-x", token="t")
+    assert len(fake.posts) == 2
+
+
+def test_unreadable_read_back_declines_to_retry(monkeypatch, _no_sleep):
+    """Unknown is not "no": a duplicate review is worse than a missing one.
+
+    The read-back itself failing leaves us unable to tell whether the review
+    landed, so the safe move is to stop rather than risk posting twice.
+    """
+    backend = AgenticBackend()
+    _seed(backend)
+
+    class _Broken(_FakeHttpx):
+        def Client(self, **kwargs):  # noqa: N802
+            outer = super().Client(**kwargs)
+
+            class _C:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def post(self, url, json=None):
+                    return outer.__enter__().post(url, json=json)
+
+                def get(self, url, params=None):
+                    raise httpx.HTTPError("read-back down")
+
+            return _C()
+
+    fake = _Broken([httpx.ReadTimeout("lost"), 200])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    backend.normalize_output(PR, "claude-x", token="t")
+    assert len(fake.posts) == 1  # declined to retry
+
+
+def test_retry_budget_is_bounded(monkeypatch, _no_sleep):
+    """A persistent outage must fail, not spin — the budget stays inside tool_timeout."""
+    backend = AgenticBackend()
+    _seed(backend)
+    fake = _FakeHttpx([503, 503, 503])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    assert backend.normalize_output(PR, "claude-x", token="t") == []
+    assert len(fake.posts) == agentic_mod._POST_ATTEMPTS
 
 
 def test_normalize_body_only_fallback_keeps_markers(monkeypatch):
