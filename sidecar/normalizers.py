@@ -110,7 +110,18 @@ def pragent_signals(comments: list[dict], model: str = "") -> list[dict]:
 
 
 _COPILOT_LOGINS = {"copilot", "copilot-pull-request-reviewer[bot]"}
-_SECURITY_RE = re.compile(r"secur|vulnerab|inject|xss|csrf|secret|password|creden", re.I)
+# `attack|malicious|traversal|exfiltrat` were added from a real miss: the
+# symlink-attack finding in #100's suppressed block (see the fixture in
+# tests/test_normalizers.py) names neither "security" nor any credential word, so
+# it inferred as a plain bug -- and a consumer filtering on category == "security"
+# would have skipped a symlink attack on cleanup code running over an untrusted
+# checkout. Kept to terms that are unambiguously about an adversary; "escalation"
+# in particular is NOT here, because in this codebase it means backup promotion.
+_SECURITY_RE = re.compile(
+    r"secur|vulnerab|inject|xss|csrf|secret|password|creden"
+    r"|attack|malicious|traversal|exfiltrat",
+    re.I,
+)
 _PERF_RE = re.compile(r"perform|latency|memory leak|n\+1|\bslow\b|\bO\(", re.I)
 
 
@@ -151,6 +162,103 @@ def copilot_signal(comment: dict) -> ReviewSignal:
         backend="copilot",
         model="",
     )
+
+
+# Copilot's collapsed "Suppressed comments (N)" block, which rides in the REVIEW
+# BODY of a review whose visible prose says it "generated no new comments".
+# Verified against this repo's own history (#80, #92, #98, #100): on #100 that
+# block held three real findings, including a symlink-attack security issue.
+# Matched on the WORD "suppress" anywhere in the summary, not on one exact
+# phrase. Copilot uses at least two wordings for the same block -- "Suppressed
+# comments (N)" (#98, #100) and "Comments suppressed due to low confidence (N)"
+# (#80, #92) -- and an exact-phrase pattern silently found nothing on half of
+# them. This is the same failure shape as #86, where matching CodeRabbit's hourly
+# rate-limit wording missed its Fair Usage variant entirely: a vendor's prose is
+# not a stable key, so match the smallest invariant part of it.
+_COPILOT_SUPPRESSED_RE = re.compile(
+    r"<details>\s*<summary>[^<]*suppress[^<]*</summary>(.*?)</details>",
+    re.I | re.S,
+)
+# Each entry opens with a bolded `**path/to/file.py:123**` anchor line.
+_COPILOT_SUPPRESSED_ENTRY_RE = re.compile(r"^\*\*(?P<path>[^*\n]+?):(?P<line>\d+)\*\*\s*$", re.M)
+
+
+def copilot_suppressed_signals(review: dict) -> list[ReviewSignal]:
+    """Extract findings from a Copilot review's collapsed "Suppressed comments" block.
+
+    A Copilot review body reading "generated no new comments" is NOT a clean
+    review until this block is expanded (#109). The items inside are real
+    findings that Copilot chose not to promote to inline comments, so a consumer
+    counting Copilot from its visible body under-reports it -- and Copilot is the
+    fleet's main independent-harness reviewer, so the findings lost here are
+    disproportionately the ones no fuko seat would have produced.
+
+    Signals carry ``suppressed=True`` rather than being merged indistinguishably
+    into the promoted findings: Copilot demoted them for a reason and a consumer
+    may reasonably weight them lower, but it has to be able to SEE them before it
+    can weigh them. Hiding them is the failure this closes; flattening them would
+    be a quieter version of the same mistake.
+    """
+    body = review.get("body", "") or ""
+    out: list[ReviewSignal] = []
+    for block in _COPILOT_SUPPRESSED_RE.finditer(body):
+        inner = block.group(1)
+        anchors = list(_COPILOT_SUPPRESSED_ENTRY_RE.finditer(inner))
+        for index, anchor in enumerate(anchors):
+            end = anchors[index + 1].start() if index + 1 < len(anchors) else len(inner)
+            text = inner[anchor.end() : end].strip()
+            path = anchor.group("path").strip()
+            line = int(anchor.group("line"))
+            # Entries are written as a markdown bullet; the leading marker is
+            # presentation, not content.
+            title = re.sub(r"^[*\-]\s*", "", text.split("\n", 1)[0]).strip()[:200]
+            out.append(
+                ReviewSignal(
+                    id=make_id(path, str(line), title),
+                    file=path,
+                    line=line,
+                    severity="medium",
+                    severity_source="inferred",
+                    category=_infer_category(text),
+                    title=title,
+                    body=text,
+                    suggestion="```suggestion" in text,
+                    thread_url=review.get("html_url"),
+                    backend="copilot",
+                    model="",
+                    suppressed=True,
+                )
+            )
+    return out
+
+
+def collect_review_signals(reviews: list[dict], model: str = "") -> list[ReviewSignal]:
+    """Collect findings carried in submitted review BODIES rather than inline comments.
+
+    `fuko signals` read inline comments and issue comments only, so this whole
+    channel was invisible. Two things live here:
+
+    * Copilot's collapsed suppressed-comments block (#109).
+    * **fuko's own agentic review body.** The agentic backend attaches a marker to
+      every finding BEFORE choosing inline vs body, so unanchored findings -- about
+      callers, cleanup paths, missing tests, exactly the class that reviewer exists
+      to produce -- are marked and posted in the review body. Nothing read them
+      back, so they were emitted as signals by `normalize_output` and then
+      unrecoverable from the PR.
+
+    Both were diagnosed by Copilot on #100, in a suppressed comment we could not
+    read because the block it sat in was itself unparsed.
+    """
+    out: list[ReviewSignal] = []
+    for review in reviews:
+        body = review.get("body", "") or ""
+        if is_copilot_comment(review):
+            out.extend(copilot_suppressed_signals(review))
+        for marker in extract_markers(body):
+            if not marker.thread_url:
+                marker.thread_url = review.get("html_url")
+            out.append(marker)
+    return out
 
 
 _CODERABBIT_LOGIN = "coderabbitai[bot]"

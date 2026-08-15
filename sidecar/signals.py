@@ -47,6 +47,17 @@ class ReviewSignal(BaseModel):
     title: str = ""
     body: str = ""
     suggestion: bool = False
+    suppressed: bool = Field(
+        default=False,
+        description=(
+            "Whether the reviewer demoted this finding out of its promoted output -- "
+            "today, Copilot's collapsed 'Suppressed comments' block, which rides in a "
+            "review body whose prose says it generated no new comments. Surfaced as a "
+            "distinct sub-source rather than merged in: the reviewer demoted it for a "
+            "reason and a consumer may weight it lower, but it has to SEE the finding "
+            "before it can weigh it."
+        ),
+    )
     thread_url: str | None = None
     backend: str = ""
     model: str = ""

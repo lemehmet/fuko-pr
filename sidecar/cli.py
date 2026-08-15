@@ -99,7 +99,11 @@ def _cmd_signals(args) -> None:
 
     from . import runner
     from .fukoconfig import load_config
-    from .normalizers import collect_issue_comment_signals, collect_signals
+    from .normalizers import (
+        collect_issue_comment_signals,
+        collect_review_signals,
+        collect_signals,
+    )
     from .presets import UnknownPresetError, get_preset
 
     cfg = load_config(args.config)
@@ -116,11 +120,16 @@ def _cmd_signals(args) -> None:
     try:
         comments = runner.fetch_inline_comments(pr, token, api_url)
         issue_comments = runner.fetch_issue_comments(pr, token, api_url)
+        # Review BODIES are a third channel, not a duplicate of the first two:
+        # Copilot's suppressed-comments block lives only here (#109).
+        reviews = runner.fetch_reviews(pr, token, api_url)
     except httpx.HTTPStatusError as e:
         _exit_on_auth_error(e, pr, token)
 
-    signals = collect_signals(comments, model) + collect_issue_comment_signals(
-        issue_comments, model
+    signals = (
+        collect_signals(comments, model)
+        + collect_issue_comment_signals(issue_comments, model)
+        + collect_review_signals(reviews, model)
     )
     _warn_on_dropped_comments(comments, model)
     print(json.dumps([s.model_dump() for s in signals], indent=2))

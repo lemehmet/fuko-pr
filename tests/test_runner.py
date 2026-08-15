@@ -488,12 +488,50 @@ def test_cmd_signals_emits_json(monkeypatch, tmp_path, capsys):
     ]
     monkeypatch.setattr(runner, "fetch_inline_comments", lambda pr, token, api: comments)
     monkeypatch.setattr(runner, "fetch_issue_comments", lambda pr, token, api: [])
+    monkeypatch.setattr(runner, "fetch_reviews", lambda pr, token, api: [])
     cli._cmd_signals(argparse.Namespace(pr_url="https://github.com/o/r/pull/8", config=str(cfg)))
 
     out = json.loads(capsys.readouterr().out)
     assert len(out) == 1
     assert out[0]["backend"] == "copilot"
     assert out[0]["file"] == "a.ts"
+
+
+def test_cmd_signals_surfaces_copilot_suppressed_findings(monkeypatch, tmp_path, capsys):
+    """#109 end-to-end: the review-body channel was never fetched at all.
+
+    A Copilot review whose prose says it "generated no new comments" while its
+    collapsed block carries findings must not come back empty.
+    """
+    import argparse
+    import json
+
+    from sidecar import cli
+
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text('[review.model]\nprovider = "anthropic"\nname = "claude"\n', encoding="utf-8")
+    review = {
+        "user": {"login": "copilot-pull-request-reviewer[bot]"},
+        "html_url": "https://github.com/o/r/pull/8#pullrequestreview-9",
+        "body": (
+            "Copilot reviewed 3 files and generated no new comments.\n\n"
+            "<details>\n<summary>Suppressed comments (1)</summary>\n\n"
+            "**src/app.py:12**\n* A malicious input reaches the parser unchecked.\n"
+            "</details>\n"
+        ),
+    }
+    monkeypatch.setattr(runner, "fetch_inline_comments", lambda pr, token, api: [])
+    monkeypatch.setattr(runner, "fetch_issue_comments", lambda pr, token, api: [])
+    monkeypatch.setattr(runner, "fetch_reviews", lambda pr, token, api: [review])
+    cli._cmd_signals(argparse.Namespace(pr_url="https://github.com/o/r/pull/8", config=str(cfg)))
+
+    out = json.loads(capsys.readouterr().out)
+    assert len(out) == 1
+    assert out[0]["backend"] == "copilot"
+    assert out[0]["file"] == "src/app.py"
+    assert out[0]["line"] == 12
+    assert out[0]["suppressed"] is True
+    assert out[0]["category"] == "security"
 
 
 def test_cmd_signals_merges_issue_comment_markers(monkeypatch, tmp_path, capsys):
@@ -517,6 +555,7 @@ def test_cmd_signals_merges_issue_comment_markers(monkeypatch, tmp_path, capsys)
     ]
     monkeypatch.setattr(runner, "fetch_inline_comments", lambda pr, token, api: inline)
     monkeypatch.setattr(runner, "fetch_issue_comments", lambda pr, token, api: issue)
+    monkeypatch.setattr(runner, "fetch_reviews", lambda pr, token, api: [])
     cli._cmd_signals(argparse.Namespace(pr_url="https://github.com/o/r/pull/8", config=str(cfg)))
 
     out = json.loads(capsys.readouterr().out)
@@ -544,6 +583,7 @@ def test_cmd_signals_warns_about_unreadable_bot_comments(monkeypatch, tmp_path, 
     ]
     monkeypatch.setattr(runner, "fetch_inline_comments", lambda pr, token, api: inline)
     monkeypatch.setattr(runner, "fetch_issue_comments", lambda pr, token, api: [])
+    monkeypatch.setattr(runner, "fetch_reviews", lambda pr, token, api: [])
     cli._cmd_signals(argparse.Namespace(pr_url="https://github.com/o/r/pull/8", config=str(cfg)))
 
     captured = capsys.readouterr()
@@ -565,6 +605,7 @@ def test_cmd_signals_is_quiet_when_every_bot_comment_is_read(monkeypatch, tmp_pa
     ]
     monkeypatch.setattr(runner, "fetch_inline_comments", lambda pr, token, api: inline)
     monkeypatch.setattr(runner, "fetch_issue_comments", lambda pr, token, api: [])
+    monkeypatch.setattr(runner, "fetch_reviews", lambda pr, token, api: [])
     cli._cmd_signals(argparse.Namespace(pr_url="https://github.com/o/r/pull/8", config=str(cfg)))
 
     assert capsys.readouterr().err == ""
