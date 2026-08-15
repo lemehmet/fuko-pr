@@ -829,7 +829,7 @@ def sequential_cost_minutes(branches: int, tools: int, tool_timeout: int) -> flo
 
 
 def plan_escalation(
-    actives: list[ReviewModel],
+    existing: list[ReviewModel],
     backups: list[ReviewModel],
     review: ReviewConfig,
     *,
@@ -854,7 +854,12 @@ def plan_escalation(
       overrunning kills the job mid-review -- a starved round that is
       indistinguishable from a clean one.
 
-    ``concurrent`` says whether the *unescalated* actives can run concurrently. If
+    ``existing`` is every entry that ALREADY starts a branch -- actives and
+    trials both, since a trial runs its own branch exactly like an active and so
+    consumes the same budget and participates in the same all-or-nothing identity
+    gate.
+
+    ``concurrent`` says whether the *unescalated* fleet can run concurrently. If
     they cannot, the run is already sequential and an identity-less promotion
     costs nothing, so the identity rule does not apply -- the budget rule still
     does.
@@ -877,7 +882,7 @@ def plan_escalation(
                 "Give this entry its own token_env to let escalation use it"
             )
             continue
-        cost = sequential_cost_minutes(len(actives) + len(promote) + 1, tools, review.tool_timeout)
+        cost = sequential_cost_minutes(len(existing) + len(promote) + 1, tools, review.tool_timeout)
         if budget is not None and cost > budget:
             reasons.append(
                 f"{label}: promoting it needs ~{cost:.0f}m sequential worst case, over "
@@ -1234,16 +1239,22 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
     actives, backups, trials = partition_roles(resolve_models(cfg.review))
 
     if backups and escalation_needed(_rh_states(pr.repo)):
-        # Whether the UNESCALATED actives can run concurrently decides whether an
+        # TRIALS COUNT. `reviewers` below is `[*actives, *trials]`, so a trial
+        # starts a branch exactly like an active does: it consumes budget, and it
+        # participates in the all-or-nothing identity gate. Planning against
+        # `actives` alone would undercount the branches and could read the
+        # execution mode off a set that is not the one that runs.
+        existing = [*actives, *trials]
+        # Whether the UNESCALATED fleet can run concurrently decides whether an
         # identity-less promotion costs anything; resolved before promoting so the
         # answer describes the fleet as configured, not as escalation left it.
-        concurrent = len(actives) > 1 and _resolve_branch_identities(actives, api_url) is not None
-        promote, skipped = plan_escalation(actives, backups, cfg.review, concurrent=concurrent)
+        concurrent = len(existing) > 1 and _resolve_branch_identities(existing, api_url) is not None
+        promote, skipped = plan_escalation(existing, backups, cfg.review, concurrent=concurrent)
         # Print the arithmetic either way. This budget is a function of the backup
         # count, and every time it has been carried in a human's head instead it
         # has gone stale (#106).
         tools = len(cfg.review.tools) or 1
-        branches = len(actives) + len(promote)
+        branches = len(existing) + len(promote)
         cost = sequential_cost_minutes(branches, tools, cfg.review.tool_timeout)
         print(
             "fuko: external reviewers degraded last round — escalation considered "

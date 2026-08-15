@@ -277,6 +277,28 @@ def test_escalation_promotes_identity_less_backup_when_already_sequential(monkey
     assert reasons == []
 
 
+def test_escalation_counts_trials_as_branches(monkeypatch):
+    """A trial starts its own branch, so it spends budget like an active does.
+
+    Planning against `actives` alone undercounts branches — the runner builds
+    `[*actives, *trials]` — so a budget check would pass a promotion the job
+    cannot actually hold.
+    """
+    from sidecar.fukoconfig import ReviewConfig
+
+    for name in ("T_A", "T_T", "T_C"):
+        monkeypatch.setenv(name, f"tok-{name}")
+    existing = _models(("p", "a", "active", "T_A"), ("p", "t", "trial", "T_T"))
+    backups = _models(("p", "c", "backup", "T_C"))
+    # 2 existing + 1 promoted = 3 branches x 2 x 600s = 60m, over a 50m budget.
+    review = ReviewConfig(tool_timeout=600, job_budget_minutes=50)
+
+    promote, reasons = runner.plan_escalation(existing, backups, review, concurrent=True)
+
+    assert promote == []
+    assert reasons and "over the 50m job budget" in reasons[0]
+
+
 def test_escalation_refuses_a_promotion_the_job_budget_cannot_hold(monkeypatch):
     """Budget is computed, not remembered: branches x tools x tool_timeout."""
     from sidecar.fukoconfig import ReviewConfig
