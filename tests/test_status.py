@@ -164,6 +164,48 @@ def test_coderabbit_pending_when_in_progress_phrase_only_in_stale_review_body():
     assert s["head_reviewed"] == HEAD
 
 
+def test_coderabbit_head_reviewed_is_the_range_that_covers_head():
+    """#101, reproduced from PR #100: two CR reviews, each with its own range line.
+
+    `walk_on_head` scanned every body while `walk_head` was bound from the FIRST
+    one, so once a PR had more than one CR review the reported `head_reviewed`
+    was review 1's OLD end-sha while `state` was correctly `done`.
+    """
+    older = _cr_review("11617069", body=_review_body("11617069", posted=1))
+    newer = _cr_review(HEAD, body=_review_body(HEAD, posted=2))
+    s = coderabbit_state(HEAD, [], [older, newer])
+    assert s["state"] == "done"
+    assert s["head_reviewed"] == HEAD
+    assert s["head_reviewed"] != "11617069"
+
+
+def test_coderabbit_head_reviewed_prefers_head_regardless_of_body_order():
+    """Order must not decide it — the range that covers HEAD wins wherever it sits."""
+    newer = _cr_review(HEAD, body=_review_body(HEAD, posted=2))
+    older = _cr_review("11617069", body=_review_body("11617069", posted=1))
+    assert coderabbit_state(HEAD, [], [newer, older])["head_reviewed"] == HEAD
+
+
+def test_coderabbit_head_reviewed_falls_back_to_the_newest_range_not_the_first():
+    """With no range covering HEAD, report the most recent one seen, not the oldest."""
+    first = _cr(_review_body("aaaaaaa"))
+    second = _cr(_review_body("bbbbbbb"))
+    s = coderabbit_state(HEAD, [first, second], [])
+    assert s["head_reviewed"] == "bbbbbbb"
+
+
+def test_coderabbit_reads_every_range_line_within_one_body():
+    """A single rewritten summary can carry several range lines; the last covers HEAD."""
+    body = _cr(
+        "Reviewing files that changed from the base of the PR and between `aaa1111` "
+        "and `bbb2222`.\nReviewing files that changed from the base of the PR and "
+        f"between `bbb2222` and `{HEAD}`.\n**Actionable comments posted: 0**"
+    )
+    s = coderabbit_state(HEAD, [body], [])
+    assert s["state"] == "done"
+    assert s["head_reviewed"] == HEAD
+
+
 def test_coderabbit_done_via_review_commit_id_with_marker():
     # #1333/#1326 shape: walkthrough lacks the "between … and …" line, but the CR
     # review object is on HEAD. With a terminal marker present this resolves to done.
