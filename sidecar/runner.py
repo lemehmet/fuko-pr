@@ -1184,7 +1184,7 @@ def _review_compare(
                     head_sha=head_sha,
                     slot=slot,
                     promoted=bool(getattr(entry, "promoted", False)),
-                    backend=getattr(entry_backend, "name", "pr-agent"),
+                    backend=entry.backend or review.backend,
                 )
                 result = _run_pool(
                     entry_backend,
@@ -1218,7 +1218,7 @@ def _review_compare(
                 slot=slot,
                 result=result,
                 promoted=bool(getattr(entry, "promoted", False)),
-                backend=getattr(entry_backend, "name", "pr-agent"),
+                backend=entry.backend or review.backend,
             )
             outcomes.append((label, result))
 
