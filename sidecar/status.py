@@ -58,6 +58,20 @@ _CR_REVIEWING = re.compile(r"between\s+`?([0-9a-f]{7,40})`?\s+and\s+`?([0-9a-f]{
 
 _CR_CHECK_NAMES = re.compile(r"coderabbit", re.I)
 
+# Identities a run receipt may legitimately come from. ANCHORED, and requiring
+# the `[bot]` suffix, deliberately: the loose `fuko` substring used for finding
+# TRIAGE is wrong here. Over-matching a triage pattern only pulls in extra
+# findings, but over-matching here admits forged COVERAGE -- and `fuko` as a
+# substring is claimable by any account calling itself `fukoo-imposter`.
+# GitHub forbids `[` and `]` in user names, so no human account can satisfy this;
+# minting a matching App instead requires repo-admin installation, a trusted act.
+# The `fuko-<slot>[bot]` shape still covers every instance (fuko-dorian[bot],
+# fuko-gray[bot], ...) so a new slot or an App rename cannot silently drop
+# coverage. `github-actions[bot]` is fuko's documented App-less fallback: the
+# workflow posts under it when no App is configured, and assuming it requires
+# repo write access, which an untrusted PR author does not have.
+_FUKO_RECEIPT_AUTHORS = re.compile(r"^(?:fuko-[\w.-]+\[bot\]|github-actions\[bot\])$", re.I)
+
 
 def _coderabbit_check(check_runs: list[dict] | None) -> dict | None:
     """Return CodeRabbit's check-run from ``check_runs`` (the review check), if present.
@@ -73,6 +87,19 @@ def _coderabbit_check(check_runs: list[dict] | None) -> dict | None:
         if _CR_CHECK_NAMES.search(name) or _CR_CHECK_NAMES.search(slug):
             return c
     return None
+
+
+def _receipt_author_allowed(login: str, allowed: set[str] | None) -> bool:
+    """Return whether ``login`` may assert run coverage.
+
+    An empty login is refused outright: it carries no identity to check, and the
+    unsafe direction here is accepting coverage, not rejecting it.
+    """
+    if not login:
+        return False
+    if allowed is not None:
+        return login.lower() in allowed
+    return bool(_FUKO_RECEIPT_AUTHORS.search(login))
 
 
 def _row(backend: str, state: State, head_reviewed: str | None, detail: str) -> dict:
@@ -253,7 +280,12 @@ def copilot_state(
     )
 
 
-def fuko_states(head_sha: str, issue_comments: list[dict]) -> list[dict]:
+def fuko_states(
+    head_sha: str,
+    issue_comments: list[dict],
+    *,
+    allowed_authors: Iterable[str] | None = None,
+) -> list[dict]:
     """Return one state row per fuko instance, from the run receipts on this PR.
 
     fuko's own instances were historically invisible to ``fuko status``: they are
@@ -306,9 +338,25 @@ def fuko_states(head_sha: str, issue_comments: list[dict]) -> list[dict]:
     Only the newest receipt per instance is reported. Receipts are rewritten in
     place, but a force-push or a re-run can leave an older one behind, and later
     comments are the later runs.
+
+    Receipts are **author-scoped**, like the CodeRabbit and Copilot paths above.
+    A receipt is the answer to "did this reviewer actually run?", so anyone who
+    can comment on the PR could otherwise assert coverage for a review that never
+    happened -- on a public repo, including the PR author -- and a consumer would
+    stop waiting on an instance that never started. Only comments authored by a
+    fuko App identity (or the App-less ``github-actions[bot]`` fallback the
+    workflow posts under) are read; ``allowed_authors`` overrides that default
+    with an exact-login allowlist for deployments using different identities.
+    Rejection is silent by design: an unrecognized author yields no row, which
+    reads as "this instance never ran" and withholds a merge rather than
+    granting one.
     """
+    allowed = None if allowed_authors is None else {a.strip().lower() for a in allowed_authors}
     latest: dict[str, RunReceipt] = {}
     for comment in issue_comments:
+        login = ((comment.get("user") or {}).get("login") or "").strip()
+        if not _receipt_author_allowed(login, allowed):
+            continue
         for receipt in extract_run_receipts(comment.get("body", "") or ""):
             latest[receipt.label] = receipt
 
@@ -360,6 +408,7 @@ def reviewer_states(
     check_runs: list[dict] | None = None,
     *,
     include_fuko: bool = True,
+    allowed_authors: Iterable[str] | None = None,
 ) -> list[dict]:
     """Return the normalized state of each reviewer on ``head_sha``.
 
@@ -372,13 +421,16 @@ def reviewer_states(
     ``include_fuko`` exists for one caller: :func:`sidecar.runner._observe_reviewer_health`
     records *external* reviewer health to decide backup promotion, and folding
     fuko's own instances into that would let fuko escalate in response to itself.
+
+    ``allowed_authors`` is forwarded to :func:`fuko_states` for deployments whose
+    reviewer identities don't match the default fuko-App pattern.
     """
     rows = [
         coderabbit_state(head_sha, issue_comments, reviews, check_runs),
         copilot_state(head_sha, reviews, issue_comments),
     ]
     if include_fuko:
-        rows.extend(fuko_states(head_sha, issue_comments))
+        rows.extend(fuko_states(head_sha, issue_comments, allowed_authors=allowed_authors))
     return rows
 
 

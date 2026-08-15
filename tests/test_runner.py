@@ -1979,7 +1979,11 @@ def test_primary_success_is_not_reported_as_a_promotion(monkeypatch):
         result=InvokeResult(returncode=0, provider=label),
     )
     receipt = _receipt_of(patched["body"])
-    rows = fuko_states(HEAD_FOR_RECEIPTS, [{"user": {"login": "b"}, "body": patched["body"]}])
+    # A real instance identity: receipts are author-scoped (#105), so a
+    # placeholder login would be refused before the promotion check under test.
+    rows = fuko_states(
+        HEAD_FOR_RECEIPTS, [{"user": {"login": "fuko-dorian[bot]"}, "body": patched["body"]}]
+    )
     assert receipt.model == label
     assert rows[0]["detail"] == "reviewed HEAD"  # not "reviewed HEAD as …"
 
