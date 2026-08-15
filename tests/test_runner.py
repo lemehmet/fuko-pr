@@ -1962,6 +1962,49 @@ def test_a_dying_branch_still_finalizes_its_receipt(monkeypatch):
     assert finalized["result"].returncode == 1
 
 
+def test_per_branch_backend_is_resolved_and_attributed(monkeypatch, tmp_path):
+    """#99 item 1: each branch resolves its OWN backend, and its receipt records it.
+
+    Two actives declaring different drivers run each under its own backend (not one
+    run-level backend), and each branch's finalized receipt names the driver that
+    produced it -- the attribution that makes two harnesses distinguishable
+    receipts-only.
+    """
+    from types import SimpleNamespace
+
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text(
+        "[[review.models]]\n"
+        'provider = "zai-coding"\nname = "glm-5.2"\nrole = "active"\nbackend = "pr-agent"\n'
+        "[[review.models]]\n"
+        'provider = "anthropic"\nname = "claude"\nrole = "active"\nbackend = "agentic"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GITHUB_TOKEN", "ghtok")
+    _stub_compare_io(monkeypatch)
+    resolved: list[str] = []
+    monkeypatch.setattr(
+        runner,
+        "get_backend",
+        lambda name, config=None: (resolved.append(name), SimpleNamespace(name=name))[1],
+    )
+    monkeypatch.setattr(runner, "_head_for_receipts", lambda *a: "headsha")
+    monkeypatch.setattr(runner, "_post_branch_header", lambda *a, **k: ("actor", 1))
+    monkeypatch.setattr(runner, "_run_pool", lambda *a, **k: InvokeResult(returncode=0))
+    monkeypatch.setattr(runner, "_observe_reviewer_health", lambda *a: None)
+    finals: dict[str, str] = {}
+    monkeypatch.setattr(
+        runner,
+        "_finalize_branch_header",
+        lambda pr, token, api, cid, label, role, **k: finals.__setitem__(label, k["backend"]),
+    )
+
+    runner.review("https://github.com/o/r/pull/7", str(cfg))
+
+    assert finals == {"zai-coding/glm-5.2": "pr-agent", "anthropic/claude": "agentic"}
+    assert {"pr-agent", "agentic"} <= set(resolved)
+
+
 def test_head_for_receipts_degrades_to_empty(monkeypatch, capsys):
     """An unresolvable HEAD must degrade the receipt, not fail the review."""
 
@@ -2066,7 +2109,6 @@ def test_sequential_branch_crash_finalizes_and_lets_siblings_run(monkeypatch, tm
 
     monkeypatch.setattr(runner, "_run_pool", flaky)
     result = runner._review_compare(
-        None,
         PRRef("o/r", 8, "u"),
         "",
         {},
@@ -2122,7 +2164,6 @@ def test_sequential_header_crash_does_not_kill_siblings(monkeypatch):
         )[1],
     )
     result = runner._review_compare(
-        None,
         PRRef("o/r", 8, "u"),
         "",
         {},

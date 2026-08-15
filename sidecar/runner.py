@@ -344,12 +344,17 @@ def _record_run(
     outcome: str,
     findings: int | None,
     detail: str,
+    backend: str = "pr-agent",
 ) -> None:
     """Persist one review-run metrics row (best-effort, never raises).
 
     Reaches the sidecar over HTTP when ``FUKO_URL`` is set, else the local
     Postgres module; both degrade to no-ops. Metrics are an observability
     layer -- a failure here must never affect the review that produced them.
+
+    ``backend`` attributes the row to the driver that produced it (#99); it
+    defaults to ``"pr-agent"`` so an omitting caller writes the same value the
+    ``review_runs`` backfill uses.
     """
     try:
         fuko_url, fuko_token = _cb_endpoint()
@@ -364,6 +369,7 @@ def _record_run(
             "outcome": outcome,
             "findings": findings,
             "detail": (detail or "")[:500],
+            "backend": backend,
         }
         if fuko_url:
             headers = {"Content-Type": "application/json"}
@@ -387,6 +393,7 @@ def _record_run(
                 outcome=outcome,
                 findings=findings,
                 detail=payload["detail"],
+                backend=backend,
             )
     except Exception as e:
         print(f"fuko: run-metrics record failed (continuing): {e}", file=sys.stderr)
@@ -591,6 +598,7 @@ def _post_branch_header(
     head_sha: str = "",
     slot: str | None = None,
     promoted: bool = False,
+    backend: str = "pr-agent",
 ) -> tuple[str | None, int | None]:
     """Post a model-labelled header issue comment for one A/B branch (best-effort).
 
@@ -620,6 +628,7 @@ def _post_branch_header(
         promoted=promoted,
         head_sha=head_sha,
         state="in_progress",
+        backend=backend,
     )
     try:
         resp = httpx.post(
@@ -653,6 +662,7 @@ def _finalize_branch_header(
     slot: str | None,
     result: InvokeResult,
     promoted: bool = False,
+    backend: str = "pr-agent",
 ) -> None:
     """Rewrite the branch header's receipt with the branch's outcome (best-effort).
 
@@ -682,6 +692,7 @@ def _finalize_branch_header(
         # per-channel map is the only place that failure is still visible (#108).
         channels=dict(result.channels),
         detail=result.detail or "",
+        backend=backend,
     )
     base = api_url.rstrip("/")
     try:
@@ -782,6 +793,7 @@ def _run_pool(
                 outcome="ok" if result.returncode == 0 else "failed",
                 findings=findings,
                 detail=result.detail or "",
+                backend=getattr(backend, "name", "pr-agent"),
             )
             return result
 
@@ -802,8 +814,19 @@ def _run_pool(
             outcome="throttled_out",
             findings=None,
             detail=result.detail or "",
+            backend=getattr(backend, "name", "pr-agent"),
         )
     return result
+
+
+def _backend_for(entry: ReviewModel, review: ReviewConfig):
+    """Resolve the review backend for one branch entry (#99).
+
+    Per-entry ``backend`` overrides ``[review].backend``; ``None`` inherits it. The
+    name was validated at config load, so ``get_backend`` cannot raise here.
+    Resolved per branch rather than once per run so a fleet may mix drivers.
+    """
+    return get_backend(entry.backend or review.backend, review)
 
 
 def _has_identity(entry: ModelConfig) -> bool:
@@ -873,6 +896,14 @@ def plan_escalation(
     promote: list[ReviewModel] = []
     reasons: list[str] = []
 
+    # SAME-BACKEND gate (#99): a promoted backup starts its own branch, which must
+    # run under the SAME driver as the branches it joins -- a backup rescued into a
+    # round of pr-agent branches cannot run as an agentic branch. Eligibility is
+    # therefore `identity AND same-backend`. When the existing fleet spans more than
+    # one backend there is no single driver to join, so NO backup is promoted: the
+    # fail-closed direction (decline the addition) rather than guess a driver.
+    active_backends = {(e.backend or review.backend) for e in existing}
+
     for entry in backups:
         label = f"{entry.provider}/{entry.name}"
         if concurrent and not _has_identity(entry):
@@ -880,6 +911,14 @@ def plan_escalation(
                 f"{label}: no resolvable token_env, and promoting it would collapse "
                 "the whole round to a single identity (concurrency is all-or-nothing). "
                 "Give this entry its own token_env to let escalation use it"
+            )
+            continue
+        backup_backend = entry.backend or review.backend
+        if len(active_backends) != 1 or backup_backend not in active_backends:
+            reasons.append(
+                f"{label}: backend {backup_backend!r} does not match the round's active "
+                f"backend(s) {sorted(active_backends)}; a promoted backup must join a "
+                "single shared backend"
             )
             continue
         cost = sequential_cost_minutes(len(existing) + len(promote) + 1, tools, review.tool_timeout)
@@ -968,6 +1007,7 @@ def _run_compare_branch(
             head_sha=head_sha,
             slot=slot,
             promoted=bool(getattr(entry, "promoted", False)),
+            backend=getattr(backend, "name", "pr-agent"),
         )
         result = _run_pool(
             backend,
@@ -1001,6 +1041,7 @@ def _run_compare_branch(
             slot=slot,
             result=failed,
             promoted=bool(getattr(entry, "promoted", False)),
+            backend=getattr(backend, "name", "pr-agent"),
         )
         return label, failed
     _finalize_branch_header(
@@ -1014,12 +1055,12 @@ def _run_compare_branch(
         slot=slot,
         result=result,
         promoted=bool(getattr(entry, "promoted", False)),
+        backend=getattr(backend, "name", "pr-agent"),
     )
     return label, result
 
 
 def _review_compare(
-    backend,
     pr: PRRef,
     knowledge: str,
     gh_env: dict[str, str],
@@ -1081,7 +1122,7 @@ def _review_compare(
             futures = [
                 pool.submit(
                     _run_compare_branch,
-                    backend,
+                    _backend_for(entry, review),
                     pr,
                     knowledge,
                     review,
@@ -1102,6 +1143,7 @@ def _review_compare(
         for index, entry in enumerate(reviewers):
             label = f"{entry.provider}/{entry.name}"
             slot = _slot_of(entry)
+            entry_backend = _backend_for(entry, review)
             print(f"fuko: A/B branch {index + 1}/{len(reviewers)}: {label}", file=sys.stderr)
             comment_id: int | None = None
             # Isolate the branch exactly as the concurrent path does, with the
@@ -1121,9 +1163,10 @@ def _review_compare(
                     head_sha=head_sha,
                     slot=slot,
                     promoted=bool(getattr(entry, "promoted", False)),
+                    backend=getattr(entry_backend, "name", "pr-agent"),
                 )
                 result = _run_pool(
-                    backend,
+                    entry_backend,
                     pr,
                     knowledge,
                     gh_env,
@@ -1154,6 +1197,7 @@ def _review_compare(
                 slot=slot,
                 result=result,
                 promoted=bool(getattr(entry, "promoted", False)),
+                backend=getattr(entry_backend, "name", "pr-agent"),
             )
             outcomes.append((label, result))
 
@@ -1228,7 +1272,6 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
     token = os.environ.get("GITHUB_TOKEN", "")
     api_url = os.environ.get("GITHUB_API_URL", _DEFAULT_API)
 
-    backend = get_backend(cfg.review.backend, cfg.review)
     knowledge = build_knowledge(pr, token, api_url, cfg.knowledge)
     gh_env = _github_env(token)
 
@@ -1282,8 +1325,9 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
     reviewers = [*actives, *trials]
 
     if len(reviewers) > 1:
+        # No run-level backend: `_review_compare` resolves one per branch (#99), so
+        # a fleet can mix drivers per `[[review.models]]` entry.
         result = _review_compare(
-            backend,
             pr,
             knowledge,
             gh_env,
@@ -1297,6 +1341,12 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
             _head_for_receipts(pr, token, api_url),
         )
     else:
+        # The single branch's own backend (its entry's override, else [review].backend).
+        backend = (
+            _backend_for(reviewers[0], cfg.review)
+            if reviewers
+            else get_backend(cfg.review.backend, cfg.review)
+        )
         result = _run_pool(
             backend,
             pr,

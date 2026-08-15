@@ -33,8 +33,14 @@ def record(
     outcome: str = "ok",
     findings: int | None = None,
     detail: str = "",
+    backend: str = "pr-agent",
 ) -> None:
-    """Insert one review-run row (no-op when persistence is disabled)."""
+    """Insert one review-run row (no-op when persistence is disabled).
+
+    ``backend`` is the driver that produced the run (#99); it defaults to
+    ``"pr-agent"`` so an omitting caller writes the same value the schema backfill
+    applied to pre-existing rows.
+    """
     if not _enabled():
         return
     from .db import db
@@ -42,8 +48,9 @@ def record(
     with db() as conn:
         conn.execute(
             "INSERT INTO review_runs "
-            "(repo, pr, provider, model, slot, duration_s, attempts, outcome, findings, detail) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "(repo, pr, provider, model, slot, duration_s, attempts, outcome, findings, "
+            "detail, backend) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 repo,
                 pr,
@@ -55,6 +62,7 @@ def record(
                 outcome,
                 findings,
                 (detail or "")[:500],
+                backend,
             ),
         )
 
@@ -119,7 +127,7 @@ def recent_runs(repo: str | None = None, limit: int = 50) -> list[dict]:
     with db() as conn:
         rows = conn.execute(
             "SELECT repo, pr, provider, model, slot, started_at, duration_s, "
-            "attempts, outcome, findings "
+            "attempts, outcome, findings, backend "
             f"FROM review_runs {where} ORDER BY started_at DESC LIMIT %s",
             params,
         ).fetchall()
@@ -135,6 +143,7 @@ def recent_runs(repo: str | None = None, limit: int = 50) -> list[dict]:
             "attempts": attempts,
             "outcome": outcome,
             "findings": findings,
+            "backend": backend,
         }
         for (
             repo_,
@@ -147,6 +156,7 @@ def recent_runs(repo: str | None = None, limit: int = 50) -> list[dict]:
             attempts,
             outcome,
             findings,
+            backend,
         ) in rows
     ]
 

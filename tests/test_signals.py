@@ -194,6 +194,24 @@ def test_with_visible_label_preserves_tag_like_line_mid_body():
     assert out.count("🤖") == 2
 
 
+def test_run_receipt_backend_round_trips():
+    """#99: the driver attribution survives the marker encode/extract cycle."""
+    marker = encode_run_marker(RunReceipt(label="p/m", head_sha="abc", backend="agentic"))
+    (back,) = extract_run_receipts("x\n" + marker + "\ny")
+    assert back.backend == "agentic"
+
+
+def test_pre_field_receipt_decodes_as_pragent():
+    """A receipt written before `backend` existed has no key; it must decode as
+    'pr-agent' — the only driver that could have produced it — matching the
+    review_runs backfill, not an empty/unknown value."""
+    marker = encode_run_marker(RunReceipt(label="p/m", head_sha="abc"))
+    marker = marker.replace(',"backend":"pr-agent"', "")
+    assert '"backend"' not in marker
+    (back,) = extract_run_receipts(marker)
+    assert back.backend == "pr-agent"
+
+
 def test_run_marker_survives_a_payload_that_tries_to_close_the_comment():
     """Escaping `>` alone is sufficient — `-->` cannot form without a `>`.
 

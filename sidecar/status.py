@@ -542,6 +542,9 @@ def fuko_states(
             row["valid"] = False
             row["label"] = label
             row["model"] = receipt.model
+            # `review_backend`, NOT `backend`: `_row` already owns `backend` for the
+            # display id (`fuko:<label>`), which this function also sorts on (#99).
+            row["review_backend"] = receipt.backend
             if receipt.channels:
                 row["channels"] = dict(receipt.channels)
             rows.append(row)
@@ -590,6 +593,10 @@ def fuko_states(
         row["valid"] = on_head and receipt_is_valid(receipt) and not dead
         row["label"] = label
         row["model"] = receipt.model
+        # `review_backend`, NOT `backend`: `_row` owns `backend` (the display id
+        # `fuko:<label>`, also this function's sort key). Surfaces which driver
+        # produced the run so two harnesses are distinguishable receipts-only (#99).
+        row["review_backend"] = receipt.backend
         if receipt.promoted:
             row["promoted"] = True
         if receipt.channels:

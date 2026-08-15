@@ -295,6 +295,7 @@ class RunMetricRequest(BaseModel):
     outcome: str = "ok"
     findings: int | None = None
     detail: str | None = None
+    backend: str = "pr-agent"
 
 
 class RunSummaryRow(BaseModel):

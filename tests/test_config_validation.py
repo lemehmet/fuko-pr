@@ -6,6 +6,32 @@ from pydantic import ValidationError
 from sidecar.fukoconfig import FukoConfig, ModelConfig, ReviewConfig, ReviewModel, load_config
 
 
+def test_unknown_backend_on_review_is_rejected():
+    """#99: a whole-config backend no driver is registered for fails at parse time."""
+    with pytest.raises(ValidationError, match="unknown review backend"):
+        ReviewConfig(backend="nope")
+
+
+def test_unknown_backend_on_model_entry_is_rejected():
+    """A per-entry backend is validated too, not just [review].backend."""
+    with pytest.raises(ValidationError, match="unknown review backend"):
+        ReviewConfig(models=[ReviewModel(provider="p", name="m", role="active", backend="nope")])
+
+
+def test_known_backends_accepted():
+    """Both registered drivers parse, whole-config and per-entry."""
+    assert ReviewConfig(backend="agentic").backend == "agentic"
+    cfg = ReviewConfig(
+        models=[ReviewModel(provider="p", name="m", role="active", backend="pr-agent")]
+    )
+    assert cfg.models[0].backend == "pr-agent"
+
+
+def test_model_backend_defaults_to_none():
+    """An entry without an explicit backend inherits [review].backend (None)."""
+    assert ReviewModel(provider="p", name="m").backend is None
+
+
 def test_non_positive_max_model_tokens_is_rejected():
     with pytest.raises(ValidationError):
         ModelConfig(provider="zai-coding", name="glm-5.2", max_model_tokens=0)

@@ -440,6 +440,120 @@ def test_config_parsed_backup_without_token_env_still_skips(monkeypatch, tmp_pat
     assert reasons and "collapse" in reasons[0]
 
 
+def test_escalation_skips_backup_on_backend_mismatch(monkeypatch):
+    """#99 same-backend gate: an identity'd backup on a different driver is skipped.
+
+    A promoted backup starts its own branch, which must run under the SAME driver
+    as the branches it joins -- a backup rescued into a round of pr-agent branches
+    cannot run as an agentic branch. Identity alone is no longer sufficient.
+    """
+    from sidecar.fukoconfig import ReviewConfig, ReviewModel
+
+    monkeypatch.setenv("T_DORIAN", "tok-a")
+    monkeypatch.setenv("T_GRAY", "tok-b")
+    monkeypatch.setenv("T_BASIL", "tok-c")
+    actives = [
+        ReviewModel(provider="zai-coding", name="glm-5.2", role="active", token_env="T_DORIAN"),
+        ReviewModel(
+            provider="openrouter", name="qwen/qwen3.8-max", role="active", token_env="T_GRAY"
+        ),
+    ]
+    # Identity resolves (T_BASIL set) so the identity gate passes; the backend gate
+    # is the one that must skip it.
+    backups = [
+        ReviewModel(
+            provider="ollama-cloud",
+            name="glm-5.2:cloud",
+            role="backup",
+            token_env="T_BASIL",
+            backend="agentic",
+        )
+    ]
+
+    promote, reasons = runner.plan_escalation(actives, backups, ReviewConfig(), concurrent=True)
+
+    assert promote == []
+    assert reasons and "does not match" in reasons[0]
+
+
+def test_escalation_skips_all_when_actives_span_multiple_backends(monkeypatch):
+    """Fail-closed: with no single active backend to join, no backup is promoted."""
+    from sidecar.fukoconfig import ReviewConfig, ReviewModel
+
+    monkeypatch.setenv("T_DORIAN", "tok-a")
+    monkeypatch.setenv("T_GRAY", "tok-b")
+    monkeypatch.setenv("T_BASIL", "tok-c")
+    actives = [
+        ReviewModel(
+            provider="zai-coding",
+            name="glm-5.2",
+            role="active",
+            token_env="T_DORIAN",
+            backend="agentic",
+        ),
+        ReviewModel(
+            provider="openrouter",
+            name="qwen/qwen3.8-max",
+            role="active",
+            token_env="T_GRAY",
+        ),  # inherits pr-agent -> fleet spans two backends
+    ]
+    backups = [
+        ReviewModel(
+            provider="ollama-cloud",
+            name="glm-5.2:cloud",
+            role="backup",
+            token_env="T_BASIL",
+            backend="agentic",
+        )
+    ]
+
+    promote, reasons = runner.plan_escalation(actives, backups, ReviewConfig(), concurrent=True)
+
+    assert promote == []
+    assert reasons and "does not match" in reasons[0]
+
+
+def test_escalation_promotes_backup_when_all_share_a_backend(monkeypatch):
+    """The rule is symmetric: when the fleet and the backup share ONE backend,
+    an identity'd backup promotes (here every entry is on the agentic driver)."""
+    from sidecar.fukoconfig import ReviewConfig, ReviewModel
+
+    monkeypatch.setenv("T_DORIAN", "tok-a")
+    monkeypatch.setenv("T_GRAY", "tok-b")
+    monkeypatch.setenv("T_BASIL", "tok-c")
+    actives = [
+        ReviewModel(
+            provider="zai-coding",
+            name="glm-5.2",
+            role="active",
+            token_env="T_DORIAN",
+            backend="agentic",
+        ),
+        ReviewModel(
+            provider="openrouter",
+            name="qwen/qwen3.8-max",
+            role="active",
+            token_env="T_GRAY",
+            backend="agentic",
+        ),
+    ]
+    backups = [
+        ReviewModel(
+            provider="ollama-cloud",
+            name="glm-5.2:cloud",
+            role="backup",
+            token_env="T_BASIL",
+            backend="agentic",
+        )
+    ]
+
+    promote, reasons = runner.plan_escalation(actives, backups, ReviewConfig(), concurrent=True)
+
+    assert [f"{m.provider}/{m.name}" for m in promote] == ["ollama-cloud/glm-5.2:cloud"]
+    assert reasons == []
+
+
 def test_review_keeps_backups_in_reserve_when_healthy(monkeypatch, tmp_path):
     cfg = _one_active_one_backup(tmp_path)
     monkeypatch.setenv("ANTHROPIC_KEY", "k")
