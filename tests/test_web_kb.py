@@ -85,6 +85,36 @@ def test_picker_degrades_when_the_store_is_unreachable(anon, store):
     assert "Knowledge store unreachable" in resp.text
 
 
+def test_degraded_page_does_not_leak_the_exception_to_an_anonymous_visitor(anon, store):
+    """Browse and preview have no `security.require`, so their errors are public.
+
+    Store exceptions quote what they failed to reach — hosts, DSNs, and for a URL
+    carrying inline credentials, the credentials. Found in Copilot's suppressed
+    block on #92, which nothing read until #109 made that channel parseable.
+    """
+    secret = "postgresql://fuko:hunter2@db.internal:5432/kb"
+    store.read_raises = RuntimeError(f"could not connect to {secret}")
+    resp = anon.get("/ui/kb")
+    assert resp.status_code == 200
+    assert "Knowledge store unreachable" in resp.text  # still degrades, not a 500
+    assert "hunter2" not in resp.text
+    assert "db.internal" not in resp.text
+    assert secret not in resp.text
+
+
+def test_preview_degrade_also_stays_generic(anon, store):
+    store.read_raises = RuntimeError("could not connect to db.internal:5432")
+    resp = anon.get("/ui/kb/preview?repo=o/r&q=x")
+    assert "db.internal" not in resp.text
+
+
+def test_degraded_detail_still_reaches_the_operator_log(anon, store, capsys):
+    """The detail is not destroyed, only relocated to where the operator is."""
+    store.read_raises = RuntimeError("could not connect to db.internal:5432")
+    anon.get("/ui/kb")
+    assert "db.internal" in capsys.readouterr().err
+
+
 def test_browse_lists_one_repo(anon):
     page = anon.get("/ui/kb?repo=o/r").text
     assert "Keep migrations idempotent" in page
@@ -383,10 +413,18 @@ def test_preview_without_a_query_does_not_touch_the_store(anon, store):
 
 
 def test_preview_degrades_when_retrieval_fails(anon, store):
+    """Degrades to a page, not a 500 — but WITHOUT quoting the exception.
+
+    This test previously asserted the raw exception text appeared in the
+    response, which pinned the leak rather than the behaviour worth keeping:
+    preview is unauthenticated, so that text is public. The contract is "the
+    store being unreachable costs you the contents, not the page".
+    """
     store.read_raises = RuntimeError("embedder down")
     resp = anon.get("/ui/kb/preview?repo=o/r&text=x")
     assert resp.status_code == 200
-    assert "embedder down" in resp.text
+    assert "preview" in resp.text  # the page still renders
+    assert "embedder down" not in resp.text
 
 
 def test_tools_page_carries_a_flash_message(user):
