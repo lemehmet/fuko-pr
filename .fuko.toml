@@ -3,40 +3,65 @@ image = "ghcr.io/lemehmet/pr-agent:0.41.0@sha256:7341dc6214be964534ce3e68fc73143
 tool_timeout = 600
 optional_tools = ["improve"]
 
-# FLEET NOTE (2026-08-14) — this fleet is deliberately NOT model-diverse.
-# Both actives are the same model (glm-5.2) reached through different
-# providers, so what we buy is provider diversity + failover, not a second
-# opinion from a second model family. That is a real loss and it is recorded
-# here on purpose rather than papered over.
+# FLEET COMPOSITION (2026-08-14) — two gating seats, two backups.
 #
-# Why we took it: on PR #100 glm-5.2 produced every substantive finding while
-# deepseek-v4-pro produced noise — including a critical-severity false positive
-# whose suggested patch would have broken the very security control it claimed
-# to be fixing. A second opinion is only worth a seat if it is worth reading.
-# Kimi K3 was the obvious model-diverse replacement and was rejected on cost.
+# WHY deepseek-v4-pro IS GONE. It held the `gray` seat and was dropped for
+# persistently low-quality findings. The deciding example, on PR #100: it filed
+# a CRITICAL-severity finding claiming the deny rules used a single leading
+# slash. The code already emitted the correct `Read(//…)` form, and its
+# suggested patch produced `Read(///…)` — the silently non-matching spelling.
+# Applying that "critical fix" would have DISABLED the credential denylist it
+# claimed to be protecting. A seat that inverts a security control while
+# sounding most confident is worse than an empty seat, because it costs
+# reviewer attention to refute.
 #
-# Revisit when a second model family clears the quality bar; restoring model
-# diversity is a one-line change to the `gray` entry below.
+# WHY qwen3.8-max REPLACES IT. Validated on mepro's trial seat. Kimi K3 was the
+# other candidate and was rejected on cost.
+#
+# THIS FLEET IS GENUINELY MODEL-DIVERSE (glm + qwen) — do not "simplify" it back
+# to one model on two providers. An earlier revision of this change had both
+# gating seats on glm-5.2 via different providers; that buys provider diversity
+# and failover only, and two seats running the same model agree on their blind
+# spots by construction. The point of the second seat is a second opinion.
+#
+# BACKUP ORDER IS ABOUT THROTTLE BUCKETS, NOT PREFERENCE. Cooldown is global per
+# provider because it keys on the shared API key (see `order_pool` in
+# sidecar/pool.py, `cooled` keyed by provider id). gray and backup 1 both ride
+# OPENROUTER_KEY, so a single OpenRouter throttle cools BOTH — a gray failover
+# cannot land on backup 1, because whatever cooled gray has already cooled it.
+# That makes backup 2 (ollama-cloud, its own OLLAMA_API_KEY) the only failover
+# that survives an OpenRouter outage, and therefore load-bearing rather than
+# decorative. dorian is unaffected either way: it holds a separate z.ai key.
+# Backup 1 still stays FIRST on purpose — `order_pool` ranks available ahead of
+# cooled, so backup 1 is used when OpenRouter is healthy and skipped when it is
+# not. The order costs nothing and the coupling is handled by health, not by
+# hand-ordering.
 
-# dorian — active. glm-5.2 direct from z.ai.
+# dorian — gating seat.
 [[review.models]]
 provider = "zai-coding"
 name = "glm-5.2"
 max_context = 1000000
 token_env = "FUKO_GITHUB_TOKEN_DORIAN"
 
-# gray — active. Same model as dorian, reached via OpenRouter: an independent
-# provider path, independent throttle bucket, and a distinct App identity.
+# gray — gating seat. Distinct token_env from dorian: two resolvable identities
+# is what keeps A/B concurrent. Collapse them and the run degrades to sequential
+# (#106), which blows the job's time budget rather than merely losing a name.
+[[review.models]]
+provider = "openrouter"
+name = "qwen/qwen3.8-max"
+max_context = 1000000
+token_env = "FUKO_GITHUB_TOKEN_GRAY"
+
+# Backup 1 — shares OPENROUTER_KEY with gray; see the throttle-bucket note above.
 [[review.models]]
 provider = "openrouter"
 name = "z-ai/glm-5.2"
 max_context = 1048576
-token_env = "FUKO_GITHUB_TOKEN_GRAY"
+role = "backup"
 
-# Backup. Deliberately NOT another OpenRouter entry: gray already routes
-# through OpenRouter, so an OpenRouter outage would take out the backup and the
-# active it is meant to cover in the same stroke. ollama-cloud is the only
-# failover left that survives that outage.
+# Backup 2 — the OpenRouter-outage survivor. Backups intentionally carry no
+# token_env: a promoted backup posts under the identity of the seat it covers.
 [[review.models]]
 provider = "ollama-cloud"
 name = "glm-5.2:cloud"
