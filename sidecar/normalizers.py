@@ -168,8 +168,15 @@ def copilot_signal(comment: dict) -> ReviewSignal:
 # BODY of a review whose visible prose says it "generated no new comments".
 # Verified against this repo's own history (#80, #92, #98, #100): on #100 that
 # block held three real findings, including a symlink-attack security issue.
+# Matched on the WORD "suppress" anywhere in the summary, not on one exact
+# phrase. Copilot uses at least two wordings for the same block -- "Suppressed
+# comments (N)" (#98, #100) and "Comments suppressed due to low confidence (N)"
+# (#80, #92) -- and an exact-phrase pattern silently found nothing on half of
+# them. This is the same failure shape as #86, where matching CodeRabbit's hourly
+# rate-limit wording missed its Fair Usage variant entirely: a vendor's prose is
+# not a stable key, so match the smallest invariant part of it.
 _COPILOT_SUPPRESSED_RE = re.compile(
-    r"<details>\s*<summary>\s*Suppressed comments[^<]*</summary>(.*?)</details>",
+    r"<details>\s*<summary>[^<]*suppress[^<]*</summary>(.*?)</details>",
     re.I | re.S,
 )
 # Each entry opens with a bolded `**path/to/file.py:123**` anchor line.
@@ -228,13 +235,29 @@ def copilot_suppressed_signals(review: dict) -> list[ReviewSignal]:
 def collect_review_signals(reviews: list[dict], model: str = "") -> list[ReviewSignal]:
     """Collect findings carried in submitted review BODIES rather than inline comments.
 
-    Today that is Copilot's suppressed-comments block. `fuko signals` otherwise
-    reads inline comments and issue comments only, so this channel was invisible.
+    `fuko signals` read inline comments and issue comments only, so this whole
+    channel was invisible. Two things live here:
+
+    * Copilot's collapsed suppressed-comments block (#109).
+    * **fuko's own agentic review body.** The agentic backend attaches a marker to
+      every finding BEFORE choosing inline vs body, so unanchored findings -- about
+      callers, cleanup paths, missing tests, exactly the class that reviewer exists
+      to produce -- are marked and posted in the review body. Nothing read them
+      back, so they were emitted as signals by `normalize_output` and then
+      unrecoverable from the PR.
+
+    Both were diagnosed by Copilot on #100, in a suppressed comment we could not
+    read because the block it sat in was itself unparsed.
     """
     out: list[ReviewSignal] = []
     for review in reviews:
+        body = review.get("body", "") or ""
         if is_copilot_comment(review):
             out.extend(copilot_suppressed_signals(review))
+        for marker in extract_markers(body):
+            if not marker.thread_url:
+                marker.thread_url = review.get("html_url")
+            out.append(marker)
     return out
 
 

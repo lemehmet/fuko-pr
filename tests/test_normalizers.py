@@ -229,6 +229,29 @@ def test_collect_review_signals_ignores_non_copilot_reviews():
     assert len(collect_review_signals([_copilot_review(_REAL_SUPPRESSED_BODY)])) == 3
 
 
+def test_collect_review_signals_recovers_fuko_markers_from_a_review_body():
+    """#100's third suppressed finding, verified still live before this fix.
+
+    The agentic backend marks every finding BEFORE choosing inline vs body, so an
+    unanchored finding is posted marked in the review body — but nothing read
+    review bodies back, so `normalize_output` returned it as a signal that could
+    never be recovered from the PR.
+    """
+    sig = ReviewSignal(id="fk_unanchored", file="src/x.py", title="t", body="b", backend="agentic")
+    review = {
+        "user": {"login": "fuko-dorian[bot]"},
+        "html_url": "https://github.com/o/r/pull/9#pullrequestreview-3",
+        "body": (
+            "## fuko agentic review\n\nsummary\n\n### Findings without a diff anchor\n\n"
+            + with_markers("**Location:** `src/x.py`\n\nfinding text", [sig])
+        ),
+    }
+    (out,) = collect_review_signals([review])
+    assert out.id == "fk_unanchored"
+    assert out.backend == "agentic"
+    assert out.thread_url == review["html_url"]
+
+
 def test_suppressed_signal_ids_are_stable_and_distinct():
     """Same inputs -> same id, so a consumer can dedupe across runs."""
     first = copilot_suppressed_signals(_copilot_review(_REAL_SUPPRESSED_BODY))
