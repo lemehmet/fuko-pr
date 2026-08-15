@@ -84,9 +84,11 @@ def _review_header(label: str = "") -> str:
     return f"{_REVIEW_HEADER} — `{label}`" if label else _REVIEW_HEADER
 
 
-#: Statuses worth another attempt: GitHub is briefly unavailable, not refusing.
-#: 4xx is deliberately excluded -- a 422 has its own body-only degrade path, and
-#: a 401/403 will not improve by repetition.
+#: Statuses worth another attempt. All of them are treated as AMBIGUOUS about
+#: whether the review was committed: 502/504 are gateway failures, so the
+#: upstream may have processed the request and only the response was lost. 4xx is
+#: deliberately excluded -- a 422 has its own body-only degrade path, and a
+#: 401/403 will not improve by repetition.
 _TRANSIENT_STATUSES = frozenset({502, 503, 504})
 
 #: Errors that provably never reached the server, so a retry cannot duplicate a
@@ -765,7 +767,23 @@ class AgenticBackend:
                     f"fuko: review post attempt {attempt + 1} lost ({e}); retrying", file=sys.stderr
                 )
             else:
-                if resp.status_code in _TRANSIENT_STATUSES and attempt != last:
+                if resp.status_code in _TRANSIENT_STATUSES:
+                    # AMBIGUOUS, not safe. A 502/504 is a GATEWAY failure: the
+                    # upstream may have committed the review and only the
+                    # response was lost, which is indistinguishable from a
+                    # request that never got there. 503 is treated the same way
+                    # rather than reasoned about per-status -- one rule beats
+                    # three fragile ones, and the read-back costs a request only
+                    # on a path that has already failed.
+                    if self._review_already_posted(client, url, payload, label):
+                        print(
+                            f"fuko: review post got {resp.status_code} but the review "
+                            "is on the PR; not re-posting",
+                            file=sys.stderr,
+                        )
+                        return None
+                    if attempt == last:
+                        return resp
                     print(
                         f"fuko: review post attempt {attempt + 1} got {resp.status_code}; retrying",
                         file=sys.stderr,

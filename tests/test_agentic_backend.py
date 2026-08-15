@@ -486,6 +486,25 @@ def test_normalize_retries_transient_5xx(monkeypatch, _no_sleep, status):
     assert len(fake.posts) == 2
 
 
+@pytest.mark.parametrize("status", [502, 503, 504])
+def test_a_landed_5xx_does_not_repost(monkeypatch, _no_sleep, status):
+    """A gateway status is not evidence the request was refused.
+
+    502/504 mean the upstream may have committed the review and only the
+    response was lost — indistinguishable from a request that never arrived. So
+    these consult the read-back too, or the retry duplicates the review.
+    """
+    backend = AgenticBackend()
+    _seed(backend)
+    fake = _FakeHttpx([status, 200], reviews=[_posted_review()])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    signals = backend.normalize_output(PR, "claude-x", token="t")
+
+    assert len(fake.posts) == 1  # NOT re-posted
+    assert len(fake.gets) == 1  # the read-back ran
+    assert len(signals) == 2  # findings still reported
+
+
 def test_normalize_does_not_retry_a_4xx(monkeypatch, _no_sleep):
     """A 403 will not improve by repetition, and a 422 has its own path."""
     backend = AgenticBackend()
