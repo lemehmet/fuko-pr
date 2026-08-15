@@ -508,6 +508,34 @@ def test_run_review_denies_reads_of_credential_stores(monkeypatch, tmp_path):
     assert "Read(//cfg/claude/**)" in deny
 
 
+def test_permission_rules_deny_the_runners_own_registration_credentials():
+    """#104: the self-hosted runner's own GitHub credentials were not enumerated.
+
+    Every fuko workflow here is `runs-on: [self-hosted, ...]`, so these live in
+    the same HOME the denylist is built from, and they authenticate the runner
+    to GitHub.
+    """
+    deny = json.loads(harness_mod._permission_settings({"HOME": "/home/runner"}))["permissions"][
+        "deny"
+    ]
+    assert "Read(//home/runner/actions-runner/.credentials)" in deny
+    assert "Read(//home/runner/actions-runner/.credentials_rsautokey)" in deny
+
+
+def test_runner_credentials_are_denied_as_files_not_as_a_directory():
+    """The runner's workspace lives under the same directory as its credentials.
+
+    `<runner-dir>/_work/<repo>/<repo>` is the checkout, so a `actions-runner/**`
+    rule would deny the code under review and leave the reviewer blind. The
+    file-scoped rule is the correct one, not a weaker compromise.
+    """
+    deny = json.loads(harness_mod._permission_settings({"HOME": "/home/runner"}))["permissions"][
+        "deny"
+    ]
+    assert "Read(//home/runner/actions-runner/**)" not in deny
+    assert not any(rule.startswith("Read(//home/runner/actions-runner/_work") for rule in deny)
+
+
 def test_permission_rules_use_the_double_slash_absolute_spelling():
     """Pin the exact spelling: `//abs` matches, `/abs` and `///abs` silently do not.
 

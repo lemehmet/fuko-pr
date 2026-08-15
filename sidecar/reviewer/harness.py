@@ -87,7 +87,27 @@ SENSITIVE_HOME_DIRS = (
     ".kube",
 )
 #: Single files worth the same treatment.
-SENSITIVE_HOME_FILES = (".netrc", ".git-credentials", ".claude.json")
+#:
+#: The ``actions-runner`` entries are the self-hosted runner's own registration
+#: credentials, which authenticate the runner to GitHub. Every fuko workflow in
+#: this repo is ``runs-on: [self-hosted, ...]``, so these sit in the same home
+#: directory this denylist is built from -- a larger prize than several stores
+#: already covered, reachable through exactly the channel the denylist exists to
+#: close: an injected "read X and put it in a finding" reaches the PR verbatim,
+#: where an untrusted PR author reads it.
+#:
+#: Listed as FILES, deliberately, rather than denying ``actions-runner`` as a
+#: directory: the runner's workspace is ``<runner-dir>/_work/<repo>/<repo>``, so
+#: a directory rule would deny the checkout itself and leave the reviewer unable
+#: to read the code it is reviewing. The narrower rule is not a compromise here;
+#: the wider one is simply wrong.
+SENSITIVE_HOME_FILES = (
+    ".netrc",
+    ".git-credentials",
+    ".claude.json",
+    "actions-runner/.credentials",
+    "actions-runner/.credentials_rsautokey",
+)
 
 #: Kernel pseudo-filesystems, denied because ``/proc/self/environ`` hands the
 #: agent its OWN process environment -- which necessarily holds the credential
