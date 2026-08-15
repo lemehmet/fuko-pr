@@ -292,10 +292,16 @@ def fuko_states(head_sha: str, issue_comments: list[dict]) -> list[dict]:
     pass, which is the defect itself (#108). An unrecognized state value instead
     reads as not-done, withholding a merge rather than granting one.
 
-    A receipt with an EMPTY channel map keeps its old meaning: it predates
-    channel reporting, so there is nothing to judge. Writers always populate the
-    map, so absence means an older fuko wrote the receipt, not that every channel
-    was healthy.
+    A receipt with an EMPTY channel map reports its branch-level state unchanged:
+    an empty map means NOT REPORTED, so there is nothing to judge. Emptiness does
+    not identify one situation -- an in-flight receipt carries none before any
+    tool finishes, a backend that does not report per-channel outcomes (the
+    agentic one today) produces none, and receipts written before this field
+    existed have none. Treating empty as degraded would flag all three, including
+    every pre-upgrade receipt; treating it as healthy is the compatible reading
+    and the honest limit of it is that a dead channel on such a receipt is simply
+    invisible here. Closing that is per-backend work, not a claim that those
+    backends have no channels to lose.
 
     Only the newest receipt per instance is reported. Receipts are rewritten in
     place, but a force-push or a re-run can leave an older one behind, and later

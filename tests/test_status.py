@@ -514,6 +514,18 @@ def test_fuko_receipt_without_channels_keeps_its_old_meaning():
     assert "channels" not in rows[0]
 
 
+def test_fuko_in_flight_receipt_has_no_channels_and_is_not_degraded():
+    """An empty map does not identify "old receipt" — an in-flight one is empty too.
+
+    `_post_branch_header` writes the opening receipt before any tool has run, so
+    it carries no channels. That must report `in_progress` on its own terms, not
+    be mistaken for either a healthy seat or a degraded one.
+    """
+    rows = fuko_states(HEAD, [_receipt_comment(state="in_progress")])
+    assert rows[0]["state"] == "in_progress"
+    assert "channels" not in rows[0]
+
+
 def test_fuko_channel_that_never_ran_is_degraded():
     """`skipped` is a dead channel too — an unreached tool produced nothing."""
     rows = fuko_states(HEAD, [_receipt_comment(channels={"review": "done", "improve": "skipped"})])
