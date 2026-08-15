@@ -335,6 +335,61 @@ def test_invoke_parse_failure_is_not_throttle(monkeypatch):
     assert "reviewer output" in result.detail
 
 
+def test_invoke_completed_run_reports_its_channel_done(monkeypatch):
+    """#113: a COMPLETED agentic run must state its channel finished, not stay empty.
+
+    An empty channel map reads as "not reported" in `fuko_states`, so a `done`
+    receipt with no channels would pass as a clean review even if the channel had
+    in fact failed. Mirrors the pr-agent side's populated-map assertion.
+    """
+    backend = AgenticBackend()
+    result, _ = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert result.returncode == 0
+    assert result.channels == {"agentic-review": "done"}
+
+
+def test_invoke_timed_out_run_names_the_dead_channel(monkeypatch):
+    """A killed run names its channel `killed:timeout`, mirroring the pr-agent side."""
+    backend = AgenticBackend()
+    result, _ = _invoke(monkeypatch, backend, HarnessResult(124, "", timed_out=True))
+    assert result.channels == {"agentic-review": "killed:timeout"}
+    assert result.throttled  # a timeout still fails over
+
+
+def test_invoke_throttled_run_names_the_channel_throttled(monkeypatch):
+    """A 429/overload names the channel `throttled:exit N` (not a bare timeout)."""
+    backend = AgenticBackend()
+    result, _ = _invoke(monkeypatch, backend, HarnessResult(1, "", stderr="429 too many requests"))
+    assert result.channels == {"agentic-review": "throttled:exit 1"}
+
+
+def test_invoke_plain_failure_names_the_channel_failed(monkeypatch):
+    """A non-throttle, non-timeout failure names the channel `failed:exit N`."""
+    backend = AgenticBackend()
+    result, _ = _invoke(monkeypatch, backend, HarnessResult(3, "", stderr="boom"))
+    assert result.channels == {"agentic-review": "failed:exit 3"}
+
+
+def test_invoke_auth_failure_names_the_channel_failed_not_throttled(monkeypatch):
+    """Auth failure is a plain channel failure — it must not read as throttle/timeout."""
+    backend = AgenticBackend()
+    result, _ = _invoke(
+        monkeypatch, backend, HarnessResult(1, "", stderr="Not logged in · Please run /login")
+    )
+    assert result.channels == {"agentic-review": "failed:exit 1"}
+    assert not result.throttled
+
+
+def test_invoke_precondition_failure_marks_the_channel_failed(monkeypatch):
+    """A failure before the run (no model) still reports the channel, never empty."""
+    backend = AgenticBackend()
+    monkeypatch.setattr(agentic_mod, "fetch_pr_context", lambda *a, **k: _ctx())
+    monkeypatch.setattr(agentic_mod, "checkout_pr_head", lambda *a, **k: "/tmp/nowhere")
+    result = backend.invoke(PR, {"FUKO_AGENTIC_AUTH": "api-key"}, ["review"])
+    assert result.returncode == 1
+    assert result.channels == {"agentic-review": "failed:exit 1"}
+
+
 class _FakeResponse:
     def __init__(self, status_code, text="", json_body=None):
         self.status_code = status_code

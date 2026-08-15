@@ -69,6 +69,16 @@ from .base import InvokeResult, PRRef
 #: The heading every agentic review body opens with.
 _REVIEW_HEADER = "## fuko agentic review"
 
+#: The one output channel this backend publishes on today: a single holistic
+#: review (a PR-level summary plus inline findings). Named explicitly rather than
+#: borrowing PR-Agent's per-tool names (`review`/`improve`/`describe`) because it
+#: is a DIFFERENT surface -- the agent produces one combined verdict, not those
+#: separable tool outputs. Populating :attr:`InvokeResult.channels` with it (#113)
+#: is what lets a COMPLETED agentic receipt state its channel finished rather than
+#: leaving an empty map, which :func:`sidecar.status.fuko_states` reads as "not
+#: reported" and cannot tell from a dead channel.
+_CHANNEL = "agentic-review"
+
 
 def _review_header(label: str = "") -> str:
     """The review body's opening line, carrying the branch label when there is one.
@@ -356,6 +366,15 @@ class AgenticBackend:
         exactly as it does for PR-Agent; an authentication failure explicitly
         does NOT, because failing over would burn every remaining provider on
         what is a one-line runner fix.
+
+        Every return path sets :attr:`InvokeResult.channels` for the single
+        :data:`_CHANNEL` this backend publishes (#113): ``done`` on success, and
+        the pr-agent driver's own failure vocabulary otherwise (``killed:timeout``
+        / ``throttled:exit N`` / ``failed:exit N``). A COMPLETED run must state its
+        channel finished rather than leave an empty map -- an empty map is what
+        :func:`sidecar.status.fuko_states` reads as "not reported", which it cannot
+        tell from a dead channel, so a ``done`` receipt with no channels would read
+        as a clean pass even if the one channel had failed.
         """
         # Must stay in lockstep with normalize_output's fallback: this value
         # fingerprints the stash key, so any divergence makes a completed review
@@ -375,6 +394,7 @@ class AgenticBackend:
             return InvokeResult(
                 returncode=1,
                 detail=f"no model name in the harness environment ({_ENV_MODEL} unset or empty)",
+                channels={_CHANNEL: "failed:exit 1"},
             )
         auth = env.get(_ENV_AUTH, _AUTH_SUBSCRIPTION)
 
@@ -406,18 +426,23 @@ class AgenticBackend:
                         "setup-token` and export CLAUDE_CODE_OAUTH_TOKEN, or set "
                         "auth = 'api-key' on this model entry"
                     ),
+                    channels={_CHANNEL: "failed:exit 1"},
                 )
 
         try:
             ctx = fetch_pr_context(pr.repo, pr.number, token=token, api_url=api_url)
         except httpx.HTTPError as e:
-            return InvokeResult(returncode=1, detail=f"could not fetch PR context: {e}")
+            return InvokeResult(
+                returncode=1,
+                detail=f"could not fetch PR context: {e}",
+                channels={_CHANNEL: "failed:exit 1"},
+            )
         try:
             checkout = checkout_pr_head(
                 pr.repo, pr.number, ctx.head_sha, token=token, server_url=server_url
             )
         except CheckoutError as e:
-            return InvokeResult(returncode=1, detail=str(e))
+            return InvokeResult(returncode=1, detail=str(e), channels={_CHANNEL: "failed:exit 1"})
 
         # Everything from here owns the checkout, so every exit path -- including
         # a failure to create the scratch cwd or to build the prompt -- goes
@@ -442,9 +467,13 @@ class AgenticBackend:
                 max_turns=self.max_turns,
             )
         except HarnessNotAvailableError as e:
-            return InvokeResult(returncode=1, detail=str(e))
+            return InvokeResult(returncode=1, detail=str(e), channels={_CHANNEL: "failed:exit 1"})
         except OSError as e:
-            return InvokeResult(returncode=1, detail=f"could not prepare the review sandbox: {e}")
+            return InvokeResult(
+                returncode=1,
+                detail=f"could not prepare the review sandbox: {e}",
+                channels={_CHANNEL: "failed:exit 1"},
+            )
         finally:
             rmtree(checkout, ignore_errors=True)
             if workdir is not None:
@@ -453,22 +482,39 @@ class AgenticBackend:
         if result.returncode != 0:
             output = result.stderr + "\n" + result.text
             if is_auth_failure(output):
+                # Auth is neither a timeout nor a throttle -- failing over would burn
+                # the pool on a one-line runner fix -- so the channel is a plain fail.
                 return InvokeResult(
                     returncode=result.returncode,
                     detail=(
                         f"agent could not authenticate in {auth} mode: "
                         f"{result.stderr.strip()[:300]}"
                     ),
+                    channels={_CHANNEL: f"failed:exit {result.returncode}"},
                 )
+            throttled = is_throttle(result.returncode, output)
+            # Same vocabulary the pr-agent driver records per tool, so a consumer
+            # reads one channel map regardless of backend: a hung run is
+            # `killed:timeout`, a 429/overload is `throttled:exit N`, anything else
+            # is `failed:exit N`.
+            if result.timed_out:
+                verdict = "killed:timeout"
+            elif throttled:
+                verdict = f"throttled:exit {result.returncode}"
+            else:
+                verdict = f"failed:exit {result.returncode}"
             return InvokeResult(
                 returncode=result.returncode,
                 detail=result.stderr.strip()[:500] or "agent run failed",
-                throttled=is_throttle(result.returncode, output),
+                throttled=throttled,
+                channels={_CHANNEL: verdict},
             )
         try:
             review = parse_review(result.text)
         except ReviewParseError as e:
-            return InvokeResult(returncode=1, detail=str(e)[:500])
+            return InvokeResult(
+                returncode=1, detail=str(e)[:500], channels={_CHANNEL: "failed:exit 1"}
+            )
 
         # Case/whitespace-normalized: `confidence` is deliberately a free-form
         # str so an off-vocabulary value degrades to filtering rather than
@@ -499,7 +545,13 @@ class AgenticBackend:
                 withheld_low=len(review.findings) - len(confident),
                 over_cap=len(confident) - len(kept),
             )
-        return InvokeResult(returncode=0, detail=f"{len(kept)} findings")
+        # A COMPLETED run states its channel finished, rather than leaving an empty
+        # map that `fuko_states` cannot tell from a dead channel (#113). This is the
+        # one path where the difference bites: a receipt finalized `done` with no
+        # channels reads as a clean pass even if the channel had in fact failed.
+        return InvokeResult(
+            returncode=0, detail=f"{len(kept)} findings", channels={_CHANNEL: "done"}
+        )
 
     def normalize_output(
         self,
