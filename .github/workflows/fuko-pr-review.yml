@@ -14,7 +14,7 @@
 # runs, just without injected learnings.
 #
 # Concurrent A/B under two App identities: branch a (GLM-5.2) posts as fuko-dorian,
-# branch b (kimi-k2.7) as fuko-gray. Each App = a repo VARIABLE (App ID) + secret
+# branch b (qwen3.8-max) as fuko-gray. Each App = a repo VARIABLE (App ID) + secret
 # (private key): FUKO_DORIAN_APP_ID/FUKO_DORIAN_APP_PRIVATE_KEY and
 # FUKO_GRAY_APP_ID/FUKO_GRAY_APP_PRIVATE_KEY. With only one App the A/B runs
 # sequentially under it; with none it posts as github-actions[bot]. Observe-only —
@@ -41,22 +41,33 @@ jobs:
     # ≈ 45m (the concurrent path is ~2 * 600s + setup ≈ 23m). Found on
     # mepro#1455, where every reviewer flagged the zero-headroom 40m cap.
     #
-    # STOPGAP for #106 — 50 -> 90. When CodeRabbit pauses, backup escalation
-    # promotes the backup entry to active; that entry carries no token_env, so
-    # identity resolution fails and the WHOLE run degrades to sequential at 3
-    # branches * 2 tools * 600s = 60m, which blows through the 50m cap and
-    # kills the run mid-review — a starved round that looks like a clean one.
-    # 90 restores headroom until #106 makes the promotion identity-aware.
+    # STOPGAP for #106 — 50 -> 110. When CodeRabbit pauses, backup escalation
+    # promotes EVERY backup to active (runner.py: `actives = [*actives,
+    # *(m.model_copy(update={"role": "active"}) for m in backups)]`), and a
+    # promoted backup carries no token_env, so identity resolution fails and the
+    # WHOLE run degrades to sequential. Count branches from the config, not from
+    # the active count: 2 actives + 2 backups = 4 branches * 2 tools * 600s =
+    # 80m + ~5m setup ≈ 85m. That overruns the old 50m cap outright and leaves
+    # only ~5m under a 90m one — and an overrun kills the run mid-review, which
+    # is worse than a slow round because a starved round is indistinguishable
+    # from a clean one.
+    #
+    # Note the coupling: this number is a function of the BACKUP COUNT, so
+    # adding a backup to .fuko.toml silently raises the escalated worst case by
+    # 2 * tool_timeout. #106 is the real fix (make escalation identity- and
+    # budget-aware, and skip a promotion that would collapse concurrency);
+    # once it lands this cap should come back down.
+    #
     # Deliberately NOT paired with a tool_timeout raise: the per-tool budget is
     # the thing keeping a wedged tool from eating the whole job.
-    timeout-minutes: 90
+    timeout-minutes: 110
     permissions:
       contents: read # reads PR data + posts comments only; no commits/pushes
       pull-requests: write
       issues: write
     steps:
       # Two App identities for concurrent A/B: branch a (GLM-5.2) posts as
-      # fuko-dorian, branch b (kimi-k2.7) as fuko-gray, so the runner reviews under
+      # fuko-dorian, branch b (qwen3.8-max) as fuko-gray, so the runner reviews under
       # per-branch tokens (distinct throttle buckets + author separation). Each App
       # is configured by a repo VARIABLE (App ID) + secret (private key); App IDs
       # aren't secret material, and keeping them in `vars` makes the mint gates
@@ -141,9 +152,13 @@ jobs:
           FUKO_TOKEN: ${{ secrets.FUKO_TOKEN }}
           # Reviewer model keys for the .fuko.toml A/B pool: GLM-5.2 via z.ai
           # (zai-coding, branch a) and a model via OpenRouter (openrouter,
-          # branch b). Separate keys = separate throttle buckets.
+          # branch b). Separate keys = separate throttle buckets. OLLAMA_API_KEY
+          # covers the ollama-cloud BACKUP entry: without it an OpenRouter
+          # outage cools gray and its OpenRouter backup together, and the only
+          # surviving failover would then fail to authenticate.
           ZAI_KEY: ${{ secrets.ZAI_KEY }}
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
           ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY }}
           # Pass the PR URL through the environment rather than expanding
           # ${{ github.event... }} directly in run: (avoids shell injection).
