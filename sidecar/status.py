@@ -104,6 +104,16 @@ def _receipt_author_allowed(login: str, allowed: set[str] | None) -> bool:
     return bool(_FUKO_RECEIPT_AUTHORS.search(login))
 
 
+def _range_heads(body: str) -> list[str]:
+    """Return the end-sha of every "between X and Y" range line in ``body``.
+
+    ``finditer`` rather than one ``search``: CodeRabbit rewrites its summary
+    comment in place and a single body can carry more than one range line, so
+    asking only about the first can miss the range that covers HEAD.
+    """
+    return [m.group(2) for m in _CR_REVIEWING.finditer(body or "")]
+
+
 def _row(backend: str, state: State, head_reviewed: str | None, detail: str) -> dict:
     return {"backend": backend, "state": state, "head_reviewed": head_reviewed, "detail": detail}
 
@@ -191,11 +201,17 @@ def coderabbit_state(
 
     blob = "\n".join(bodies)
     issue_blob = "\n".join(cr_issue_bodies)
-    walkthrough = next((b for b in bodies if _CR_REVIEWING.search(b)), "")
-    m = _CR_REVIEWING.search(walkthrough)
-    walk_head = m.group(2) if m else None
-    walk_on_head = any(
-        (mm := _CR_REVIEWING.search(b)) and _sha_match(mm.group(2), head_sha) for b in bodies
+    # Every range end-sha, in body order. `walk_on_head` used to scan ALL bodies
+    # while `walk_head` was bound from the FIRST one; once a PR has more than one
+    # CR review those disagree, and the reported `head_reviewed` was the oldest
+    # range rather than the one that matched HEAD (#101).
+    walk_heads = [h for b in bodies for h in _range_heads(b)]
+    walk_on_head = any(_sha_match(h, head_sha) for h in walk_heads)
+    # Prefer the range that actually covers HEAD; otherwise the MOST RECENT range
+    # seen, since a later body is a later review.
+    walk_head = next(
+        (h for h in walk_heads if _sha_match(h, head_sha)),
+        walk_heads[-1] if walk_heads else None,
     )
     review_on_head = any(r.get("commit_id") == head_sha for r in cr_reviews)
 
@@ -213,7 +229,11 @@ def coderabbit_state(
         )
 
     head_blob = "\n".join(
-        [b for b in bodies if (mm := _CR_REVIEWING.search(b)) and _sha_match(mm.group(2), head_sha)]
+        # Any range line in the body may be the one covering HEAD, so this asks
+        # about all of them rather than only the first (#101). Checking just the
+        # first would drop a body whose later range covers HEAD, and with it the
+        # terminal marker that body carries.
+        [b for b in bodies if any(_sha_match(h, head_sha) for h in _range_heads(b))]
         + [r.get("body", "") or "" for r in cr_reviews if r.get("commit_id") == head_sha]
         + (cr_issue_bodies if review_on_head else [])
     )
