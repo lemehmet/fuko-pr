@@ -608,7 +608,7 @@ def _post_branch_header(
     slot: str | None = None,
     promoted: bool = False,
     backend: str = "pr-agent",
-) -> tuple[str | None, int | None]:
+) -> tuple[str | None, int | None, str | None]:
     """Post a model-labelled header issue comment for one A/B branch (best-effort).
 
     It gives a human a visible anchor for which model produced the summary that
