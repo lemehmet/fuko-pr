@@ -345,6 +345,7 @@ def _record_run(
     findings: int | None,
     detail: str,
     backend: str = "pr-agent",
+    endpoint: str = "",
 ) -> None:
     """Persist one review-run metrics row (best-effort, never raises).
 
@@ -358,13 +359,6 @@ def _record_run(
     """
     try:
         fuko_url, fuko_token = _cb_endpoint()
-        # Same attribution the run receipt carries: where this entry's traffic
-        # was configured to go. Best-effort like everything here -- an
-        # unresolvable preset yields "", never an exception.
-        try:
-            endpoint = model.base_url or get_preset(model.provider).base_url or ""
-        except Exception:
-            endpoint = ""
         payload = {
             "repo": pr.repo,
             "pr": pr.number,
@@ -377,6 +371,9 @@ def _record_run(
             "findings": findings,
             "detail": (detail or "")[:500],
             "backend": backend,
+            # Caller-supplied (the pool loop resolves it per answering entry,
+            # auth-aware for backends that route themselves) -- NOT re-derived
+            # here, so the DB row and the receipt can never disagree.
             "endpoint": endpoint,
         }
         if fuko_url:
@@ -796,12 +793,17 @@ def _run_pool(
         # otherwise be misreported as a promotion. Circuit-breaker keys stay bare
         # (`_cb_trip(model.provider, …)`) — those are per-provider, not per-model.
         # `endpoint` rides along for the same reason: attribution of the
-        # ANSWERING entry, from its config, at the one place that knows which
-        # entry answered.
+        # ANSWERING entry, at the one place that knows which entry answered.
+        # A backend that resolves its own routing (agentic: subscription auth
+        # goes to the SDK default, not the preset's gateway) is asked; others
+        # get the config-derived URL, which is where their traffic goes.
+        endpoint_of = getattr(backend, "configured_endpoint", None)
         result = replace(
             backend.invoke(pr, env, tools),
             provider=label,
-            endpoint=model.base_url or preset.base_url,
+            endpoint=(
+                endpoint_of(preset, model) if endpoint_of else (model.base_url or preset.base_url)
+            ),
         )
         if not result.throttled:
             findings = None
@@ -826,6 +828,7 @@ def _run_pool(
                 findings=findings,
                 detail=result.detail or "",
                 backend=getattr(model, "backend", None) or review.backend,
+                endpoint=result.endpoint or "",
             )
             return result
 
@@ -847,6 +850,7 @@ def _run_pool(
             findings=None,
             detail=result.detail or "",
             backend=getattr(model, "backend", None) or review.backend,
+            endpoint=result.endpoint or "",
         )
     return result
 

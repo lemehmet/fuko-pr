@@ -175,6 +175,20 @@ def test_build_env_plain_anthropic_leaves_model_routing_alone(monkeypatch):
     assert "CLAUDE_CODE_SUBAGENT_MODEL" not in env
 
 
+def test_configured_endpoint_is_auth_aware(monkeypatch):
+    """Attribution must follow the traffic: api-key mode goes to the preset's
+    gateway; subscription mode deliberately injects no base URL and talks to
+    the SDK default — claiming the gateway URL there would be the very
+    substitution class the receipt's endpoint field exists to expose."""
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend()
+    preset = get_preset("qwen-anthropic")
+    keyed = ModelConfig(provider="qwen-anthropic", name="qwen3.8-max", auth="api-key")
+    assert backend.configured_endpoint(preset, keyed).startswith("https://token-plan.")
+    subscribed = ModelConfig(provider="qwen-anthropic", name="qwen3.8-max", auth="subscription")
+    assert backend.configured_endpoint(preset, subscribed) == ""
+
+
 def test_invoke_reinjects_model_routing_for_gateway(monkeypatch):
     """Ambient wrapper-shell routing vars are stripped; the config-built ones land.
 

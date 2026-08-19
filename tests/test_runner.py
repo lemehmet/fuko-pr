@@ -2069,7 +2069,7 @@ def test_per_branch_backend_is_resolved_and_attributed(monkeypatch, tmp_path):
         lambda name, config=None: (resolved.append(name), SimpleNamespace(name=name))[1],
     )
     monkeypatch.setattr(runner, "_head_for_receipts", lambda *a: "headsha")
-    monkeypatch.setattr(runner, "_post_branch_header", lambda *a, **k: ("actor", 1))
+    monkeypatch.setattr(runner, "_post_branch_header", lambda *a, **k: ("actor", 1, "app[bot]"))
     monkeypatch.setattr(runner, "_run_pool", lambda *a, **k: InvokeResult(returncode=0))
     monkeypatch.setattr(runner, "_observe_reviewer_health", lambda *a: None)
     finals: dict[str, str] = {}

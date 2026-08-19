@@ -356,6 +356,20 @@ class AgenticBackend:
             env[_ENV_KNOWLEDGE] = knowledge
         return env
 
+    def configured_endpoint(self, preset: ProviderPreset, model: ModelConfig) -> str:
+        """The base URL this entry's traffic ACTUALLY goes to, for attribution.
+
+        Subscription auth deliberately injects no base URL -- the runner's own
+        logged-in session talks to Anthropic's default endpoint -- so
+        attributing the preset's gateway URL to such a run would claim the
+        traffic went somewhere it never did (the same substitution class the
+        receipt's endpoint field exists to expose). Empty string = the SDK's
+        own default endpoint, matching the receipt field's convention.
+        """
+        if self._resolve_auth(preset, model) == _AUTH_SUBSCRIPTION:
+            return ""
+        return model.base_url or preset.base_url or ""
+
     @staticmethod
     def _resolve_auth(preset: ProviderPreset, model: ModelConfig) -> str:
         """Resolve the entry's ``auth`` setting to a concrete mode.
