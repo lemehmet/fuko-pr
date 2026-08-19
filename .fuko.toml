@@ -1,6 +1,12 @@
 [review]
 image = "ghcr.io/lemehmet/pr-agent:0.41.0@sha256:7341dc6214be964534ce3e68fc73143f3d642240829fe66894b87864db417223"
-tool_timeout = 600
+# 600 -> 900 (2026-08-19): henry's first agentic run was KILLED at 600s
+# mid-review (receipt on PR #130: "review timed out after 600s") — an agentic
+# review walks the checkout with tools, and qwen's token rate makes 10 minutes
+# a normal healthy run, not a wedge. gray's optional `improve` was also dying
+# at 600s. The per-tool budget still exists to kill genuine wedges; it just
+# has to sit above the honest cost of the slowest healthy tool.
+tool_timeout = 900
 optional_tools = ["improve"]
 # Must equal `timeout-minutes` in .github/workflows/fuko-pr-review.yml. The
 # runner uses it to refuse a backup promotion whose sequential worst case
@@ -9,16 +15,14 @@ optional_tools = ["improve"]
 # Keeping the number here means the arithmetic is checked at run time instead of
 # being re-derived by hand whenever a backup is added (#106).
 #
-# THIS CAP IS DELIBERATELY OVERSIZED RIGHT NOW -- do not "correct" it. Neither
-# backup names a token_env, so #106's identity rule refuses both promotions and
-# the achievable worst case is 2 branches * 2 tools * 600s = 2400s = 40 min,
-# i.e. this cap is ~2.75x it. It stays at 110 because #114 (giving backups their
-# own identity) makes promotion possible again: promoting one backup gives
-# 3 * 2 * 600s = 60 min and promoting both gives 4 * 2 * 600s = 80 min, plus
-# setup. Churning the cap down now and up again on #114 is worse than carrying
-# the headroom, and lowering it would silently re-introduce the mid-run kill the
-# moment #114 lands. Every number here is `branches * tools * tool_timeout` and
-# should be recomputed from that formula rather than adjusted by feel.
+# Recomputed for tool_timeout=900 and the 3-seat fleet (2026-08-19): the
+# sequential worst case is 3 branches * 2 tools * 900s = 90 min + ~5m setup,
+# which fits; the CONCURRENT path (all three Apps minting) is ~2 * 900s + setup
+# ≈ 35 min. Promoting even one backup (4 * 2 * 900s = 120 min) no longer fits —
+# #106's runtime arithmetic refuses exactly that promotion, which is the
+# designed behavior, not an accident to fix by raising this. Every number here
+# is `branches * tools * tool_timeout`; recompute from the formula rather than
+# adjusting by feel.
 job_budget_minutes = 110
 
 # FLEET COMPOSITION (2026-08-14) — two gating seats, two backups.
@@ -88,14 +92,17 @@ token_env = "FUKO_GITHUB_TOKEN_GRAY"
 # - Until the fuko-henry App exists (vars.FUKO_HENRY_APP_ID +
 #   secrets.FUKO_HENRY_APP_PRIVATE_KEY), FUKO_GITHUB_TOKEN_HENRY is empty and
 #   EVERY round runs sequentially under the base identity (#106 identity rule
-#   is all-or-nothing). Budget still fits: 3 branches * 2 tools * 600s = 60m,
-#   escalated worst 5 * 2 * 600s = 100m, under the 110m cap.
+#   is all-or-nothing). Budget math lives on job_budget_minutes above.
 # - Mixed backends freeze backup escalation for the round (plan_escalation
 #   refuses to promote across drivers) — fix that before any agentic seat
 #   enters a GATING fleet (mepro).
-# - The shared backups are pr-agent-only: if henry's endpoint throttles, the
-#   cross-driver failover fails the branch rather than substituting a
-#   different harness mid-experiment. That is the honest outcome for an A/B.
+# - The shared backups are pr-agent-only, and a branch's failover pool keeps
+#   only SAME-driver backups (a failover must never swap harnesses
+#   mid-experiment): if henry's endpoint throttles or times out, its pool is
+#   exhausted and the branch fails with an honest receipt. First observed live
+#   on PR #130 round 1 — henry's 600s timeout walked into the pr-agent backup
+#   and died on the driver gate; the pool filter turns that into a clean
+#   "pool exhausted".
 [[review.models]]
 provider = "qwen-anthropic"
 name = "qwen3.8-max"

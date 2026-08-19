@@ -1888,6 +1888,27 @@ def test_finalized_receipt_carries_endpoint_and_app(monkeypatch):
     assert receipt.app == "fuko-henry[bot]"
 
 
+def test_backups_filtered_to_branch_driver():
+    """A failover must never swap harnesses mid-round.
+
+    A branch's pool runs under ONE backend instance, so only same-driver
+    backups may join it. Observed live (fuko-pr#130 round 1): the agentic
+    trial's 600s timeout failed over into a pr-agent backup and died on the
+    driver's preset gate — a confusing hard error where "pool exhausted" is
+    the honest outcome.
+    """
+    review = ReviewConfig(backend="pr-agent")
+    agentic_entry = ReviewModel(provider="qwen-anthropic", name="qwen3.8-max", backend="agentic")
+    pragent_entry = ReviewModel(provider="openrouter", name="z-ai/glm-5.2")
+    backups = [
+        ReviewModel(provider="openrouter", name="b1", role="backup"),
+        ReviewModel(provider="anthropic", name="b2", role="backup", backend="agentic"),
+    ]
+    assert runner._compatible_backups(agentic_entry, backups, review) == [backups[1]]
+    # An entry with no override inherits [review].backend and keeps pr-agent backups.
+    assert runner._compatible_backups(pragent_entry, backups, review) == [backups[0]]
+
+
 def test_receipt_without_endpoint_or_app_still_decodes():
     """Receipts written before the fields existed decode with the empty
     'no claim either way' defaults -- old headers must not become unreadable."""

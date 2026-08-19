@@ -861,6 +861,32 @@ def _backend_for(entry: ReviewModel, review: ReviewConfig):
     return get_backend(entry.backend or review.backend, review)
 
 
+def _compatible_backups(
+    entry: ReviewModel, backups: list[ReviewModel], review: ReviewConfig
+) -> list[ReviewModel]:
+    """The shared backups whose DRIVER matches ``entry``'s branch.
+
+    A branch's whole pool runs under one backend instance (``_run_pool`` calls
+    ``backend.build_env`` for every member), so a failover must never swap
+    harnesses mid-round: the same rule ``plan_escalation`` already applies to
+    promotions. Without this filter, an agentic branch that throttles walks
+    into a pr-agent backup and dies on the driver's preset gate — a confusing
+    hard error where "pool exhausted" is the honest outcome (observed live on
+    fuko-pr#130 round 1, when a 600s timeout on the agentic trial failed over
+    into the OpenRouter backup). Skipped backups are announced so a shrunken
+    pool is visible in the job log, not a silent coverage loss.
+    """
+    branch_backend = entry.backend or review.backend
+    kept = [b for b in backups if (b.backend or review.backend) == branch_backend]
+    if len(kept) != len(backups):
+        print(
+            f"fuko: {entry.provider}/{entry.name}: {len(backups) - len(kept)} shared "
+            f"backup(s) excluded from this branch's pool (driver != '{branch_backend}')",
+            file=sys.stderr,
+        )
+    return kept
+
+
 def _has_identity(entry: ModelConfig) -> bool:
     """Whether ``entry`` names a ``token_env`` that resolves to a non-empty token.
 
@@ -1063,7 +1089,7 @@ def _run_compare_branch(
             knowledge,
             _github_env(token),
             review,
-            [entry, *backups],
+            [entry, *_compatible_backups(entry, backups, review)],
             cooled,
             required,
             tools=tools,
@@ -1228,7 +1254,7 @@ def _review_compare(
                     knowledge,
                     gh_env,
                     review,
-                    [entry, *backups],
+                    [entry, *_compatible_backups(entry, backups, review)],
                     cooled,
                     required,
                     tools=tools,
@@ -1411,7 +1437,12 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
             knowledge,
             gh_env,
             cfg.review,
-            [*reviewers, *backups],
+            # Same driver-compatibility rule as the A/B branches: the solo
+            # branch's pool runs under ONE backend instance.
+            [
+                *reviewers,
+                *(_compatible_backups(reviewers[0], backups, cfg.review) if reviewers else backups),
+            ],
             cooled,
             required,
             role=reviewers[0].role if reviewers else "active",
