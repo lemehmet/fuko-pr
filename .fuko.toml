@@ -1,13 +1,23 @@
 [review]
 image = "ghcr.io/lemehmet/pr-agent:0.41.0@sha256:7341dc6214be964534ce3e68fc73143f3d642240829fe66894b87864db417223"
-# 600 -> 900 (2026-08-19): henry's first agentic run was KILLED at 600s
-# mid-review (receipt on PR #130: "review timed out after 600s") — an agentic
-# review walks the checkout with tools, and qwen's token rate makes 10 minutes
-# a normal healthy run, not a wedge. gray's optional `improve` was also dying
-# at 600s. The per-tool budget still exists to kill genuine wedges; it just
-# has to sit above the honest cost of the slowest healthy tool.
-tool_timeout = 900
-optional_tools = ["improve"]
+# 600 -> 900 -> 1800 (2026-08-19): henry's agentic runs were KILLED at 600s
+# AND at 900s (receipts on PR #130). Measured cause, not guessed: the QwenCloud
+# token-plan gateway forces THINKING mode on (a bare /v1/messages call returns
+# thinking blocks unrequested) at ~35 tok/s, so every agentic tool-call turn
+# pays a few hundred reasoning tokens first — a healthy agentic review of a
+# ~20-file PR is tens of minutes on this endpoint. The per-tool budget still
+# exists to kill genuine wedges; it just has to sit above the honest cost of
+# the slowest healthy tool. If henry STILL times out at 1800s, that is A/B
+# evidence on the latency/cost axis, not a number to bump again blindly.
+tool_timeout = 1800
+# `improve` DROPPED 2026-08-19 (was ["improve"]): gray's improve timed out in
+# both observed rounds on this repo (600s and 900s — pure burned wall-clock),
+# and keeping a second tool at tool_timeout=1800 would put the sequential
+# worst case at 3 branches * 2 tools * 1800s = 180m, over the 110m job cap.
+# Review-only keeps it at 3 * 1 * 1800s = 90m. Cost: dorian's (working)
+# inline suggestions on this dogfood repo — acceptable while the agentic A/B
+# runs; revisit when the experiment concludes.
+optional_tools = []
 # Must equal `timeout-minutes` in .github/workflows/fuko-pr-review.yml. The
 # runner uses it to refuse a backup promotion whose sequential worst case
 # (branches * tools * tool_timeout) would not fit the job -- an overrun kills the
@@ -15,10 +25,10 @@ optional_tools = ["improve"]
 # Keeping the number here means the arithmetic is checked at run time instead of
 # being re-derived by hand whenever a backup is added (#106).
 #
-# Recomputed for tool_timeout=900 and the 3-seat fleet (2026-08-19): the
-# sequential worst case is 3 branches * 2 tools * 900s = 90 min + ~5m setup,
-# which fits; the CONCURRENT path (all three Apps minting) is ~2 * 900s + setup
-# ≈ 35 min. Promoting even one backup (4 * 2 * 900s = 120 min) no longer fits —
+# Recomputed for tool_timeout=1800, review-only, 3-seat fleet (2026-08-19):
+# sequential worst case 3 branches * 1 tool * 1800s = 90 min + ~5m setup,
+# which fits; the CONCURRENT path (all three Apps minting) is ~1800s + setup
+# ≈ 35 min. Promoting even one backup (4 * 1 * 1800s = 120 min) does not fit —
 # #106's runtime arithmetic refuses exactly that promotion, which is the
 # designed behavior, not an accident to fix by raising this. Every number here
 # is `branches * tools * tool_timeout`; recompute from the formula rather than
