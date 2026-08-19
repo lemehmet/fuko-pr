@@ -392,6 +392,44 @@ def test_escalation_without_a_budget_promotes_but_still_reports_the_cost(monkeyp
     assert runner.sequential_cost_minutes(2, 2, 600) == 40.0
 
 
+def test_escalation_budget_charges_per_entry_timeouts(monkeypatch):
+    """A branch's cost is ITS timeout, not the fleet-wide one.
+
+    With an 1800s agentic seat beside 600s pr-agent seats, a single fleet-wide
+    number either overcounts every cheap branch (refusing promotions the budget
+    holds) or undercounts the expensive one (the #106 mid-run kill). The sum:
+    600*2 (a) + 1800*2 (t) + 600*2 (c, promoted) = 100m — over an 80m budget
+    that the OLD uniform arithmetic (3 x 2 x 600s = 60m) would have passed.
+    """
+    from sidecar.fukoconfig import ReviewConfig
+
+    for name in ("T_A", "T_T", "T_C"):
+        monkeypatch.setenv(name, f"tok-{name}")
+    existing = _models(("p", "a", "active", "T_A"), ("p", "t", "trial", "T_T"))
+    existing[1].tool_timeout = 1800
+    backups = _models(("p", "c", "backup", "T_C"))
+    review = ReviewConfig(tool_timeout=600, job_budget_minutes=80)
+
+    promote, reasons = runner.plan_escalation(existing, backups, review, concurrent=True)
+
+    assert promote == []
+    assert reasons and "over the 80m job budget" in reasons[0]
+    assert runner.fleet_sequential_cost_minutes([*existing, *backups], 2, review) == 100.0
+
+
+def test_backend_for_applies_per_entry_tool_timeout():
+    """The entry's override lands on the branch's backend instance; an entry
+    without one inherits [review].tool_timeout — and instances are per-branch,
+    so the override cannot bleed into a sibling."""
+    from sidecar.fukoconfig import ReviewConfig, ReviewModel
+
+    review = ReviewConfig(tool_timeout=800)
+    slow = ReviewModel(provider="anthropic", name="m", backend="agentic", tool_timeout=1800)
+    fast = ReviewModel(provider="openrouter", name="n")
+    assert runner._backend_for(slow, review).tool_timeout == 1800
+    assert runner._backend_for(fast, review).tool_timeout == 800
+
+
 def test_config_parsed_backup_with_token_env_is_promoted(monkeypatch, tmp_path):
     """#114 end-to-end: a role="backup" entry may carry token_env through TOML
     parsing, and such an identity'd backup is then promoted under escalation.

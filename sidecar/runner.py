@@ -861,8 +861,16 @@ def _backend_for(entry: ReviewModel, review: ReviewConfig):
     Per-entry ``backend`` overrides ``[review].backend``; ``None`` inherits it. The
     name was validated at config load, so ``get_backend`` cannot raise here.
     Resolved per branch rather than once per run so a fleet may mix drivers.
+
+    A per-entry ``tool_timeout`` override lands on the branch's backend INSTANCE
+    (constructed fresh per branch, so no cross-branch bleed): the whole branch —
+    same-driver backups included — runs under the entry's budget, which is the
+    honest reading of "this seat's tools cost more".
     """
-    return get_backend(entry.backend or review.backend, review)
+    backend = get_backend(entry.backend or review.backend, review)
+    if getattr(entry, "tool_timeout", None):
+        backend.tool_timeout = entry.tool_timeout
+    return backend
 
 
 def _compatible_backups(
@@ -911,6 +919,24 @@ def sequential_cost_minutes(branches: int, tools: int, tool_timeout: int) -> flo
     fit inside the CI job's cap.
     """
     return branches * tools * tool_timeout / 60.0
+
+
+def fleet_sequential_cost_minutes(
+    entries: list[ModelConfig], tools: int, review: ReviewConfig
+) -> float:
+    """Per-entry-aware :func:`sequential_cost_minutes` over concrete ``entries``.
+
+    Each entry's branch is charged its OWN ``tool_timeout`` (the per-entry
+    override, else ``[review].tool_timeout``) — with mixed budgets in one fleet
+    (an 1800s agentic seat beside 800s pr-agent seats) a single fleet-wide
+    number either overcounts every cheap branch or undercounts the expensive
+    one, and both directions have bitten: overcounting refuses promotions the
+    budget could hold, undercounting is the mid-run kill #106 exists to stop.
+    """
+    return (
+        sum(tools * (getattr(e, "tool_timeout", None) or review.tool_timeout) for e in entries)
+        / 60.0
+    )
 
 
 def plan_escalation(
@@ -992,7 +1018,7 @@ def plan_escalation(
                 "single shared backend"
             )
             continue
-        cost = sequential_cost_minutes(len(existing) + len(promote) + 1, tools, review.tool_timeout)
+        cost = fleet_sequential_cost_minutes([*existing, *promote, entry], tools, review)
         if budget is not None and cost > budget:
             reasons.append(
                 f"{label}: promoting it needs ~{cost:.0f}m sequential worst case, over "
@@ -1386,12 +1412,19 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
         # has gone stale (#106).
         tools = len(cfg.review.tools) or 1
         branches = len(existing) + len(promote)
-        cost = sequential_cost_minutes(branches, tools, cfg.review.tool_timeout)
+        fleet = [*existing, *promote]
+        cost = fleet_sequential_cost_minutes(fleet, tools, cfg.review)
+        overrides = sorted(
+            {t for e in fleet if (t := getattr(e, "tool_timeout", None)) is not None}
+        )
+        timeout_note = f"{cfg.review.tool_timeout}s" + (
+            f" (+ per-entry {', '.join(f'{t}s' for t in overrides)})" if overrides else ""
+        )
         print(
             "fuko: external reviewers degraded last round — escalation considered "
             f"{len(backups)} backup(s), promoting {len(promote)}; sequential worst "
             f"case {cost:.0f}m ({branches} branches x {tools} tools x "
-            f"{cfg.review.tool_timeout}s), budget "
+            f"{timeout_note}), budget "
             f"{cfg.review.job_budget_minutes or 'unset'}",
             file=sys.stderr,
         )
