@@ -1901,9 +1901,7 @@ def test_receipt_without_endpoint_or_app_still_decodes():
     assert receipt.endpoint == ""
     assert receipt.app == ""
     # And the new fields round-trip through the marker encoding.
-    stamped = RunReceipt(
-        label="a/b", model="a/b", endpoint="https://e", app="x[bot]", state="done"
-    )
+    stamped = RunReceipt(label="a/b", model="a/b", endpoint="https://e", app="x[bot]", state="done")
     [back] = extract_run_receipts(encode_run_marker(stamped))
     assert (back.endpoint, back.app) == ("https://e", "x[bot]")
 
