@@ -27,6 +27,22 @@ A Linux x64 host with:
 - ~3 GB free for the Ollama `bge-m3` model
 - Outbound access to your chat provider (e.g. `api.z.ai`, `openrouter.ai`) and to GitHub
 - For the co-located setup: a GitHub self-hosted runner agent registered to the repo or org
+- **For the agentic backend only** (any seat with `backend = "agentic"`): the
+  `claude` CLI (Claude Code) on the RUNNER's `PATH` — the driver runs it as a
+  subprocess of the review job, not in Docker (containerizing it is #102). A
+  missing binary fails that branch with `HarnessNotAvailableError` and does NOT
+  fail over; it is a provisioning gap, not a throttle. Install the native build
+  version-pinned and keep it off auto-update so review behavior only changes
+  when you choose:
+
+  ```bash
+  curl -fsSL https://claude.ai/install.sh | bash -s -- <pinned-version>
+  export DISABLE_AUTOUPDATER=1   # in the runner service environment
+  ```
+
+  The seat's model key (e.g. `QWEN_TOKEN_PLAN_KEY` for the `qwen-anthropic`
+  preset) must be exported in the workflow's `env:` block from a repo secret —
+  the driver reads it on the runner, not on the sidecar.
 
 ## 1. Register the GitHub runner
 

@@ -42,11 +42,15 @@ tools = ["review", "improve"]   # PR-Agent tools to run
 # so a config with none would have nothing that gates).
 #
 # Known presets: zai-coding, ollama, ollama-cloud, lemonade, openrouter,
-# prodia, anthropic, openai. (lemonade = any Lemonade server, e.g. a LAN AMD
-# box; OpenAI-compatible, no real auth — set LEMONADE_API_KEY to any non-empty
-# value and point base_url at the host. prodia = a rented OpenAI-compatible
-# GPU box, key from PRODIA_KEY; it has no default base_url, so each model
-# entry must set base_url to the rental's endpoint.)
+# prodia, anthropic, openai, qwen-anthropic. (lemonade = any Lemonade server,
+# e.g. a LAN AMD box; OpenAI-compatible, no real auth — set LEMONADE_API_KEY
+# to any non-empty value and point base_url at the host. prodia = a rented
+# OpenAI-compatible GPU box, key from PRODIA_KEY; it has no default base_url,
+# so each model entry must set base_url to the rental's endpoint.
+# qwen-anthropic = QwenCloud's Anthropic-compatible Token Plan gateway, key
+# from QWEN_TOKEN_PLAN_KEY (sk-sp-…): an `anthropic/`-family preset serving
+# Qwen models, which is what admits a Qwen seat to the agentic backend —
+# pair it with backend = "agentic" and auth = "api-key".)
 #
 # `auth` (agentic backend only): "auto" (default) | "api-key" | "subscription".
 # api-key reads the preset's key env var; subscription runs as the runner's own

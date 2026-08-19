@@ -98,6 +98,23 @@ jobs:
           permission-pull-requests: write
           permission-issues: write
 
+      # henry, the agentic trial seat (.fuko.toml). Until this App is created
+      # and installed, the skipped mint leaves FUKO_GITHUB_TOKEN_HENRY empty and
+      # every round runs sequentially — the identity rule is all-or-nothing
+      # across actives AND trials (#106), so one missing seat identity costs the
+      # whole round its concurrency, not just henry's branch.
+      - name: Mint fuko-henry app token
+        id: app-token-henry
+        if: ${{ vars.FUKO_HENRY_APP_ID != '' }}
+        continue-on-error: true # absent/failed henry App degrades to sequential single-token A/B
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.FUKO_HENRY_APP_ID }}
+          private-key: ${{ secrets.FUKO_HENRY_APP_PRIVATE_KEY }}
+          permission-contents: read
+          permission-pull-requests: write
+          permission-issues: write
+
       # Make a failed mint LOUD: continue-on-error above hides the failure from
       # the job status (the step still reports success), the token output comes
       # out empty, and the runner then silently degrades — gray missing means
@@ -106,16 +123,20 @@ jobs:
       # a skipped mint (App intentionally unconfigured) stays silent.
       # (Found on mepro#1455: a bad gray PEM 401'd and nothing flagged it.)
       - name: Surface App token mint failures
-        if: ${{ steps.app-token-dorian.outcome == 'failure' || steps.app-token-gray.outcome == 'failure' }}
+        if: ${{ steps.app-token-dorian.outcome == 'failure' || steps.app-token-gray.outcome == 'failure' || steps.app-token-henry.outcome == 'failure' }}
         env:
           DORIAN_OUTCOME: ${{ steps.app-token-dorian.outcome }}
           GRAY_OUTCOME: ${{ steps.app-token-gray.outcome }}
+          HENRY_OUTCOME: ${{ steps.app-token-henry.outcome }}
         run: |
           if [ "$DORIAN_OUTCOME" = "failure" ]; then
             echo "::warning title=fuko-dorian App token mint failed::check vars.FUKO_DORIAN_APP_ID / secrets.FUKO_DORIAN_APP_PRIVATE_KEY and the App installation; the base identity falls back to fuko-gray, then github-actions[bot]"
           fi
           if [ "$GRAY_OUTCOME" = "failure" ]; then
             echo "::warning title=fuko-gray App token mint failed::check vars.FUKO_GRAY_APP_ID / secrets.FUKO_GRAY_APP_PRIVATE_KEY and the App installation; the A/B falls back to sequential under the base identity"
+          fi
+          if [ "$HENRY_OUTCOME" = "failure" ]; then
+            echo "::warning title=fuko-henry App token mint failed::check vars.FUKO_HENRY_APP_ID / secrets.FUKO_HENRY_APP_PRIVATE_KEY and the App installation; the WHOLE round falls back to sequential under the base identity"
           fi
 
       # Bring the PR's code + .fuko.toml into the workspace; the runner is then
@@ -145,6 +166,7 @@ jobs:
           # distinct actors; otherwise the run is sequential under GITHUB_TOKEN.
           FUKO_GITHUB_TOKEN_DORIAN: ${{ steps.app-token-dorian.outputs.token }}
           FUKO_GITHUB_TOKEN_GRAY: ${{ steps.app-token-gray.outputs.token }}
+          FUKO_GITHUB_TOKEN_HENRY: ${{ steps.app-token-henry.outputs.token }}
           # Knowledge base: the LAN fuko sidecar reached from the self-hosted
           # runner. If unreachable the review degrades to KB-less — harmless, just
           # no injected learnings.
@@ -160,6 +182,10 @@ jobs:
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
           ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY }}
+          # henry's agentic trial seat (qwen-anthropic preset): the QwenCloud
+          # Token Plan key (sk-sp-…). Distinct from every other bucket above —
+          # a QwenCloud throttle cools only henry.
+          QWEN_TOKEN_PLAN_KEY: ${{ secrets.QWEN_TOKEN_PLAN_KEY }}
           # Pass the PR URL through the environment rather than expanding
           # ${{ github.event... }} directly in run: (avoids shell injection).
           PR_URL: ${{ github.event.pull_request.html_url }}

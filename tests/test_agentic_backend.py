@@ -140,6 +140,67 @@ def test_build_env_rejects_non_anthropic():
         )
 
 
+def test_build_env_accepts_anthropic_compatible_gateway(monkeypatch):
+    """An `anthropic/`-prefixed gateway preset (qwen-anthropic) passes the gate.
+
+    The gate is on the PROTOCOL the harness speaks, not on who serves it: the
+    Token Plan endpoint answers the Anthropic API with a Qwen model behind it.
+    The gateway's base URL and key must be injected, and the background-model
+    routing vars must map haiku-class and subagent calls onto slugs the gateway
+    actually serves -- without them those calls request `claude-haiku-*` from an
+    endpoint that has never heard of it.
+    """
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    env = AgenticBackend().build_env(
+        get_preset("qwen-anthropic"),
+        ModelConfig(provider="qwen-anthropic", name="qwen3.8-max", auth="api-key"),
+        knowledge="",
+        tools=["review"],
+    )
+    assert env["FUKO_AGENTIC_MODEL"] == "qwen3.8-max"
+    assert env["ANTHROPIC_API_KEY"] == "sk-sp-test"
+    assert env["ANTHROPIC_BASE_URL"].startswith("https://token-plan.")
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "qwen3.6-flash"  # preset small_model
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "qwen3.8-max"
+
+
+def test_build_env_plain_anthropic_leaves_model_routing_alone(monkeypatch):
+    """No base_url = real Anthropic: the harness's own `claude-*` defaults are
+    correct there, so the routing vars must NOT be injected."""
+    monkeypatch.setenv("ANTHROPIC_KEY", "sk-ant")
+    env = AgenticBackend().build_env(
+        get_preset("anthropic"), _model(auth="api-key"), knowledge="", tools=["review"]
+    )
+    assert "ANTHROPIC_DEFAULT_HAIKU_MODEL" not in env
+    assert "CLAUDE_CODE_SUBAGENT_MODEL" not in env
+
+
+def test_invoke_reinjects_model_routing_for_gateway(monkeypatch):
+    """Ambient wrapper-shell routing vars are stripped; the config-built ones land.
+
+    A claude-qwen-style wrapper on the RUNNER exports ANTHROPIC_MODEL &co for a
+    human's shell; carried into the harness they would redirect this seat's
+    calls to whatever the wrapper was aimed at. Config decides: the subprocess
+    env must hold exactly the values build_env derived, and the ambient ones
+    must be gone.
+    """
+    monkeypatch.setenv("ANTHROPIC_MODEL", "ambient-model")
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "ambient-haiku")
+    monkeypatch.setenv("CLAUDE_CODE_SUBAGENT_MODEL", "ambient-sub")
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    env = backend.build_env(
+        get_preset("qwen-anthropic"),
+        ModelConfig(provider="qwen-anthropic", name="qwen3.8-max", auth="api-key"),
+        knowledge="",
+        tools=["review"],
+    )
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON), env=env)
+    assert captured["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "qwen3.6-flash"
+    assert captured["env"]["CLAUDE_CODE_SUBAGENT_MODEL"] == "qwen3.8-max"
+    assert "ANTHROPIC_MODEL" not in captured["env"]
+
+
 def test_invoke_stashes_and_filters(monkeypatch):
     backend = AgenticBackend(ReviewConfig(tool_timeout=222))
     result, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))

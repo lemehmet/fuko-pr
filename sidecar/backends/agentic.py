@@ -217,6 +217,26 @@ _ANTHROPIC_INHERITED_VARS = (
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
+    # Model-routing overrides: ambient values (e.g. a claude-qwen-style wrapper
+    # shell) would silently redirect the harness's main, background-haiku, and
+    # subagent calls to whatever model the RUNNER's shell was aimed at. Config
+    # decides here too: `_MODEL_ROUTING_VARS` re-injects them for gateway
+    # presets only.
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+)
+
+# Injected in api-key mode when the preset routes to a NON-Anthropic gateway
+# (base_url set): Claude Code makes background haiku-class and subagent calls
+# with `claude-*` slugs, which a gateway serving another model family has never
+# heard of. The main model already travels via `--model`; these cover the calls
+# that don't.
+_MODEL_ROUTING_VARS = (
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
 )
 
 
@@ -319,6 +339,13 @@ class AgenticBackend:
             base_url = model.base_url or preset.base_url
             if base_url:
                 env["ANTHROPIC_BASE_URL"] = base_url
+                # A gateway serves its own model family, so the harness's
+                # background haiku-class and subagent calls must not ask it for
+                # `claude-*` slugs. `small_model` names the gateway's cheap
+                # tier; without one the entry's own model does every job.
+                small = str(preset.quirks.get("small_model") or model.name)
+                env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = small
+                env["CLAUDE_CODE_SUBAGENT_MODEL"] = model.name
         if model.extra_instructions:
             env[_ENV_INSTRUCTIONS] = model.extra_instructions
         if knowledge:
@@ -406,7 +433,7 @@ class AgenticBackend:
             and k not in _ANTHROPIC_INHERITED_VARS
         }
         if auth == _AUTH_API_KEY:
-            for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"):
+            for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", *_MODEL_ROUTING_VARS):
                 if key in env:
                     harness_env[key] = env[key]
         else:

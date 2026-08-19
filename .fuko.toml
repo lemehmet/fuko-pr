@@ -71,6 +71,40 @@ name = "qwen/qwen3.8-max"
 max_context = 1000000
 token_env = "FUKO_GITHUB_TOKEN_GRAY"
 
+# henry — TRIAL seat (non-gating): the agentic-vs-diff A/B, 2026-08-19.
+# Same MODEL as gray (qwen3.8-max) on purpose: gray reviews the diff via
+# PR-Agent, henry walks the checkout via the agentic driver (headless Claude
+# Code on QwenCloud's Anthropic-compatible Token Plan endpoint), so every PR
+# here gets the same model both ways and the harness is the only variable.
+# Score receipts-only (uniqueness vs gray in particular); one of the two qwen
+# seats is removed when the experiment concludes.
+#
+# auth is PINNED to api-key: `auto` on a runner with a logged-in Claude session
+# would resolve to subscription mode, which never injects a base URL — the seat
+# would silently review with real Claude, the exact substitution class receipts
+# exist to catch.
+#
+# KNOWN LIMITS while trialing (accepted, on a repo where reviews gate nothing):
+# - Until the fuko-henry App exists (vars.FUKO_HENRY_APP_ID +
+#   secrets.FUKO_HENRY_APP_PRIVATE_KEY), FUKO_GITHUB_TOKEN_HENRY is empty and
+#   EVERY round runs sequentially under the base identity (#106 identity rule
+#   is all-or-nothing). Budget still fits: 3 branches * 2 tools * 600s = 60m,
+#   escalated worst 5 * 2 * 600s = 100m, under the 110m cap.
+# - Mixed backends freeze backup escalation for the round (plan_escalation
+#   refuses to promote across drivers) — fix that before any agentic seat
+#   enters a GATING fleet (mepro).
+# - The shared backups are pr-agent-only: if henry's endpoint throttles, the
+#   cross-driver failover fails the branch rather than substituting a
+#   different harness mid-experiment. That is the honest outcome for an A/B.
+[[review.models]]
+provider = "qwen-anthropic"
+name = "qwen3.8-max"
+max_context = 1000000
+auth = "api-key"
+backend = "agentic"
+role = "trial"
+token_env = "FUKO_GITHUB_TOKEN_HENRY"
+
 # Backup 1 — shares OPENROUTER_KEY with gray; see the throttle-bucket note above.
 [[review.models]]
 provider = "openrouter"

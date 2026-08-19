@@ -34,12 +34,16 @@ def record(
     findings: int | None = None,
     detail: str = "",
     backend: str = "pr-agent",
+    endpoint: str = "",
 ) -> None:
     """Insert one review-run row (no-op when persistence is disabled).
 
     ``backend`` is the driver that produced the run (#99); it defaults to
     ``"pr-agent"`` so an omitting caller writes the same value the schema backfill
-    applied to pre-existing rows.
+    applied to pre-existing rows. ``endpoint`` is the base URL the answering
+    entry was configured to reach (see ``RunReceipt.endpoint``); it defaults to
+    ``""`` -- the SDK-default-endpoint value the backfill applied -- so an
+    omitting caller stays consistent with pre-existing rows.
     """
     if not _enabled():
         return
@@ -49,8 +53,8 @@ def record(
         conn.execute(
             "INSERT INTO review_runs "
             "(repo, pr, provider, model, slot, duration_s, attempts, outcome, findings, "
-            "detail, backend) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "detail, backend, endpoint) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 repo,
                 pr,
@@ -63,6 +67,7 @@ def record(
                 findings,
                 (detail or "")[:500],
                 backend,
+                endpoint,
             ),
         )
 

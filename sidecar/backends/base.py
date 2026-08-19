@@ -48,6 +48,9 @@ class InvokeResult:
     throttled: bool = False
     provider: str | None = None
     channels: dict[str, str] = field(default_factory=dict)
+    #: Base URL the answering pool entry was configured to reach (see
+    #: :attr:`sidecar.signals.RunReceipt.endpoint`); ``None`` = SDK default.
+    endpoint: str | None = None
 
 
 @runtime_checkable

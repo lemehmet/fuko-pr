@@ -205,7 +205,7 @@ def test_sequential_compare_records_per_branch_slots(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "build_knowledge", lambda *a: "")
     monkeypatch.setattr(runner, "_cb_cooldowns", lambda: set())
     monkeypatch.setattr(runner, "_estimate_required_context", lambda *a: None)
-    monkeypatch.setattr(runner, "_post_branch_header", lambda *a, **k: (None, None))
+    monkeypatch.setattr(runner, "_post_branch_header", lambda *a, **k: (None, None, None))
 
     class FakeBackend:
         def build_env(self, preset, model, knowledge, tools):

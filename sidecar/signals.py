@@ -150,6 +150,30 @@ class RunReceipt(BaseModel):
             "that could have produced it, matching the review_runs backfill."
         ),
     )
+    endpoint: str = Field(
+        default="",
+        description=(
+            "Base URL the answering entry was CONFIGURED to reach (model.base_url "
+            "or the preset's), recorded so the receipt says where the traffic went, "
+            "not just which model slug was asked for. Two entries may serve the "
+            "same model from different providers (a plan endpoint and a metered "
+            "fallback); `model` alone cannot separate them, this can. Empty means "
+            "the provider SDK's own default endpoint -- or a receipt written "
+            "before this field existed, which decodes with no claim either way."
+        ),
+    )
+    app: str = Field(
+        default="",
+        description=(
+            "Login of the identity this receipt was POSTED under (e.g. "
+            "'fuko-gray[bot]'), captured from the header-comment response. The "
+            "comment author already implies it at read time; carrying it in the "
+            "receipt makes the receipt self-contained for consumers that only "
+            "see extracted payloads (scorecards), and lets a mismatch between "
+            "payload and author flag a forged or mis-posted receipt. Empty on "
+            "in-progress receipts and receipts written before this field existed."
+        ),
+    )
     findings: int | None = Field(
         default=None, description="Signals this branch produced; None when not counted."
     )
