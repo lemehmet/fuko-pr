@@ -67,6 +67,14 @@ tools = ["review", "improve"]   # PR-Agent tools to run
 # A promoted/rescued backup runs under the branch's backend unless it declares its
 # own (a backup is only escalation-eligible when its backend matches the round's).
 #
+# Per-entry `tool_timeout` (seconds): overrides [review].tool_timeout for the
+# branch THIS entry starts (same-driver backups rescuing it inherit the
+# branch's budget). Use it when one seat's honest per-tool cost differs from
+# the fleet's — e.g. an agentic seat on a thinking-mode gateway needs 1800s
+# where the pr-agent seats need 800s — instead of raising the fleet-wide
+# number, which grows every seat's stuck-branch bound. Budget arithmetic sums
+# per-entry values, so the override changes only its own branch's worst case.
+#
 # Per-entry review steering: an optional `extra_instructions` string on any
 # entry is prepended to the shared knowledge blob for THAT entry's runs only —
 # use it to differentiate a fleet that would otherwise converge on the same
