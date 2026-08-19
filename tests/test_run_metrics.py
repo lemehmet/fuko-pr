@@ -71,6 +71,39 @@ def test_metrics_run_endpoint(monkeypatch):
     assert seen["backend"] == "pr-agent"
 
 
+def test_migration_007_backfills_endpoint_idempotently():
+    """The endpoint column mirrors 006's shape: NOT NULL DEFAULT '' backfills
+    existing rows to the same "no explicit endpoint recorded" value an omitting
+    caller writes, and ADD COLUMN IF NOT EXISTS keeps re-apply a no-op
+    (migrations re-run on every pool creation)."""
+    from pathlib import Path
+
+    sql = (
+        Path(__file__).resolve().parent.parent / "migrations" / "007_review_run_endpoint.sql"
+    ).read_text(encoding="utf-8")
+    stripped = "\n".join(ln for ln in sql.splitlines() if not ln.lstrip().startswith("--"))
+    stmts = [s.strip() for s in stripped.split(";") if s.strip()]
+    assert len(stmts) == 1
+    assert "ADD COLUMN IF NOT EXISTS endpoint" in stmts[0]
+    assert "DEFAULT ''" in stmts[0] and "NOT NULL" in stmts[0]
+
+
+def test_metrics_run_endpoint_carries_endpoint(monkeypatch):
+    """An explicit endpoint rides the /metrics/run body through to record(),
+    same guard as the backend field's."""
+    monkeypatch.setattr(main.settings, "database_url", "")
+    seen = {}
+    monkeypatch.setattr(
+        run_metrics, "record", lambda repo, pr, provider, model, **kw: seen.update(kw)
+    )
+    resp = _client(monkeypatch).post(
+        "/metrics/run",
+        json={"repo": "o/r", "pr": 7, "provider": "p", "model": "m", "endpoint": "https://e"},
+    )
+    assert resp.status_code == 200
+    assert seen["endpoint"] == "https://e"
+
+
 def test_metrics_run_endpoint_carries_backend(monkeypatch):
     """#99: an explicit backend rides the /metrics/run body through to record()."""
     monkeypatch.setattr(main.settings, "database_url", "")
@@ -205,7 +238,7 @@ def test_sequential_compare_records_per_branch_slots(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "build_knowledge", lambda *a: "")
     monkeypatch.setattr(runner, "_cb_cooldowns", lambda: set())
     monkeypatch.setattr(runner, "_estimate_required_context", lambda *a: None)
-    monkeypatch.setattr(runner, "_post_branch_header", lambda *a, **k: (None, None))
+    monkeypatch.setattr(runner, "_post_branch_header", lambda *a, **k: (None, None, None))
 
     class FakeBackend:
         def build_env(self, preset, model, knowledge, tools):

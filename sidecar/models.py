@@ -296,6 +296,7 @@ class RunMetricRequest(BaseModel):
     findings: int | None = None
     detail: str | None = None
     backend: str = "pr-agent"
+    endpoint: str = ""
 
 
 class RunSummaryRow(BaseModel):

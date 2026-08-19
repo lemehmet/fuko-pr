@@ -345,6 +345,7 @@ def _record_run(
     findings: int | None,
     detail: str,
     backend: str = "pr-agent",
+    endpoint: str = "",
 ) -> None:
     """Persist one review-run metrics row (best-effort, never raises).
 
@@ -370,6 +371,10 @@ def _record_run(
             "findings": findings,
             "detail": (detail or "")[:500],
             "backend": backend,
+            # Caller-supplied (the pool loop resolves it per answering entry,
+            # auth-aware for backends that route themselves) -- NOT re-derived
+            # here, so the DB row and the receipt can never disagree.
+            "endpoint": endpoint,
         }
         if fuko_url:
             headers = {"Content-Type": "application/json"}
@@ -394,6 +399,7 @@ def _record_run(
                 findings=findings,
                 detail=payload["detail"],
                 backend=backend,
+                endpoint=endpoint,
             )
     except Exception as e:
         print(f"fuko: run-metrics record failed (continuing): {e}", file=sys.stderr)
@@ -599,7 +605,7 @@ def _post_branch_header(
     slot: str | None = None,
     promoted: bool = False,
     backend: str = "pr-agent",
-) -> tuple[str | None, int | None]:
+) -> tuple[str | None, int | None, str | None]:
     """Post a model-labelled header issue comment for one A/B branch (best-effort).
 
     It gives a human a visible anchor for which model produced the summary that
@@ -612,14 +618,19 @@ def _post_branch_header(
     ``head_sha``, so the instance is observable as *started* before it has
     produced anything. :func:`_finalize_branch_header` rewrites it on the way out.
 
-    Returns ``(actor, comment_id)``: the posting identity's user id as reported by
-    the create-comment response -- the one identity probe that works for App
-    installation tokens (``GET /user`` 403s for them, #57) -- so marker injection
-    can restrict itself to this branch's own comments (#66), and the comment id so
-    the receipt can be finalized in place. Either is ``None`` when unavailable.
+    Returns ``(actor, comment_id, login)``: the posting identity's user id as
+    reported by the create-comment response -- the one identity probe that works
+    for App installation tokens (``GET /user`` 403s for them, #57) -- so marker
+    injection can restrict itself to this branch's own comments (#66); the
+    comment id so the receipt can be finalized in place; and the identity's
+    LOGIN (e.g. ``fuko-gray[bot]``) so the finalized receipt can carry which App
+    it was posted under (:attr:`RunReceipt.app`). Any of them is ``None`` when
+    unavailable. The opening receipt cannot carry the login -- it is only known
+    from the response to the post that embeds it -- so ``app`` lands at
+    finalization, the receipt scoring actually reads.
     """
     if not token:
-        return None, None
+        return None, None, None
     base = api_url.rstrip("/")
     receipt = RunReceipt(
         label=label,
@@ -639,15 +650,18 @@ def _post_branch_header(
         )
         resp.raise_for_status()
         payload = resp.json() or {}
-        actor_id = (payload.get("user") or {}).get("id")
+        user = payload.get("user") or {}
+        actor_id = user.get("id")
+        login = user.get("login")
         comment_id = payload.get("id")
         return (
             str(actor_id) if actor_id is not None else None,
             int(comment_id) if comment_id is not None else None,
+            str(login) if login else None,
         )
     except (httpx.HTTPError, ValueError) as e:
         print(f"fuko: could not post A/B branch header for {label}: {e}", file=sys.stderr)
-        return None, None
+        return None, None, None
 
 
 def _finalize_branch_header(
@@ -663,6 +677,7 @@ def _finalize_branch_header(
     result: InvokeResult,
     promoted: bool = False,
     backend: str = "pr-agent",
+    app: str | None = None,
 ) -> None:
     """Rewrite the branch header's receipt with the branch's outcome (best-effort).
 
@@ -688,6 +703,13 @@ def _finalize_branch_header(
         # `provider` is the pool entry that actually answered, so a promoted
         # backup is attributed to itself rather than to the primary it replaced.
         model=result.provider or label,
+        # The endpoint the ANSWERING entry was configured to reach, and the App
+        # login this header was posted under -- together with `model` they make
+        # the receipt say who reviewed, from where, as whom. A same-model
+        # failover across providers (plan endpoint -> metered endpoint) is
+        # invisible to the label==model check; the endpoint is what surfaces it.
+        endpoint=result.endpoint or "",
+        app=app or "",
         # Carried verbatim: `returncode` tolerates an optional tool dying, so the
         # per-channel map is the only place that failure is still visible (#108).
         channels=dict(result.channels),
@@ -770,7 +792,19 @@ def _run_pool(
         # provider never equals the label, so every successful primary run would
         # otherwise be misreported as a promotion. Circuit-breaker keys stay bare
         # (`_cb_trip(model.provider, …)`) — those are per-provider, not per-model.
-        result = replace(backend.invoke(pr, env, tools), provider=label)
+        # `endpoint` rides along for the same reason: attribution of the
+        # ANSWERING entry, at the one place that knows which entry answered.
+        # A backend that resolves its own routing (agentic: subscription auth
+        # goes to the SDK default, not the preset's gateway) is asked; others
+        # get the config-derived URL, which is where their traffic goes.
+        endpoint_of = getattr(backend, "configured_endpoint", None)
+        result = replace(
+            backend.invoke(pr, env, tools),
+            provider=label,
+            endpoint=(
+                endpoint_of(preset, model) if endpoint_of else (model.base_url or preset.base_url)
+            ),
+        )
         if not result.throttled:
             findings = None
             if result.returncode == 0:
@@ -794,6 +828,7 @@ def _run_pool(
                 findings=findings,
                 detail=result.detail or "",
                 backend=getattr(model, "backend", None) or review.backend,
+                endpoint=result.endpoint or "",
             )
             return result
 
@@ -815,6 +850,7 @@ def _run_pool(
             findings=None,
             detail=result.detail or "",
             backend=getattr(model, "backend", None) or review.backend,
+            endpoint=result.endpoint or "",
         )
     return result
 
@@ -827,6 +863,32 @@ def _backend_for(entry: ReviewModel, review: ReviewConfig):
     Resolved per branch rather than once per run so a fleet may mix drivers.
     """
     return get_backend(entry.backend or review.backend, review)
+
+
+def _compatible_backups(
+    entry: ReviewModel, backups: list[ReviewModel], review: ReviewConfig
+) -> list[ReviewModel]:
+    """The shared backups whose DRIVER matches ``entry``'s branch.
+
+    A branch's whole pool runs under one backend instance (``_run_pool`` calls
+    ``backend.build_env`` for every member), so a failover must never swap
+    harnesses mid-round: the same rule ``plan_escalation`` already applies to
+    promotions. Without this filter, an agentic branch that throttles walks
+    into a pr-agent backup and dies on the driver's preset gate — a confusing
+    hard error where "pool exhausted" is the honest outcome (observed live on
+    fuko-pr#130 round 1, when a 600s timeout on the agentic trial failed over
+    into the OpenRouter backup). Skipped backups are announced so a shrunken
+    pool is visible in the job log, not a silent coverage loss.
+    """
+    branch_backend = entry.backend or review.backend
+    kept = [b for b in backups if (b.backend or review.backend) == branch_backend]
+    if len(kept) != len(backups):
+        print(
+            f"fuko: {entry.provider}/{entry.name}: {len(backups) - len(kept)} shared "
+            f"backup(s) excluded from this branch's pool (driver != '{branch_backend}')",
+            file=sys.stderr,
+        )
+    return kept
 
 
 def _has_identity(entry: ModelConfig) -> bool:
@@ -1006,8 +1068,9 @@ def _run_compare_branch(
     label = f"{entry.provider}/{entry.name}"
     slot = _slot_of(entry)
     comment_id: int | None = None
+    app_login: str | None = None
     try:
-        actor, comment_id = _post_branch_header(
+        actor, comment_id, app_login = _post_branch_header(
             pr,
             token,
             api_url,
@@ -1030,7 +1093,7 @@ def _run_compare_branch(
             knowledge,
             _github_env(token),
             review,
-            [entry, *backups],
+            [entry, *_compatible_backups(entry, backups, review)],
             cooled,
             required,
             tools=tools,
@@ -1063,6 +1126,7 @@ def _run_compare_branch(
             # keeps a branch's pool single-backend -- but always available and
             # never silently mis-attributed.
             backend=entry.backend or review.backend,
+            app=app_login,
         )
         return label, failed
     _finalize_branch_header(
@@ -1077,6 +1141,7 @@ def _run_compare_branch(
         result=result,
         promoted=bool(getattr(entry, "promoted", False)),
         backend=entry.backend or review.backend,
+        app=app_login,
     )
     return label, result
 
@@ -1167,6 +1232,7 @@ def _review_compare(
             entry_backend = _backend_for(entry, review)
             print(f"fuko: A/B branch {index + 1}/{len(reviewers)}: {label}", file=sys.stderr)
             comment_id: int | None = None
+            app_login: str | None = None
             # Isolate the branch exactly as the concurrent path does, with the
             # header post INSIDE the guard: it only handles httpx/ValueError
             # itself, so any other exception would escape the loop and the
@@ -1175,7 +1241,7 @@ def _review_compare(
             # `comment_id` None, which makes the finalize below a no-op; there is
             # no receipt to rewrite because none was ever created.
             try:
-                actor, comment_id = _post_branch_header(
+                actor, comment_id, app_login = _post_branch_header(
                     pr,
                     token,
                     api_url,
@@ -1192,7 +1258,7 @@ def _review_compare(
                     knowledge,
                     gh_env,
                     review,
-                    [entry, *backups],
+                    [entry, *_compatible_backups(entry, backups, review)],
                     cooled,
                     required,
                     tools=tools,
@@ -1219,6 +1285,7 @@ def _review_compare(
                 result=result,
                 promoted=bool(getattr(entry, "promoted", False)),
                 backend=entry.backend or review.backend,
+                app=app_login,
             )
             outcomes.append((label, result))
 
@@ -1374,7 +1441,12 @@ def review(pr_url: str, config_path: str = DEFAULT_CONFIG_PATH) -> InvokeResult:
             knowledge,
             gh_env,
             cfg.review,
-            [*reviewers, *backups],
+            # Same driver-compatibility rule as the A/B branches: the solo
+            # branch's pool runs under ONE backend instance.
+            [
+                *reviewers,
+                *(_compatible_backups(reviewers[0], backups, cfg.review) if reviewers else backups),
+            ],
             cooled,
             required,
             role=reviewers[0].role if reviewers else "active",

@@ -89,6 +89,20 @@ PRESETS: dict[str, ProviderPreset] = {
         litellm_prefix="anthropic/",
         key_env="ANTHROPIC_KEY",
     ),
+    # QwenCloud's Anthropic-compatible gateway (Token Plan). The `anthropic/`
+    # prefix is what admits it to the agentic backend (headless Claude Code
+    # speaks the Anthropic API; the gateway answers it) -- the model behind the
+    # endpoint is Qwen, not Claude. Key: the Token Plan key (sk-sp-…); do NOT
+    # point a DashScope/PAYG key here, plans and keys must not be mixed.
+    # `small_model` maps Claude Code's background haiku-class calls to a slug
+    # this gateway actually serves -- without it those calls request
+    # `claude-haiku-*` from an endpoint that has never heard of it.
+    "qwen-anthropic": ProviderPreset(
+        litellm_prefix="anthropic/",
+        base_url="https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic",
+        key_env="QWEN_TOKEN_PLAN_KEY",
+        quirks={"small_model": "qwen3.6-flash"},
+    ),
 }
 
 

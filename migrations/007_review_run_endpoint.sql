@@ -1,0 +1,11 @@
+-- Record WHERE each review run's traffic was configured to go (the answering
+-- entry's base URL), alongside which model slug was asked for. Two entries may
+-- serve the same model from different providers -- a subscription-plan gateway
+-- and a metered fallback -- and provider+model alone cannot separate them; the
+-- endpoint is the audit trail for that (mirrors RunReceipt.endpoint).
+-- '' means the provider SDK's own default endpoint; every historical row
+-- predates the field, so the NOT NULL DEFAULT backfills them to the same
+-- "no explicit endpoint recorded" value the omitting caller writes.
+-- Idempotent (ADD COLUMN IF NOT EXISTS is a no-op on re-apply), matching every
+-- other migration -- they are re-run on each pool creation.
+ALTER TABLE review_runs ADD COLUMN IF NOT EXISTS endpoint TEXT NOT NULL DEFAULT '';

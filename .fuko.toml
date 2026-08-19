@@ -1,7 +1,31 @@
 [review]
 image = "ghcr.io/lemehmet/pr-agent:0.41.0@sha256:7341dc6214be964534ce3e68fc73143f3d642240829fe66894b87864db417223"
-tool_timeout = 600
-optional_tools = ["improve"]
+# 600 -> 900 -> 1800 (2026-08-19): henry's agentic runs were KILLED at 600s
+# AND at 900s (receipts on PR #130). Measured cause, not guessed: the QwenCloud
+# token-plan gateway forces THINKING mode on (a bare /v1/messages call returns
+# thinking blocks unrequested) at ~35 tok/s, so every agentic tool-call turn
+# pays a few hundred reasoning tokens first — a healthy agentic review of a
+# ~20-file PR is tens of minutes on this endpoint. The per-tool budget still
+# exists to kill genuine wedges; it just has to sit above the honest cost of
+# the slowest healthy tool. If henry STILL times out at 1800s, that is A/B
+# evidence on the latency/cost axis, not a number to bump again blindly.
+tool_timeout = 1800
+# `improve` DROPPED 2026-08-19: gray's improve timed out in every observed
+# round on this repo (600s and 900s — pure burned wall-clock), and a second
+# tool at tool_timeout=1800 would put the sequential worst case at
+# 3 branches * 2 tools * 1800s = 180m, over the 110m job cap. Review-only
+# keeps it at 3 * 1 * 1800s = 90m. Cost: dorian's (working) inline
+# suggestions on this dogfood repo — acceptable while the agentic A/B runs;
+# revisit when the experiment concludes.
+#
+# `tools` must be set EXPLICITLY: it defaults to ["review", "improve"], and
+# `optional_tools` only decides whether a tool's failure is fatal — it does
+# not remove the tool from the run. The first cut of this change edited only
+# optional_tools, which kept improve running AND promoted its chronic timeout
+# from warning to branch failure. Caught by henry (the agentic trial seat) on
+# its first completed review, round 3 of PR #130.
+tools = ["review"]
+optional_tools = []
 # Must equal `timeout-minutes` in .github/workflows/fuko-pr-review.yml. The
 # runner uses it to refuse a backup promotion whose sequential worst case
 # (branches * tools * tool_timeout) would not fit the job -- an overrun kills the
@@ -9,16 +33,21 @@ optional_tools = ["improve"]
 # Keeping the number here means the arithmetic is checked at run time instead of
 # being re-derived by hand whenever a backup is added (#106).
 #
-# THIS CAP IS DELIBERATELY OVERSIZED RIGHT NOW -- do not "correct" it. Neither
-# backup names a token_env, so #106's identity rule refuses both promotions and
-# the achievable worst case is 2 branches * 2 tools * 600s = 2400s = 40 min,
-# i.e. this cap is ~2.75x it. It stays at 110 because #114 (giving backups their
-# own identity) makes promotion possible again: promoting one backup gives
-# 3 * 2 * 600s = 60 min and promoting both gives 4 * 2 * 600s = 80 min, plus
-# setup. Churning the cap down now and up again on #114 is worse than carrying
-# the headroom, and lowering it would silently re-introduce the mid-run kill the
-# moment #114 lands. Every number here is `branches * tools * tool_timeout` and
-# should be recomputed from that formula rather than adjusted by feel.
+# Recomputed for tool_timeout=1800, review-only, 3-seat fleet (2026-08-19):
+# sequential worst case 3 branches * 1 tool * 1800s = 90 min + ~5m setup,
+# which fits; the CONCURRENT path (all three Apps minting) is ~1800s + setup
+# ≈ 35 min. Promoting even one backup (4 * 1 * 1800s = 120 min) does not fit —
+# #106's runtime arithmetic refuses exactly that promotion, which is the
+# designed behavior, not an accident to fix by raising this. Every number here
+# is `branches * tools * tool_timeout`; recompute from the formula rather than
+# adjusting by feel.
+#
+# HONESTY LIMIT of that formula (henry finding, PR #130 round 4 → issue #131):
+# it charges each branch ONE attempt, but a timeout is throttle-class and
+# fails over, so a pathological round where primaries AND same-driver backups
+# all time out can exceed the cap and be killed by GitHub mid-review. The
+# formula prices the expected case; the job cap is the backstop for the
+# pathological one. Failover-aware budget arithmetic is #131's scope.
 job_budget_minutes = 110
 
 # FLEET COMPOSITION (2026-08-14) — two gating seats, two backups.
@@ -70,6 +99,43 @@ provider = "openrouter"
 name = "qwen/qwen3.8-max"
 max_context = 1000000
 token_env = "FUKO_GITHUB_TOKEN_GRAY"
+
+# henry — TRIAL seat (non-gating): the agentic-vs-diff A/B, 2026-08-19.
+# Same MODEL as gray (qwen3.8-max) on purpose: gray reviews the diff via
+# PR-Agent, henry walks the checkout via the agentic driver (headless Claude
+# Code on QwenCloud's Anthropic-compatible Token Plan endpoint), so every PR
+# here gets the same model both ways and the harness is the only variable.
+# Score receipts-only (uniqueness vs gray in particular); one of the two qwen
+# seats is removed when the experiment concludes.
+#
+# auth is PINNED to api-key: `auto` on a runner with a logged-in Claude session
+# would resolve to subscription mode, which never injects a base URL — the seat
+# would silently review with real Claude, the exact substitution class receipts
+# exist to catch.
+#
+# KNOWN LIMITS while trialing (accepted, on a repo where reviews gate nothing):
+# - Until the fuko-henry App exists (vars.FUKO_HENRY_APP_ID +
+#   secrets.FUKO_HENRY_APP_PRIVATE_KEY), FUKO_GITHUB_TOKEN_HENRY is empty and
+#   EVERY round runs sequentially under the base identity (#106 identity rule
+#   is all-or-nothing). Budget math lives on job_budget_minutes above.
+# - Mixed backends freeze backup escalation for the round (plan_escalation
+#   refuses to promote across drivers) — fix that before any agentic seat
+#   enters a GATING fleet (mepro).
+# - The shared backups are pr-agent-only, and a branch's failover pool keeps
+#   only SAME-driver backups (a failover must never swap harnesses
+#   mid-experiment): if henry's endpoint throttles or times out, its pool is
+#   exhausted and the branch fails with an honest receipt. First observed live
+#   on PR #130 round 1 — henry's 600s timeout walked into the pr-agent backup
+#   and died on the driver gate; the pool filter turns that into a clean
+#   "pool exhausted".
+[[review.models]]
+provider = "qwen-anthropic"
+name = "qwen3.8-max"
+max_context = 1000000
+auth = "api-key"
+backend = "agentic"
+role = "trial"
+token_env = "FUKO_GITHUB_TOKEN_HENRY"
 
 # Backup 1 — shares OPENROUTER_KEY with gray; see the throttle-bucket note above.
 [[review.models]]
