@@ -918,7 +918,10 @@ def test_review_compare_runs_each_model_fresh_without_describe(monkeypatch, tmp_
     monkeypatch.setattr(
         runner,
         "_post_branch_header",
-        lambda pr, token, api, label, role="active", **k: (headers.append(label), (None, None, None))[1],
+        lambda pr, token, api, label, role="active", **k: (
+            headers.append(label),
+            (None, None, None),
+        )[1],
     )
 
     calls = []
