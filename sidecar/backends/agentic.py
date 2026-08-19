@@ -226,6 +226,10 @@ _ANTHROPIC_INHERITED_VARS = (
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    # Legacy spelling of the haiku-class override — deprecated but still
+    # honored by the CLI as a fallback, so an ambient one routes background
+    # calls exactly like the var that replaced it.
+    "ANTHROPIC_SMALL_FAST_MODEL",
     "CLAUDE_CODE_SUBAGENT_MODEL",
 )
 

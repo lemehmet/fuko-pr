@@ -41,6 +41,13 @@ optional_tools = []
 # designed behavior, not an accident to fix by raising this. Every number here
 # is `branches * tools * tool_timeout`; recompute from the formula rather than
 # adjusting by feel.
+#
+# HONESTY LIMIT of that formula (henry finding, PR #130 round 4 → issue #131):
+# it charges each branch ONE attempt, but a timeout is throttle-class and
+# fails over, so a pathological round where primaries AND same-driver backups
+# all time out can exceed the cap and be killed by GitHub mid-review. The
+# formula prices the expected case; the job cap is the backstop for the
+# pathological one. Failover-aware budget arithmetic is #131's scope.
 job_budget_minutes = 110
 
 # FLEET COMPOSITION (2026-08-14) — two gating seats, two backups.

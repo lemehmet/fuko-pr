@@ -186,6 +186,7 @@ def test_invoke_reinjects_model_routing_for_gateway(monkeypatch):
     """
     monkeypatch.setenv("ANTHROPIC_MODEL", "ambient-model")
     monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "ambient-haiku")
+    monkeypatch.setenv("ANTHROPIC_SMALL_FAST_MODEL", "ambient-legacy-haiku")
     monkeypatch.setenv("CLAUDE_CODE_SUBAGENT_MODEL", "ambient-sub")
     monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
     backend = AgenticBackend(ReviewConfig(tool_timeout=5))
@@ -199,6 +200,7 @@ def test_invoke_reinjects_model_routing_for_gateway(monkeypatch):
     assert captured["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "qwen3.6-flash"
     assert captured["env"]["CLAUDE_CODE_SUBAGENT_MODEL"] == "qwen3.8-max"
     assert "ANTHROPIC_MODEL" not in captured["env"]
+    assert "ANTHROPIC_SMALL_FAST_MODEL" not in captured["env"]
 
 
 def test_invoke_stashes_and_filters(monkeypatch):
