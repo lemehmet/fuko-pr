@@ -167,7 +167,7 @@ def test_build_env_accepts_anthropic_compatible_gateway(monkeypatch):
 def test_zai_anthropic_preset_builds_gateway_env(monkeypatch):
     """The z.ai Coding Plan preset (2026-08-24, henry's migration off the
     QwenCloud Token Plan) wires the same gateway shape: anthropic/ prefix,
-    plan base URL, ZAI_API_KEY, and the plan's fast model for the harness's
+    plan base URL, ZAI_KEY, and the plan's fast model for the harness's
     auxiliary calls."""
     monkeypatch.setenv("ZAI_KEY", "zk-test")
     env = AgenticBackend().build_env(
