@@ -114,7 +114,7 @@ PRESETS: dict[str, ProviderPreset] = {
     "zai-anthropic": ProviderPreset(
         litellm_prefix="anthropic/",
         base_url="https://api.z.ai/api/anthropic",
-        key_env="ZAI_API_KEY",
+        key_env="ZAI_KEY",
         quirks={"small_model": "glm-4.5-air"},
     ),
 }

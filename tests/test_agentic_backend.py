@@ -169,7 +169,7 @@ def test_zai_anthropic_preset_builds_gateway_env(monkeypatch):
     QwenCloud Token Plan) wires the same gateway shape: anthropic/ prefix,
     plan base URL, ZAI_API_KEY, and the plan's fast model for the harness's
     auxiliary calls."""
-    monkeypatch.setenv("ZAI_API_KEY", "zk-test")
+    monkeypatch.setenv("ZAI_KEY", "zk-test")
     env = AgenticBackend().build_env(
         get_preset("zai-anthropic"),
         ModelConfig(provider="zai-anthropic", name="glm-5.3", auth="api-key"),
