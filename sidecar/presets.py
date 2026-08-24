@@ -103,6 +103,20 @@ PRESETS: dict[str, ProviderPreset] = {
         key_env="QWEN_TOKEN_PLAN_KEY",
         quirks={"small_model": "qwen3.6-flash"},
     ),
+    # z.ai's Anthropic-compatible endpoint (the Coding Plan surface Claude
+    # Code itself uses). Added 2026-08-24 for the henry seat's migration off
+    # the QwenCloud Token Plan: that gateway degraded to unrecognized_model
+    # with ~8000 units still on balance, and its pack purchases are capped.
+    # `small_model` maps the harness's auxiliary calls; glm-4.5-air is the
+    # plan's documented fast model — VERIFY against the account on first run
+    # (a wrong value reproduces the exact generate_session_title failure the
+    # qwen gateway showed).
+    "zai-anthropic": ProviderPreset(
+        litellm_prefix="anthropic/",
+        base_url="https://api.z.ai/api/anthropic",
+        key_env="ZAI_API_KEY",
+        quirks={"small_model": "glm-4.5-air"},
+    ),
 }
 
 

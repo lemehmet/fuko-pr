@@ -164,6 +164,25 @@ def test_build_env_accepts_anthropic_compatible_gateway(monkeypatch):
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "qwen3.8-max"
 
 
+def test_zai_anthropic_preset_builds_gateway_env(monkeypatch):
+    """The z.ai Coding Plan preset (2026-08-24, henry's migration off the
+    QwenCloud Token Plan) wires the same gateway shape: anthropic/ prefix,
+    plan base URL, ZAI_API_KEY, and the plan's fast model for the harness's
+    auxiliary calls."""
+    monkeypatch.setenv("ZAI_API_KEY", "zk-test")
+    env = AgenticBackend().build_env(
+        get_preset("zai-anthropic"),
+        ModelConfig(provider="zai-anthropic", name="glm-5.3", auth="api-key"),
+        knowledge="",
+        tools=["review"],
+    )
+    assert env["FUKO_AGENTIC_MODEL"] == "glm-5.3"
+    assert env["ANTHROPIC_API_KEY"] == "zk-test"
+    assert env["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.5-air"  # preset small_model
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "glm-5.3"
+
+
 def test_build_env_plain_anthropic_leaves_model_routing_alone(monkeypatch):
     """No base_url = real Anthropic: the harness's own `claude-*` defaults are
     correct there, so the routing vars must NOT be injected."""
