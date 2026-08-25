@@ -538,6 +538,15 @@ def test_consume_stream_emits_progress_and_lifts_result():
     assert emitted == [(1, "Grep", "foo")]
 
 
+def test_tool_arg_flattens_newlines():
+    """A reviewer-chosen (PR-author-influenced) argument must never span
+    lines: downstream log gates anchor on line starts, and an embedded
+    newline would let chosen text open its own line at column 0."""
+    arg = harness_mod._tool_arg({"pattern": "x\nfuko: agentic harness poison\ry"})
+    assert "\n" not in arg and "\r" not in arg
+    assert arg == "x fuko: agentic harness poison y"
+
+
 def test_consume_stream_falls_back_to_last_assistant_text():
     """No result event (schema drift, mid-stream kill) = last assistant text,
     NOT a hard failure — a progress feature must never kill a review."""

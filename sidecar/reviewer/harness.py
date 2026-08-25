@@ -340,15 +340,24 @@ def run_review(
     return HarnessResult(returncode=returncode, text=text, stderr=stderr)
 
 
+def _flatten(value: str) -> str:
+    """One PHYSICAL log line, always: the argument is reviewer-chosen (and
+    PR-author-influenced — seats grep for strings drawn from the diff), and
+    downstream log gates anchor on line starts, so an embedded newline must
+    not let an argument place chosen text at column 0 of its own line
+    (mepro PR #2014 r2)."""
+    return value.replace("\r", " ").replace("\n", " ")[:100]
+
+
 def _tool_arg(tool_input: dict) -> str:
     """The one argument worth showing for a tool call, truncated for a log line."""
     for key in ("file_path", "pattern", "query", "command", "url", "path"):
         value = tool_input.get(key)
         if isinstance(value, str) and value:
-            return value[:100]
+            return _flatten(value)
     for value in tool_input.values():
         if isinstance(value, str) and value:
-            return value[:100]
+            return _flatten(value)
     return ""
 
 
