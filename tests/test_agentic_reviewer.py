@@ -1,7 +1,9 @@
 """Unit tests for the reviewer core: checkout/context, prompt, and harness."""
 
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import httpx
@@ -429,16 +431,19 @@ def test_run_review_missing_binary(monkeypatch, tmp_path):
         run_review("p", tmp_path, cwd=tmp_path, model="m", env={}, timeout=5)
 
 
+def _fake_drive(seen, text='{"findings": []}', returncode=0, timed_out=False):
+    def fake(cmd, *, prompt, cwd, env, timeout, emit):
+        seen["cmd"] = cmd
+        seen["kwargs"] = {"prompt": prompt, "cwd": cwd, "env": env, "timeout": timeout}
+        return returncode, text, "", timed_out
+
+    return fake
+
+
 def test_run_review_invocation_shape(monkeypatch, tmp_path):
     seen = {}
-
-    def fake_run(cmd, **kwargs):
-        seen["cmd"] = cmd
-        seen["kwargs"] = kwargs
-        return subprocess.CompletedProcess(cmd, 0, stdout='{"findings": []}', stderr="")
-
     monkeypatch.setattr(harness_mod.shutil, "which", lambda *a, **k: "/bin/claude")
-    monkeypatch.setattr(harness_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(harness_mod, "_drive", _fake_drive(seen))
     repo, work = tmp_path / "repo", tmp_path / "work"
     result = run_review(
         "the prompt", repo, cwd=work, model="claude-x", env={"A": "1"}, timeout=9, max_turns=7
@@ -447,9 +452,13 @@ def test_run_review_invocation_shape(monkeypatch, tmp_path):
     cmd = seen["cmd"]
     assert cmd[0] == "/bin/claude" and "-p" in cmd
     assert cmd[cmd.index("--model") + 1] == "claude-x"
+    # stream-json is the progress feed (mepro's agentic-visibility ask), and
+    # print mode refuses it without --verbose.
+    assert cmd[cmd.index("--output-format") + 1] == "stream-json"
+    assert "--verbose" in cmd
     assert cmd[cmd.index("--allowedTools") + 1] == "Read,Grep,Glob"
     assert cmd[cmd.index("--max-turns") + 1] == "7"
-    assert seen["kwargs"]["input"] == "the prompt"
+    assert seen["kwargs"]["prompt"] == "the prompt"
     assert seen["kwargs"]["env"] == {"A": "1"}
     assert seen["kwargs"]["timeout"] == 9
 
@@ -457,18 +466,12 @@ def test_run_review_invocation_shape(monkeypatch, tmp_path):
 def test_run_review_isolates_the_untrusted_checkout(monkeypatch, tmp_path):
     """The agent must never run FROM the checkout: repo hooks would execute."""
     seen = {}
-
-    def fake_run(cmd, **kwargs):
-        seen["cmd"] = cmd
-        seen["kwargs"] = kwargs
-        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
-
     monkeypatch.setattr(harness_mod.shutil, "which", lambda *a, **k: "/bin/claude")
-    monkeypatch.setattr(harness_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(harness_mod, "_drive", _fake_drive(seen, text="{}"))
     repo, work = tmp_path / "repo", tmp_path / "work"
     run_review("p", repo, cwd=work, model="m", env={}, timeout=5)
     cmd, kwargs = seen["cmd"], seen["kwargs"]
-    assert kwargs["cwd"] == str(work) != str(repo)
+    assert str(kwargs["cwd"]) == str(work) != str(repo)
     assert cmd[cmd.index("--add-dir") + 1] == str(repo)
     assert cmd[cmd.index("--setting-sources") + 1] == "user"
     assert json.loads(cmd[cmd.index("--settings") + 1])["disableAllHooks"] is True
@@ -481,13 +484,8 @@ def test_run_review_isolates_the_untrusted_checkout(monkeypatch, tmp_path):
 def test_run_review_denies_reads_of_credential_stores(monkeypatch, tmp_path):
     """`--add-dir` adds a root, it does not confine reads -- so deny the crown jewels."""
     seen = {}
-
-    def fake_run(cmd, **kwargs):
-        seen["cmd"] = cmd
-        return subprocess.CompletedProcess(cmd, 0, stdout='{"findings": []}', stderr="")
-
     monkeypatch.setattr(harness_mod.shutil, "which", lambda *a, **k: "/bin/claude")
-    monkeypatch.setattr(harness_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(harness_mod, "_drive", _fake_drive(seen))
     run_review(
         "p",
         tmp_path,
@@ -506,6 +504,96 @@ def test_run_review_denies_reads_of_credential_stores(monkeypatch, tmp_path):
     assert "Read(//home/runner/.ssh/**)" in deny
     assert "Read(//home/runner/.netrc)" in deny
     assert "Read(//cfg/claude/**)" in deny
+
+
+def test_consume_stream_emits_progress_and_lifts_result():
+    """Each tool_use becomes one emit; the result event supplies the text."""
+    events = [
+        json.dumps({"type": "system", "subtype": "init"}),
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "tool_use", "name": "Grep", "input": {"pattern": "foo", "path": "src"}}
+                    ]
+                },
+            }
+        ),
+        "",
+        "not json at all",
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "interim thoughts"}]},
+            }
+        ),
+        json.dumps({"type": "result", "subtype": "success", "result": '{"findings": []}'}),
+    ]
+    emitted = []
+    text, saw = harness_mod._consume_stream(events, lambda t, n, a: emitted.append((t, n, a)))
+    assert saw is True and text == '{"findings": []}'
+    # pattern outranks path for display — the Grep line should show what it
+    # searched for, and garbage lines must not have derailed the fold.
+    assert emitted == [(1, "Grep", "foo")]
+
+
+def test_consume_stream_falls_back_to_last_assistant_text():
+    """No result event (schema drift, mid-stream kill) = last assistant text,
+    NOT a hard failure — a progress feature must never kill a review."""
+    events = [
+        json.dumps(
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "early"}]}}
+        ),
+        json.dumps(
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": '{"findings": []}'}]}}
+        ),
+    ]
+    text, saw = harness_mod._consume_stream(events, lambda *a: None)
+    assert saw is False and text == '{"findings": []}'
+
+
+def test_drive_streams_a_real_process(tmp_path):
+    """End to end through real pipes: stdin fed, events parsed as they stream,
+    child stderr captured, final text lifted from the result event."""
+    script = tmp_path / "fake_claude.py"
+    script.write_text(
+        "import sys, json\n"
+        "data = sys.stdin.read()\n"
+        'print(json.dumps({"type": "system", "subtype": "init"}), flush=True)\n'
+        'print(json.dumps({"type": "assistant", "message": {"content": ['
+        '{"type": "tool_use", "name": "Read", "input": {"file_path": "a.rs"}}]}}), flush=True)\n'
+        'print(json.dumps({"type": "result", "subtype": "success",'
+        ' "result": json.dumps({"promptLen": len(data)})}), flush=True)\n'
+        'sys.stderr.write("child noise\\n")\n'
+    )
+    emitted = []
+    rc, text, stderr, timed_out = harness_mod._drive(
+        [sys.executable, str(script)],
+        prompt="p" * 100_000,
+        cwd=tmp_path,
+        env=dict(os.environ),
+        timeout=30,
+        emit=lambda t, n, a: emitted.append((t, n, a)),
+    )
+    assert rc == 0 and timed_out is False
+    assert json.loads(text) == {"promptLen": 100_000}
+    assert emitted == [(1, "Read", "a.rs")]
+    assert "child noise" in stderr
+
+
+def test_run_review_timeout_maps_to_throttle_class(tmp_path, monkeypatch):
+    """A hung harness is killed at the deadline and classified exactly as the
+    old subprocess.run(timeout=...) path was: TIMEOUT_RETURNCODE + timed_out."""
+    script = tmp_path / "claude"
+    script.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(60)\n")
+    script.chmod(0o755)
+    monkeypatch.setattr(harness_mod.shutil, "which", lambda *a, **k: str(script))
+    result = run_review(
+        "p", tmp_path, cwd=tmp_path, model="m", env=dict(os.environ), timeout=1
+    )
+    assert result.timed_out is True
+    assert result.returncode == harness_mod.TIMEOUT_RETURNCODE
 
 
 def test_permission_rules_deny_the_runners_own_registration_credentials():
@@ -610,14 +698,7 @@ def test_run_review_settings_survive_a_home_less_environment(monkeypatch, tmp_pa
     """No HOME (hardened runner) must still yield valid settings, not a crash."""
     seen = {}
     monkeypatch.setattr(harness_mod.shutil, "which", lambda *a, **k: "/bin/claude")
-    monkeypatch.setattr(
-        harness_mod.subprocess,
-        "run",
-        lambda cmd, **k: (
-            seen.update(cmd=cmd)
-            or subprocess.CompletedProcess(cmd, 0, stdout='{"findings": []}', stderr="")
-        ),
-    )
+    monkeypatch.setattr(harness_mod, "_drive", _fake_drive(seen))
     run_review("p", tmp_path, cwd=tmp_path, model="m", env={}, timeout=9)
     settings = json.loads(seen["cmd"][seen["cmd"].index("--settings") + 1])
     # No HOME means no home rules, but the system rules still apply.
@@ -629,11 +710,13 @@ def test_run_review_settings_survive_a_home_less_environment(monkeypatch, tmp_pa
 
 
 def test_run_review_timeout_maps_to_throttle_returncode(monkeypatch, tmp_path):
-    def fake_run(cmd, **kwargs):
-        raise subprocess.TimeoutExpired(cmd, 9)
-
+    """Unit twin of the real-process timeout test: _drive reporting timed_out
+    must surface as TIMEOUT_RETURNCODE regardless of the child's raw code."""
+    seen = {}
     monkeypatch.setattr(harness_mod.shutil, "which", lambda *a, **k: "/bin/claude")
-    monkeypatch.setattr(harness_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        harness_mod, "_drive", _fake_drive(seen, text="", returncode=-9, timed_out=True)
+    )
     result = run_review("p", tmp_path, cwd=tmp_path, model="m", env={}, timeout=9)
     assert result.timed_out and result.returncode == 124
 

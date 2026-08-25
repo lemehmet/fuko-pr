@@ -33,6 +33,8 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -264,9 +266,19 @@ def run_review(
     loaded (see the module docstring).
 
     The prompt goes over stdin (it embeds a full diff -- argv has size limits
-    and shows up in process listings). ``--output-format text`` keeps the
-    contract simple: stdout IS the agent's final message, which the strategy
-    already constrains to a bare JSON object. ``env`` is the harness process
+    and shows up in process listings). ``--output-format stream-json`` (which
+    print mode requires ``--verbose`` for) turns stdout into an NDJSON event
+    feed consumed INCREMENTALLY: each ``tool_use`` block becomes one compact
+    progress line on this process's stderr as it happens (mepro asked for
+    this after a fleet of 15-30 min reviews whose only log lines were start
+    and end -- an 1800s kill now shows the last tool the seat was on), and
+    the agent's final message is lifted from the terminal ``result`` event,
+    so the downstream contract is unchanged: the returned ``text`` is still
+    the final message the strategy constrains to a bare JSON object. Event
+    parsing is TOLERANT -- unknown or non-JSON lines are skipped, and if the
+    ``result`` event never arrives (CLI schema drift, mid-stream kill) the
+    last assistant text block stands in, so drift degrades to the old
+    behavior rather than a hard failure. ``env`` is the harness process
     environment (the caller decides exactly which credentials it carries) and
     is used as given rather than merged with this process's.
 
@@ -285,7 +297,10 @@ def run_review(
         "--model",
         model,
         "--output-format",
-        "text",
+        "stream-json",
+        # Print mode refuses stream-json without it; it gates the event feed,
+        # not log chattiness.
+        "--verbose",
         "--allowedTools",
         ALLOWED_TOOLS,
         "--add-dir",
@@ -302,22 +317,137 @@ def run_review(
         "--max-turns",
         str(max_turns),
     ]
-    try:
-        proc = subprocess.run(
-            cmd,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            cwd=str(cwd),
-            env=env,
-            timeout=timeout,
+    start = time.monotonic()
+
+    def _emit(turn: int, tool: str, arg: str) -> None:
+        mins = int((time.monotonic() - start) // 60)
+        print(
+            f"fuko: agentic {model} [{mins}m t{turn}] {tool} {arg}",
+            file=sys.stderr,
+            flush=True,
         )
-    except subprocess.TimeoutExpired as e:
-        partial = e.stderr if isinstance(e.stderr, str) else ""
+
+    returncode, text, stderr, timed_out = _drive(
+        cmd, prompt=prompt, cwd=cwd, env=env, timeout=timeout, emit=_emit
+    )
+    if timed_out:
         return HarnessResult(
             returncode=TIMEOUT_RETURNCODE,
             text="",
-            stderr=partial or f"review timed out after {timeout}s",
+            stderr=stderr or f"review timed out after {timeout}s",
             timed_out=True,
         )
-    return HarnessResult(returncode=proc.returncode, text=proc.stdout, stderr=proc.stderr)
+    return HarnessResult(returncode=returncode, text=text, stderr=stderr)
+
+
+def _tool_arg(tool_input: dict) -> str:
+    """The one argument worth showing for a tool call, truncated for a log line."""
+    for key in ("file_path", "pattern", "query", "command", "url", "path"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value:
+            return value[:100]
+    for value in tool_input.values():
+        if isinstance(value, str) and value:
+            return value[:100]
+    return ""
+
+
+def _consume_stream(lines, emit) -> tuple[str, bool]:
+    """Fold the harness's NDJSON event feed into (final_text, saw_result).
+
+    ``emit(turn, tool, arg)`` fires once per ``tool_use`` block as it streams.
+    Tolerant by design: blank/non-JSON/unknown lines are skipped, because a
+    progress feature must never be the thing that kills a review. When no
+    ``result`` event arrives, the last assistant text block stands in -- for a
+    healthy run they are the same message.
+    """
+    result_text: str | None = None
+    last_assistant_text = ""
+    turns = 0
+    for raw in lines:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("type")
+        if kind == "assistant":
+            turns += 1
+            message = event.get("message") or {}
+            for block in message.get("content") or []:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use":
+                    emit(turns, block.get("name") or "?", _tool_arg(block.get("input") or {}))
+                elif block.get("type") == "text" and block.get("text"):
+                    last_assistant_text = block["text"]
+        elif kind == "result" and isinstance(event.get("result"), str):
+            result_text = event["result"]
+    if result_text is not None:
+        return result_text, True
+    return last_assistant_text, False
+
+
+def _drive(
+    cmd: list[str],
+    *,
+    prompt: str,
+    cwd: Path,
+    env: dict[str, str],
+    timeout: int,
+    emit,
+) -> tuple[int, str, str, bool]:
+    """Run ``cmd`` streaming stdout through :func:`_consume_stream`.
+
+    Returns ``(returncode, final_text, stderr, timed_out)``. Three pipes need
+    three actors to avoid deadlock on a large prompt or chatty child: stdin is
+    fed from its own thread (the child may start emitting before it finishes
+    reading a multi-megabyte diff), stderr drains on a second thread, and the
+    main thread consumes the stdout event feed so progress lines appear the
+    moment the child writes them. The timeout is a Timer that kills the
+    process outright -- the driver classifies that as throttle-class via
+    TIMEOUT_RETURNCODE exactly as the old ``subprocess.run(timeout=...)`` did.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=str(cwd),
+        env=env,
+    )
+    timed_out = threading.Event()
+
+    def _kill() -> None:
+        timed_out.set()
+        proc.kill()
+
+    timer = threading.Timer(timeout, _kill)
+    timer.start()
+    stderr_chunks: list[str] = []
+    stderr_thread = threading.Thread(
+        target=lambda: stderr_chunks.extend(proc.stderr), daemon=True
+    )
+    stderr_thread.start()
+
+    def _feed() -> None:
+        try:
+            proc.stdin.write(prompt)
+            proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass  # child died first; its returncode tells the story
+
+    stdin_thread = threading.Thread(target=_feed, daemon=True)
+    stdin_thread.start()
+    try:
+        text, _saw_result = _consume_stream(proc.stdout, emit)
+        proc.wait()
+    finally:
+        timer.cancel()
+    stderr_thread.join(timeout=5)
+    return proc.returncode, text, "".join(stderr_chunks), timed_out.is_set()
