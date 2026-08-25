@@ -236,6 +236,40 @@ def test_invoke_reinjects_per_entry_context_window(monkeypatch):
     assert captured["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "1000000"
 
 
+def test_invoke_logs_the_delivered_window(monkeypatch, capsys):
+    """The delivery-side receipt (mepro#2012 r2): the run log must carry the
+    window the spawned harness ACTUALLY gets — a config-side validator
+    cannot see a delivery failure, so this line is the only observable for
+    it. Both directions: a set window logs its value; an absent one logs
+    ABSENT loudly instead of silently reviewing at the harness default."""
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    windowed = backend.build_env(
+        get_preset("qwen-anthropic"),
+        ModelConfig(
+            provider="qwen-anthropic",
+            name="qwen3.8-max",
+            auth="api-key",
+            max_context=1_000_000,
+        ),
+        knowledge="",
+        tools=["review"],
+    )
+    _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON), env=windowed)
+    assert (
+        "agentic harness qwen3.8-max: CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000"
+        in capsys.readouterr().err
+    )
+    bare = backend.build_env(
+        get_preset("qwen-anthropic"),
+        ModelConfig(provider="qwen-anthropic", name="qwen3.8-max", auth="api-key"),
+        knowledge="",
+        tools=["review"],
+    )
+    _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON), env=bare)
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS=ABSENT" in capsys.readouterr().err
+
+
 def test_invoke_entry_without_max_context_gets_no_window(monkeypatch):
     """No `max_context` on the entry = no window var at all — the ambient
     export must NOT leak through as a fallback (config decides; an entry that

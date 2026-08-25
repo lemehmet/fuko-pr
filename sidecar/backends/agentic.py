@@ -471,6 +471,23 @@ class AgenticBackend:
         # whose entry says otherwise.
         if "CLAUDE_CODE_MAX_CONTEXT_TOKENS" in env:
             harness_env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"]
+        # DELIVERY-side receipt (mepro#2012 r2, both gating seats converged):
+        # a workflow validator can only prove the CONFIG carries a window;
+        # this line is the one place that knows what the spawned harness
+        # will actually read, so log it — the absent case especially, since
+        # with unknown-model enforcement disabled that seat silently reviews
+        # at the harness's ~200k default while its receipt reads done.
+        print(
+            "fuko: agentic harness %s: CLAUDE_CODE_MAX_CONTEXT_TOKENS=%s"
+            % (
+                env.get(_ENV_MODEL, "?"),
+                harness_env.get(
+                    "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+                    "ABSENT (harness default ~200k)",
+                ),
+            ),
+            file=sys.stderr,
+        )
         if auth == _AUTH_API_KEY:
             for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", *_MODEL_ROUTING_VARS):
                 if key in env:
