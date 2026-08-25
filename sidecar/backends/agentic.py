@@ -231,6 +231,11 @@ _ANTHROPIC_INHERITED_VARS = (
     # calls exactly like the var that replaced it.
     "ANTHROPIC_SMALL_FAST_MODEL",
     "CLAUDE_CODE_SUBAGENT_MODEL",
+    # Context-window override. One ambient value cannot be right for a fleet
+    # with more than one agentic seat (qwen at 1M next to glm at 1M is luck,
+    # not design) — config decides per entry: build_env derives it from the
+    # entry's `max_context` and invoke() re-injects that, never the ambient.
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
 )
 
 # Injected in api-key mode when the preset routes to a NON-Anthropic gateway
@@ -350,6 +355,15 @@ class AgenticBackend:
                 small = str(preset.quirks.get("small_model") or model.name)
                 env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = small
                 env["CLAUDE_CODE_SUBAGENT_MODEL"] = model.name
+        # Per-entry context window, BOTH auth modes. The harness sizes its
+        # auto-compact window from CLAUDE_CODE_MAX_CONTEXT_TOKENS and refuses
+        # a model it does not recognize when the var is unset; a workflow-
+        # global export could only ever serve ONE window, which stopped being
+        # enough the day a second agentic seat went active. `max_context`
+        # already drives the runner's context-fit routing, so this keeps one
+        # source of truth for both consumers.
+        if model.max_context:
+            env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(model.max_context)
         if model.extra_instructions:
             env[_ENV_INSTRUCTIONS] = model.extra_instructions
         if knowledge:
@@ -450,6 +464,13 @@ class AgenticBackend:
             and not k.startswith("FUKO_GITHUB_")
             and k not in _ANTHROPIC_INHERITED_VARS
         }
+        # Auth-mode-independent: the entry's context window rides along
+        # whenever build_env derived one (from `max_context`). The ambient
+        # spelling was scrubbed above with the other routing vars — config
+        # decides, and a stale workflow-global export must not reach a seat
+        # whose entry says otherwise.
+        if "CLAUDE_CODE_MAX_CONTEXT_TOKENS" in env:
+            harness_env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"]
         if auth == _AUTH_API_KEY:
             for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", *_MODEL_ROUTING_VARS):
                 if key in env:

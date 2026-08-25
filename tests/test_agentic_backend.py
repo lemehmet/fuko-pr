@@ -208,6 +208,53 @@ def test_configured_endpoint_is_auth_aware(monkeypatch):
     assert backend.configured_endpoint(preset, subscribed) == ""
 
 
+def test_invoke_reinjects_per_entry_context_window(monkeypatch):
+    """The entry's `max_context` reaches the harness subprocess; ambient dies.
+
+    Two active agentic seats with different windows made the workflow-global
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS export unable to be right for both, so the
+    window is per-entry now: build_env derives it from `max_context` and
+    invoke() re-injects exactly that value, while an ambient export (the old
+    single-seat mechanism, or a stale one) is scrubbed like the other routing
+    vars. Asserted at the seam that matters — the captured subprocess env.
+    """
+    monkeypatch.setenv("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "12345")
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    env = backend.build_env(
+        get_preset("qwen-anthropic"),
+        ModelConfig(
+            provider="qwen-anthropic",
+            name="qwen3.8-max",
+            auth="api-key",
+            max_context=1_000_000,
+        ),
+        knowledge="",
+        tools=["review"],
+    )
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON), env=env)
+    assert captured["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "1000000"
+
+
+def test_invoke_entry_without_max_context_gets_no_window(monkeypatch):
+    """No `max_context` on the entry = no window var at all — the ambient
+    export must NOT leak through as a fallback (config decides; an entry that
+    wants a window states one, and an unstated one fails loudly downstream as
+    the harness's unrecognized-model refusal rather than silently reviewing
+    at whatever window the runner's environment happened to carry)."""
+    monkeypatch.setenv("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "12345")
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    env = backend.build_env(
+        get_preset("qwen-anthropic"),
+        ModelConfig(provider="qwen-anthropic", name="qwen3.8-max", auth="api-key"),
+        knowledge="",
+        tools=["review"],
+    )
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON), env=env)
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in captured["env"]
+
+
 def test_invoke_reinjects_model_routing_for_gateway(monkeypatch):
     """Ambient wrapper-shell routing vars are stripped; the config-built ones land.
 
