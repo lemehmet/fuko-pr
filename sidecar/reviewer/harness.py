@@ -205,7 +205,22 @@ def _permission_settings(env: dict[str, str]) -> str:
 # options exit with "error: unknown option", this one runs) and documented in
 # the CLI reference. It bounds a pathological tool loop; the wall-clock
 # `tool_timeout` is the outer bound that does not depend on this flag.
-DEFAULT_MAX_TURNS = 50
+#
+# RAISED 50 -> 250 (2026-08-28). 50 was too low for a real review of a large
+# diff and was silently ENDING them: exhausting `--max-turns` exits 1 with
+# NOTHING on stderr but the benign `[claude-code:unrecognized_model]` startup
+# warning, and the only true signal -- `result.subtype == "error_max_turns"` --
+# arrives in the stdout event feed, which `_consume_stream` folded away.
+# Reproduced directly against the qwen gateway: `--max-turns 2` on a task
+# needing more gives exactly that signature. On mepro #2064 a gating seat died
+# four times in a tight band (fuko-turns 109-117) with no other evidence, and
+# the failure was read as a provider fault for a full day.
+#
+# 250 is chosen so `tool_timeout` BINDS FIRST: at the observed ~5 turns/min a
+# 2700s budget is ~225 turns, so a runaway hits the wall-clock bound that the
+# budget arithmetic actually reasons about, and this stays what it claims to
+# be -- a backstop against a pathological loop, not a review-length limit.
+DEFAULT_MAX_TURNS = 250
 
 # "Not logged in · Please run /login" and the API-key equivalents. Auth failure
 # must NOT be treated as throttling: failing over to the next provider would
@@ -421,8 +436,22 @@ def _consume_stream(lines, emit) -> tuple[str, bool]:
                     emit(turns, block.get("name") or "?", _tool_arg(block.get("input") or {}))
                 elif block.get("type") == "text" and block.get("text"):
                     last_assistant_text = block["text"]
-        elif kind == "result" and isinstance(event.get("result"), str):
-            result_text = event["result"]
+        elif kind == "result":
+            if isinstance(event.get("result"), str):
+                result_text = event["result"]
+            # The terminal event carries WHY the session ended. `error_max_turns`
+            # is the one that mattered: it exits 1 with an otherwise-empty
+            # stderr, so without this the run is indistinguishable from a crash
+            # and the only visible line names the model, sending every
+            # investigation at the provider (mepro #2064, a full day).
+            if event.get("is_error") or event.get("subtype") not in (None, "success"):
+                subtype = event.get("subtype") or "unknown"
+                print(
+                    f"fuko: agentic harness ended with result subtype={subtype}"
+                    + (" (is_error)" if event.get("is_error") else ""),
+                    file=sys.stderr,
+                    flush=True,
+                )
     if result_text is not None:
         return result_text, True
     return last_assistant_text, False

@@ -871,3 +871,43 @@ def test_flatten_covers_every_character_splitlines_breaks_on():
     for ch in ("\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
         out = harness_mod._flatten(f"head{ch}{forged}")
         assert len(out.splitlines()) == 1, (ch, out)
+
+
+def test_result_subtype_is_surfaced_when_the_session_ends_in_error(capsys):
+    """A non-success terminal result must announce itself.
+
+    `error_max_turns` exits 1 with nothing on stderr but the benign
+    `[claude-code:unrecognized_model]` startup warning, so without this the run
+    is indistinguishable from a crash and the only visible line names the
+    model — which sent a full day of investigation at the provider (mepro
+    #2064). The subtype arrives in the stdout event feed that `_consume_stream`
+    otherwise folds away.
+    """
+    events = [
+        json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}}),
+        json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True}),
+    ]
+    harness_mod._consume_stream(events, lambda *a: None)
+    err = capsys.readouterr().err
+    assert "result subtype=error_max_turns" in err, err
+    assert "is_error" in err
+
+
+def test_successful_result_subtype_is_not_announced(capsys):
+    """A clean run must stay quiet, or the signal is noise."""
+    events = [
+        json.dumps({"type": "result", "subtype": "success", "result": '{"findings": []}'}),
+    ]
+    text, saw = harness_mod._consume_stream(events, lambda *a: None)
+    assert saw and text == '{"findings": []}'
+    assert "result subtype" not in capsys.readouterr().err
+
+
+def test_max_turns_default_leaves_wall_clock_as_the_binding_bound():
+    """50 turns silently ENDED real reviews; the cap must outlast tool_timeout.
+
+    At the observed ~5 turns/min a 2700s budget is ~225 turns, so the default
+    must exceed that for `tool_timeout` to bind first — which is the bound the
+    budget arithmetic actually reasons about.
+    """
+    assert harness_mod.DEFAULT_MAX_TURNS >= 225, harness_mod.DEFAULT_MAX_TURNS
