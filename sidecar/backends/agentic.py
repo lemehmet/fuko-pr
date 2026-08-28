@@ -81,11 +81,20 @@ _CHANNEL = "agentic-review"
 
 
 def _flatten_for_log(value: str) -> str:
-    """Collapse to ONE physical line: log gates downstream are ^-anchored."""
-    return value.strip().replace("\r", " ").replace("\n", " ")
+    r"""Collapse to ONE physical line: log gates downstream are ^-anchored.
+
+    Flattens using ``splitlines()`` -- the SAME rule the dump splits on -- rather
+    than replacing ``\r``/``\n``. Python breaks lines on eight more characters
+    than those two (``\x0b``, ``\x0c``, ``\x1c``-``\x1e``, ``\x85``,
+    ``\u2028``, ``\u2029``), so a hand-rolled replace leaves a crafted payload
+    looking flat here while still splitting downstream -- reopening the column-0
+    forgery this exists to close (fuko-henry, #147). Defining "one line" by the
+    splitter's own definition makes the two agree by construction.
+    """
+    return " ".join(value.strip().splitlines())
 
 
-def _dump_harness_output(model: str, returncode: int, stderr: str, text: str) -> None:
+def _dump_harness_output(model: str, label: str, stderr: str, text: str) -> None:
     """Print the harness's unabridged output on failure, one PREFIXED line at a time.
 
     Why prefixed rather than dumped verbatim: this content is
@@ -112,7 +121,7 @@ def _dump_harness_output(model: str, returncode: int, stderr: str, text: str) ->
         if not body:
             continue
         print(
-            f"fuko: agentic {model} exit {returncode} — full harness {stream} follows",
+            f"fuko: agentic {model} {label} — full harness {stream} follows",
             file=sys.stderr,
         )
         for line in body.splitlines():
@@ -676,7 +685,9 @@ class AgenticBackend:
             # model is not in its catalog — every run here — so the head of
             # this buffer is noise and the cap in `detail` never reaches the
             # cause. This buffer is the only copy in the process.
-            _dump_harness_output(model_name, result.returncode, result.stderr, result.text)
+            _dump_harness_output(
+                model_name, f"exit {result.returncode}", result.stderr, result.text
+            )
             if is_auth_failure(output):
                 # Auth is neither a timeout nor a throttle -- failing over would burn
                 # the pool on a one-line runner fix -- so the channel is a plain fail.
@@ -730,7 +741,9 @@ class AgenticBackend:
             # reached the dump above — yet the malformed output is the entire
             # evidence, and `str(e)[:500]` is a summary of it (fuko-henry,
             # #147). Dump before returning.
-            _dump_harness_output(model_name, 0, result.stderr, result.text)
+            _dump_harness_output(
+                model_name, "parse-failure (harness exit 0)", result.stderr, result.text
+            )
             # Lead with the verdict here too. This path returns
             # `failed:exit 1` on the channel, so a detail opening with parser
             # prose would break the contract the other failure paths keep

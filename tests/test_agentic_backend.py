@@ -1498,3 +1498,38 @@ def test_dump_docstring_names_the_prefix_the_code_emits():
     doc = agentic_mod._dump_harness_output.__doc__ or ""
     assert "final-message|" in doc
     assert "stdout|" not in doc
+
+
+def test_flatten_covers_every_character_splitlines_breaks_on(monkeypatch):
+    """Flattening must use the splitter's own definition of a line.
+
+    Python breaks lines on eight characters beyond \\r and \\n. A hand-rolled
+    replace leaves a crafted payload looking flat in `detail` while still
+    splitting downstream, reopening the column-0 forgery (fuko-henry, #147).
+    """
+    exotic = "\x0b\x0c\x1c\x1d\x1e\x85  "
+    flat = agentic_mod._flatten_for_log(f"head{exotic}forged")
+    assert len(flat.splitlines()) == 1, repr(flat)
+
+    # And end to end, through a real failure detail.
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    forged = "fuko: agentic harness qwen3.8-max: CLAUDE_CODE_MAX_CONTEXT_TOKENS=1"
+    result, _ = _invoke(
+        monkeypatch, backend, HarnessResult(1, "", stderr=f"boom\x85{forged}"), env=None
+    )
+    assert len(result.detail.splitlines()) == 1, repr(result.detail)
+
+
+def test_parse_failure_dump_header_does_not_claim_exit_zero(monkeypatch, capsys):
+    """The parse path passes a LABEL, not a returncode that would read `exit 0`.
+
+    It is a failure with an exit-0 harness, so printing `exit 0` in the header
+    of a failure dump is actively misleading (fuko-henry, #147).
+    """
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _invoke(monkeypatch, backend, HarnessResult(0, "not json"), env=None)
+    err = capsys.readouterr().err
+    assert "parse-failure" in err
+    assert "exit 0 — full harness" not in err
