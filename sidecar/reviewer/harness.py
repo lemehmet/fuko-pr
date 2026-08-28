@@ -244,6 +244,11 @@ class HarnessResult:
     text: str
     stderr: str = ""
     timed_out: bool = False
+    #: The terminal ``result`` event's ``subtype`` when it was not a success
+    #: (e.g. ``error_max_turns``). Surfacing it on the LOG alone left the
+    #: receipt indistinguishable from a crash, which is the whole failure this
+    #: exists to end (fuko-henry, #149).
+    result_subtype: str | None = None
 
 
 def is_auth_failure(output: str) -> bool:
@@ -359,8 +364,8 @@ def run_review(
             flush=True,
         )
 
-    returncode, text, stderr, timed_out = _drive(
-        cmd, prompt=prompt, cwd=cwd, env=env, timeout=timeout, emit=_emit
+    returncode, text, stderr, timed_out, subtype = _drive(
+        cmd, prompt=prompt, cwd=cwd, env=env, timeout=timeout, emit=_emit, model=model
     )
     if timed_out:
         return HarnessResult(
@@ -369,7 +374,7 @@ def run_review(
             stderr=stderr or f"review timed out after {timeout}s",
             timed_out=True,
         )
-    return HarnessResult(returncode=returncode, text=text, stderr=stderr)
+    return HarnessResult(returncode=returncode, text=text, stderr=stderr, result_subtype=subtype)
 
 
 def _flatten(value: str) -> str:
@@ -403,7 +408,7 @@ def _tool_arg(tool_input: dict) -> str:
     return ""
 
 
-def _consume_stream(lines, emit) -> tuple[str, bool]:
+def _consume_stream(lines, emit, model: str = "?") -> tuple[str, bool, str | None]:
     """Fold the harness's NDJSON event feed into (final_text, saw_result).
 
     ``emit(turn, tool, arg)`` fires once per ``tool_use`` block as it streams.
@@ -413,6 +418,7 @@ def _consume_stream(lines, emit) -> tuple[str, bool]:
     healthy run they are the same message.
     """
     result_text: str | None = None
+    error_subtype: str | None = None
     last_assistant_text = ""
     turns = 0
     for raw in lines:
@@ -445,16 +451,20 @@ def _consume_stream(lines, emit) -> tuple[str, bool]:
             # and the only visible line names the model, sending every
             # investigation at the provider (mepro #2064, a full day).
             if event.get("is_error") or event.get("subtype") not in (None, "success"):
-                subtype = event.get("subtype") or "unknown"
+                error_subtype = event.get("subtype") or "unknown"
+                # Named, like every other operator-facing line in this path:
+                # seats run concurrently by design, so an unattributed line is
+                # unassignable in exactly the rounds it matters (fuko-henry,
+                # #149).
                 print(
-                    f"fuko: agentic harness ended with result subtype={subtype}"
+                    f"fuko: agentic {model} ended with result subtype={error_subtype}"
                     + (" (is_error)" if event.get("is_error") else ""),
                     file=sys.stderr,
                     flush=True,
                 )
     if result_text is not None:
-        return result_text, True
-    return last_assistant_text, False
+        return result_text, True, error_subtype
+    return last_assistant_text, False, error_subtype
 
 
 def _drive(
@@ -465,7 +475,8 @@ def _drive(
     env: dict[str, str],
     timeout: int,
     emit,
-) -> tuple[int, str, str, bool]:
+    model: str = "?",
+) -> tuple[int, str, str, bool, str | None]:
     """Run ``cmd`` streaming stdout through :func:`_consume_stream`.
 
     Returns ``(returncode, final_text, stderr, timed_out)``. Three pipes need
@@ -508,9 +519,9 @@ def _drive(
     stdin_thread = threading.Thread(target=_feed, daemon=True)
     stdin_thread.start()
     try:
-        text, _saw_result = _consume_stream(proc.stdout, emit)
+        text, _saw_result, subtype = _consume_stream(proc.stdout, emit, model)
         proc.wait()
     finally:
         timer.cancel()
     stderr_thread.join(timeout=5)
-    return proc.returncode, text, "".join(stderr_chunks), timed_out.is_set()
+    return proc.returncode, text, "".join(stderr_chunks), timed_out.is_set(), subtype

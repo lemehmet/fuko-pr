@@ -743,6 +743,16 @@ class AgenticBackend:
             # gates are ^-anchored, so an embedded newline would hand chosen
             # text column 0 of its own line (fuko-henry, #147).
             stderr_tail = _flatten_for_log(result.stderr)[:460]
+            # Lead the message with WHY the session ended when the harness said
+            # so. `error_max_turns` exits 1 with an otherwise-empty stderr, so
+            # without this the receipt is indistinguishable from a crash and
+            # only the log carries the answer (fuko-henry, #149).
+            if result.result_subtype:
+                stderr_tail = _flatten_for_log(
+                    f"{result.result_subtype} — {stderr_tail}"
+                    if stderr_tail
+                    else result.result_subtype
+                )[:460]
             throttled = is_throttle(result.returncode, output)
             # Same vocabulary the pr-agent driver records per tool, so a consumer
             # reads one channel map regardless of backend: a hung run is

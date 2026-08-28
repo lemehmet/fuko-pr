@@ -432,10 +432,10 @@ def test_run_review_missing_binary(monkeypatch, tmp_path):
 
 
 def _fake_drive(seen, text='{"findings": []}', returncode=0, timed_out=False):
-    def fake(cmd, *, prompt, cwd, env, timeout, emit):
+    def fake(cmd, *, prompt, cwd, env, timeout, emit, model="?"):
         seen["cmd"] = cmd
         seen["kwargs"] = {"prompt": prompt, "cwd": cwd, "env": env, "timeout": timeout}
-        return returncode, text, "", timed_out
+        return returncode, text, "", timed_out, None
 
     return fake
 
@@ -535,7 +535,7 @@ def test_consume_stream_emits_progress_and_lifts_result():
         json.dumps({"type": "result", "subtype": "success", "result": '{"findings": []}'}),
     ]
     emitted = []
-    text, saw = harness_mod._consume_stream(events, lambda t, n, a: emitted.append((t, n, a)))
+    text, saw, _sub = harness_mod._consume_stream(events, lambda t, n, a: emitted.append((t, n, a)))
     assert saw is True and text == '{"findings": []}'
     # pattern outranks path for display — the Grep line should show what it
     # searched for, and garbage lines must not have derailed the fold.
@@ -565,7 +565,7 @@ def test_consume_stream_falls_back_to_last_assistant_text():
             }
         ),
     ]
-    text, saw = harness_mod._consume_stream(events, lambda *a: None)
+    text, saw, _sub = harness_mod._consume_stream(events, lambda *a: None)
     assert saw is False and text == '{"findings": []}'
 
 
@@ -584,7 +584,7 @@ def test_drive_streams_a_real_process(tmp_path):
         'sys.stderr.write("child noise\\n")\n'
     )
     emitted = []
-    rc, text, stderr, timed_out = harness_mod._drive(
+    rc, text, stderr, timed_out, _sub = harness_mod._drive(
         [sys.executable, str(script)],
         prompt="p" * 100_000,
         cwd=tmp_path,
@@ -887,7 +887,7 @@ def test_result_subtype_is_surfaced_when_the_session_ends_in_error(capsys):
         json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}}),
         json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True}),
     ]
-    harness_mod._consume_stream(events, lambda *a: None)
+    harness_mod._consume_stream(events, lambda *a: None, "m")
     err = capsys.readouterr().err
     assert "result subtype=error_max_turns" in err, err
     assert "is_error" in err
@@ -898,7 +898,7 @@ def test_successful_result_subtype_is_not_announced(capsys):
     events = [
         json.dumps({"type": "result", "subtype": "success", "result": '{"findings": []}'}),
     ]
-    text, saw = harness_mod._consume_stream(events, lambda *a: None)
+    text, saw, _sub = harness_mod._consume_stream(events, lambda *a: None)
     assert saw and text == '{"findings": []}'
     assert "result subtype" not in capsys.readouterr().err
 
@@ -911,3 +911,28 @@ def test_max_turns_default_leaves_wall_clock_as_the_binding_bound():
     budget arithmetic actually reasons about.
     """
     assert harness_mod.DEFAULT_MAX_TURNS >= 225, harness_mod.DEFAULT_MAX_TURNS
+
+
+def test_consume_stream_returns_the_error_subtype_for_the_receipt():
+    """Surfacing it on the LOG alone leaves the receipt blind.
+
+    `error_max_turns` exits 1 with an otherwise-empty stderr, so a consumer
+    reading only the receipt could not tell a silently-ended review from a
+    crash (fuko-henry, #149).
+    """
+    events = [json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True})]
+    _text, _saw, subtype = harness_mod._consume_stream(events, lambda *a: None, "m")
+    assert subtype == "error_max_turns"
+
+
+def test_consume_stream_reports_no_subtype_on_success():
+    events = [json.dumps({"type": "result", "subtype": "success", "result": "{}"})]
+    _text, _saw, subtype = harness_mod._consume_stream(events, lambda *a: None, "m")
+    assert subtype is None
+
+
+def test_termination_line_names_the_seat(capsys):
+    """Seats run concurrently by design; an unattributed line is unassignable."""
+    events = [json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True})]
+    harness_mod._consume_stream(events, lambda *a: None, "qwen3.8-max")
+    assert "agentic qwen3.8-max ended with result subtype=" in capsys.readouterr().err
