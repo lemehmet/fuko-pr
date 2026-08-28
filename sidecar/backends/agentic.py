@@ -533,6 +533,38 @@ class AgenticBackend:
         workdir: Path | None = None
         try:
             workdir = Path(mkdtemp(prefix="fuko-agentic-cwd-"))
+            # PER-BRANCH CLAUDE STATE DIRECTORY.
+            #
+            # Concurrent agentic branches are THREADS IN ONE PROCESS
+            # (runner.py's ThreadPoolExecutor), and until now every spawned
+            # harness inherited the same ambient HOME. Two headless Claude Code
+            # processes starting milliseconds apart therefore contended on a
+            # single `~/.claude`, and the FIRST-SPAWNED one lost and exited 1.
+            #
+            # Measured on mepro PR #2064: with two agentic seats configured,
+            # exactly one died per round and it was the earlier spawn 3/3 —
+            # tracking start order, never the model, endpoint or max_context
+            # (one round ran 1000000/1048576, two ran 950000/950000, same
+            # one-survivor outcome; the spawns were 15 ms and 70 ms apart).
+            # It went unseen until 2026-08-25, when a second seat converted to
+            # this driver and gave a round two concurrent harnesses for the
+            # first time.
+            #
+            # Everything else here was already per-branch — the checkout, this
+            # workdir, the env dict — so this closes the last shared mutable
+            # resource.
+            #
+            # API-KEY MODE ONLY, deliberately: in subscription mode the login
+            # LIVES in HOME/CLAUDE_CONFIG_DIR, so redirecting it at a fresh
+            # empty directory would throw the credential away and every
+            # subscription branch would fail to authenticate. Those branches
+            # keep the shared directory and therefore keep the race; that is
+            # the safe trade, and running two concurrent SUBSCRIPTION agentic
+            # seats is not a configuration this fleet uses.
+            if auth == _AUTH_API_KEY:
+                branch_config = workdir / "claude-config"
+                branch_config.mkdir(parents=True, exist_ok=True)
+                harness_env["CLAUDE_CONFIG_DIR"] = str(branch_config)
             prompt = build_prompt(
                 ctx,
                 env.get(_ENV_INSTRUCTIONS, ""),
