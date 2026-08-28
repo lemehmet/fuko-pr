@@ -341,11 +341,13 @@ def run_review(
 
 
 def _flatten(value: str) -> str:
-    """One PHYSICAL log line, always: the argument is reviewer-chosen (and
-    PR-author-influenced — seats grep for strings drawn from the diff), and
-    downstream log gates anchor on line starts, so an embedded newline must
-    not let an argument place chosen text at column 0 of its own line
-    (mepro PR #2014 r2)."""
+    """One PHYSICAL log line, always.
+
+    The argument is reviewer-chosen (and PR-author-influenced — seats grep for
+    strings drawn from the diff), and downstream log gates anchor on line
+    starts, so an embedded newline must not let an argument place chosen text
+    at column 0 of its own line (mepro PR #2014 r2).
+    """
     return value.replace("\r", " ").replace("\n", " ")[:100]
 
 
@@ -439,9 +441,7 @@ def _drive(
     timer = threading.Timer(timeout, _kill)
     timer.start()
     stderr_chunks: list[str] = []
-    stderr_thread = threading.Thread(
-        target=lambda: stderr_chunks.extend(proc.stderr), daemon=True
-    )
+    stderr_thread = threading.Thread(target=lambda: stderr_chunks.extend(proc.stderr), daemon=True)
     stderr_thread.start()
 
     def _feed() -> None:

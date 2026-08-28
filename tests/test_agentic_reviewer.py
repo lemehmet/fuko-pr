@@ -515,7 +515,11 @@ def test_consume_stream_emits_progress_and_lifts_result():
                 "type": "assistant",
                 "message": {
                     "content": [
-                        {"type": "tool_use", "name": "Grep", "input": {"pattern": "foo", "path": "src"}}
+                        {
+                            "type": "tool_use",
+                            "name": "Grep",
+                            "input": {"pattern": "foo", "path": "src"},
+                        }
                     ]
                 },
             }
@@ -555,7 +559,10 @@ def test_consume_stream_falls_back_to_last_assistant_text():
             {"type": "assistant", "message": {"content": [{"type": "text", "text": "early"}]}}
         ),
         json.dumps(
-            {"type": "assistant", "message": {"content": [{"type": "text", "text": '{"findings": []}'}]}}
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": '{"findings": []}'}]},
+            }
         ),
     ]
     text, saw = harness_mod._consume_stream(events, lambda *a: None)
@@ -598,9 +605,7 @@ def test_run_review_timeout_maps_to_throttle_class(tmp_path, monkeypatch):
     script.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(60)\n")
     script.chmod(0o755)
     monkeypatch.setattr(harness_mod.shutil, "which", lambda *a, **k: str(script))
-    result = run_review(
-        "p", tmp_path, cwd=tmp_path, model="m", env=dict(os.environ), timeout=1
-    )
+    result = run_review("p", tmp_path, cwd=tmp_path, model="m", env=dict(os.environ), timeout=1)
     assert result.timed_out is True
     assert result.returncode == harness_mod.TIMEOUT_RETURNCODE
 
