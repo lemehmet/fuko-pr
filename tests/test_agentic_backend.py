@@ -1434,4 +1434,36 @@ def test_stdout_event_feed_is_dumped_too(monkeypatch, capsys):
     )
     err = capsys.readouterr().err
     assert "TheOnlyEvidence" in err
-    assert "stdout ends" in err
+    assert "final-message ends" in err
+
+
+def test_detail_never_carries_a_newline(monkeypatch):
+    """`detail` is printed into a ^-anchored log, so it must be one line.
+
+    Same reasoning as the runner's progress-argument flattening: this text is
+    PR-author-influenced, and an embedded newline would hand chosen text column
+    0 of its own line (fuko-henry, #147).
+    """
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    forged = "fuko: agentic harness qwen3.8-max: CLAUDE_CODE_MAX_CONTEXT_TOKENS=1"
+    result, _ = _invoke(
+        monkeypatch, backend, HarnessResult(1, "", stderr=f"boom\n{forged}"), env=None
+    )
+    assert "\n" not in result.detail and "\r" not in result.detail, repr(result.detail)
+
+
+def test_parse_failure_dumps_the_output_it_could_not_parse(monkeypatch, capsys):
+    """A parse failure is a failure with an exit-0 harness — it misses the dump above.
+
+    The malformed output IS the evidence, and `str(e)[:500]` only summarises it
+    (fuko-henry, #147).
+    """
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    garbage = "NotJsonAtAll: the model wrote prose instead of the contract"
+    result, _ = _invoke(monkeypatch, backend, HarnessResult(0, garbage), env=None)
+    err = capsys.readouterr().err
+    assert garbage in err, "the unparseable output must reach the log"
+    assert result.returncode == 1
+    assert "\n" not in result.detail

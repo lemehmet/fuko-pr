@@ -80,6 +80,11 @@ _REVIEW_HEADER = "## fuko agentic review"
 _CHANNEL = "agentic-review"
 
 
+def _flatten_for_log(value: str) -> str:
+    """Collapse to ONE physical line: log gates downstream are ^-anchored."""
+    return value.strip().replace("\r", " ").replace("\n", " ")
+
+
 def _dump_harness_output(model: str, returncode: int, stderr: str, text: str) -> None:
     """Print the harness's unabridged output on failure, one PREFIXED line at a time.
 
@@ -93,12 +98,16 @@ def _dump_harness_output(model: str, returncode: int, stderr: str, text: str) ->
     harness can start a line, while the content stays fully readable and
     greppable.
 
-    Both streams, because the cause does not always live in stderr: the harness
-    consumes stdout as an NDJSON event feed, so a malformed-output or
-    mid-stream death leaves its evidence there and nowhere else (fuko-henry,
-    #147).
+    Both channels, because the cause does not always live in stderr. Be precise
+    about what the second one IS, though: ``text`` is the harness's LIFTED
+    FINAL MESSAGE (the terminal ``result`` event, or the last assistant text on
+    schema drift) — NOT the raw NDJSON event feed, which ``_consume_stream``
+    folds away and no one retains. So a malformed final message is captured
+    here; a mid-stream protocol death still leaves nothing behind. Retaining
+    the raw feed is a separate change with its own volume trade-off
+    (fuko-henry, #147).
     """
-    for stream, body in (("stderr", stderr), ("stdout", text)):
+    for stream, body in (("stderr", stderr), ("final-message", text)):
         body = (body or "").rstrip()
         if not body:
             continue
@@ -679,7 +688,12 @@ class AgenticBackend:
                     ),
                     channels={_CHANNEL: f"failed:exit {result.returncode}"},
                 )
-            stderr_tail = result.stderr.strip()[:460]
+            # FLATTENED, for the same reason the runner flattens progress
+            # arguments (27011698) and the dump prefixes its lines: this text
+            # is PR-author-influenced and `detail` is printed into a log whose
+            # gates are ^-anchored, so an embedded newline would hand chosen
+            # text column 0 of its own line (fuko-henry, #147).
+            stderr_tail = _flatten_for_log(result.stderr)[:460]
             throttled = is_throttle(result.returncode, output)
             # Same vocabulary the pr-agent driver records per tool, so a consumer
             # reads one channel map regardless of backend: a hung run is
@@ -706,8 +720,15 @@ class AgenticBackend:
         try:
             review = parse_review(result.text)
         except ReviewParseError as e:
+            # A parse failure is a FAILURE with an exit-0 harness, so it never
+            # reached the dump above — yet the malformed output is the entire
+            # evidence, and `str(e)[:500]` is a summary of it (fuko-henry,
+            # #147). Dump before returning.
+            _dump_harness_output(model_name, 0, result.stderr, result.text)
             return InvokeResult(
-                returncode=1, detail=str(e)[:500], channels={_CHANNEL: "failed:exit 1"}
+                returncode=1,
+                detail=_flatten_for_log(str(e))[:500],
+                channels={_CHANNEL: "failed:exit 1"},
             )
 
         # Case/whitespace-normalized: `confidence` is deliberately a free-form
