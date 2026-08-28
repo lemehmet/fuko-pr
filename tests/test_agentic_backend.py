@@ -1266,3 +1266,78 @@ def test_normalize_without_stash_is_empty(monkeypatch):
     monkeypatch.setattr(agentic_mod, "httpx", fake)
     assert backend.normalize_output(PR, "claude-x", token="t") == []
     assert fake.posts == []
+
+
+def test_concurrent_api_key_branches_get_distinct_claude_config_dirs(monkeypatch):
+    """Two concurrent agentic branches must NOT share one Claude state dir.
+
+    Branches run as threads in ONE process (runner.py's ThreadPoolExecutor)
+    and every spawned harness used to inherit the same ambient HOME, so two
+    headless Claude Code processes starting milliseconds apart contended on a
+    single `~/.claude`. The first-spawned one lost and exited 1 — measured on
+    mepro PR #2064, 3/3 rounds, tracking spawn order rather than model or
+    endpoint.
+
+    The existing suite could not see this because every other test invokes a
+    single branch; the defect only exists BETWEEN branches. So assert the
+    property that matters: distinct, non-empty, per-branch config dirs.
+    """
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    seen = []
+    for name in ("qwen3.8-max", "qwen3.8-max"):
+        env = backend.build_env(
+            get_preset("qwen-anthropic"),
+            ModelConfig(provider="qwen-anthropic", name=name, auth="api-key"),
+            knowledge="",
+            tools=["review"],
+        )
+        _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON), env=env)
+        seen.append(captured["env"].get("CLAUDE_CONFIG_DIR"))
+
+    assert all(seen), f"api-key branches must get their own CLAUDE_CONFIG_DIR, got {seen}"
+    assert seen[0] != seen[1], f"concurrent branches share a config dir: {seen}"
+
+
+def test_subscription_branch_keeps_the_shared_claude_config_dir(monkeypatch):
+    """The isolation above must NOT apply in subscription mode.
+
+    A subscription login LIVES in HOME/CLAUDE_CONFIG_DIR. Pointing the harness
+    at a fresh empty directory would discard the credential and every such
+    branch would fail to authenticate — so subscription branches keep the
+    ambient directory (and, knowingly, the race).
+    """
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    env = backend.build_env(
+        get_preset("qwen-anthropic"),
+        ModelConfig(provider="qwen-anthropic", name="qwen3.8-max", auth="subscription"),
+        knowledge="",
+        tools=["review"],
+    )
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON), env=env)
+    assert "CLAUDE_CONFIG_DIR" not in captured["env"]
+
+
+def test_api_key_branch_still_denies_the_ambient_claude_config_dir(monkeypatch):
+    """Replacing CLAUDE_CONFIG_DIR must not drop the deny rule that covered it.
+
+    The read denylist keys on CLAUDE_CONFIG_DIR. Redirecting it at a private
+    per-branch directory would otherwise silently un-deny the RUNNER's real
+    config dir — an operator credential store, readable by an agent whose
+    findings are published verbatim to an untrusted PR author. The displaced
+    value must reach the harness so `_permission_settings` can deny both.
+    """
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/runner/ambient-claude")
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    env = backend.build_env(
+        get_preset("qwen-anthropic"),
+        ModelConfig(provider="qwen-anthropic", name="qwen3.8-max", auth="api-key"),
+        knowledge="",
+        tools=["review"],
+    )
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON), env=env)
+    assert captured["env"]["CLAUDE_CONFIG_DIR"] != "/runner/ambient-claude"
+    assert captured["env"]["FUKO_AMBIENT_CLAUDE_CONFIG_DIR"] == "/runner/ambient-claude"
