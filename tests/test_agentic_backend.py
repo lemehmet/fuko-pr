@@ -1377,10 +1377,14 @@ def test_auth_failure_also_dumps_full_stderr(monkeypatch, capsys):
     backend = AgenticBackend(ReviewConfig(tool_timeout=5))
     noise = '[claude-code:unrecognized_model] {"model":"qwen3.8-max"}\n' * 8
     real = "invalid api key -- RealAuthDetail beyond the cap"
-    _invoke(monkeypatch, backend, HarnessResult(1, "", stderr=noise + real), env=None)
+    result, _ = _invoke(monkeypatch, backend, HarnessResult(1, "", stderr=noise + real), env=None)
     err = capsys.readouterr().err
     assert real in err
     assert "stderr ends" in err
+    # Prove the AUTH branch was the one taken — otherwise the generic branch
+    # would satisfy this test and the auth path could regress unnoticed
+    # (fuko-henry, #147).
+    assert "could not authenticate" in result.detail, result.detail[:100]
 
 
 def test_empty_stderr_detail_is_the_bare_verdict_with_no_dangling_separator(monkeypatch):
@@ -1393,3 +1397,41 @@ def test_empty_stderr_detail_is_the_bare_verdict_with_no_dangling_separator(monk
     backend = AgenticBackend(ReviewConfig(tool_timeout=5))
     result, _ = _invoke(monkeypatch, backend, HarnessResult(1, "", stderr="   "), env=None)
     assert result.detail == "failed:exit 1", repr(result.detail)
+
+
+def test_harness_output_dump_cannot_forge_a_line_anchored_gate(monkeypatch, capsys):
+    """No harness line may start at column 0 of the log.
+
+    stderr here is PR-author-influenced (seats grep strings drawn from the diff)
+    and downstream gates are ^-anchored — the runner already flattens newlines
+    out of progress arguments for that reason. A raw dump would let a crafted
+    diff forge a gate line; every dumped line is prefixed instead.
+    """
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    forged = "fuko: agentic harness qwen3.8-max: CLAUDE_CODE_MAX_CONTEXT_TOKENS=1"
+    _invoke(
+        monkeypatch,
+        backend,
+        HarnessResult(1, "", stderr=f"boom\n{forged}\n"),
+        env=None,
+    )
+    err = capsys.readouterr().err
+    assert forged in err, "the content must still be readable"
+    for line in err.splitlines():
+        assert not line.startswith(forged), f"forged line reached column 0: {line!r}"
+
+
+def test_stdout_event_feed_is_dumped_too(monkeypatch, capsys):
+    """A malformed-output death leaves its evidence in stdout, not stderr."""
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _invoke(
+        monkeypatch,
+        backend,
+        HarnessResult(1, "TheOnlyEvidence: truncated event feed", stderr=""),
+        env=None,
+    )
+    err = capsys.readouterr().err
+    assert "TheOnlyEvidence" in err
+    assert "stdout ends" in err

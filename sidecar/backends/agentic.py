@@ -80,6 +80,37 @@ _REVIEW_HEADER = "## fuko agentic review"
 _CHANNEL = "agentic-review"
 
 
+def _dump_harness_output(model: str, returncode: int, stderr: str, text: str) -> None:
+    """Print the harness's unabridged output on failure, one PREFIXED line at a time.
+
+    Why prefixed rather than dumped verbatim: this content is
+    PR-author-influenced (seats grep for strings drawn from the diff, and the
+    harness echoes those arguments), and downstream log gates are ^-anchored --
+    the runner already flattens newlines out of progress arguments for exactly
+    that reason. A raw multi-line dump would hand arbitrary text column 0 of its
+    own line and let a crafted diff forge a gate line. Every line therefore
+    carries a `fuko: stderr|` / `fuko: stdout|` prefix, so nothing from the
+    harness can start a line, while the content stays fully readable and
+    greppable.
+
+    Both streams, because the cause does not always live in stderr: the harness
+    consumes stdout as an NDJSON event feed, so a malformed-output or
+    mid-stream death leaves its evidence there and nowhere else (fuko-henry,
+    #147).
+    """
+    for stream, body in (("stderr", stderr), ("stdout", text)):
+        body = (body or "").rstrip()
+        if not body:
+            continue
+        print(
+            f"fuko: agentic {model} exit {returncode} — full harness {stream} follows",
+            file=sys.stderr,
+        )
+        for line in body.splitlines():
+            print(f"fuko: {stream}| {line}", file=sys.stderr)
+        print(f"fuko: agentic {model} {stream} ends", file=sys.stderr, flush=True)
+
+
 def _review_header(label: str = "") -> str:
     """The review body's opening line, carrying the branch label when there is one.
 
@@ -636,15 +667,7 @@ class AgenticBackend:
             # model is not in its catalog — every run here — so the head of
             # this buffer is noise and the cap in `detail` never reaches the
             # cause. This buffer is the only copy in the process.
-            if result.stderr.strip():
-                print(
-                    f"fuko: agentic {model_name} exit {result.returncode} — "
-                    f"full harness stderr follows\n"
-                    f"{result.stderr.rstrip()}\n"
-                    f"fuko: agentic {model_name} stderr ends",
-                    file=sys.stderr,
-                    flush=True,
-                )
+            _dump_harness_output(model_name, result.returncode, result.stderr, result.text)
             if is_auth_failure(output):
                 # Auth is neither a timeout nor a throttle -- failing over would burn
                 # the pool on a one-line runner fix -- so the channel is a plain fail.
