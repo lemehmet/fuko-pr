@@ -731,23 +731,11 @@ class AgenticBackend:
             if is_auth_failure(output):
                 # Auth is neither a timeout nor a throttle -- failing over would burn
                 # the pool on a one-line runner fix -- so the channel is a plain fail.
-                auth_verdict = f"failed:exit {result.returncode}"
                 auth_tail = _flatten_for_log(result.stderr)[:300]
-                return InvokeResult(
-                    returncode=result.returncode,
-                    # Flattened and verdict-led like every other failure path.
-                    # `strip()` removes only LEADING/TRAILING whitespace, so
-                    # internal newlines survived here and left the column-0
-                    # vector this PR closes open on exactly one branch
-                    # (fuko-henry, #147).
-                    # Same dangling-separator guard the generic branch keeps:
-                    # with empty stderr this must not publish a trailing ": "
-                    # (fuko-henry, #147).
-                    detail=(
-                        f"{auth_verdict}: agent could not authenticate in {auth} mode"
-                        + (f": {auth_tail}" if auth_tail else "")
-                    ),
-                    channels={_CHANNEL: auth_verdict},
+                return _failure_result(
+                    f"failed:exit {result.returncode}",
+                    f"agent could not authenticate in {auth} mode"
+                    + (f": {auth_tail}" if auth_tail else ""),
                 )
             # FLATTENED, for the same reason the runner flattens progress
             # arguments (27011698) and the dump prefixes its lines: this text

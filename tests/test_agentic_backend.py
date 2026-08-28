@@ -1631,17 +1631,24 @@ def test_every_failure_path_is_verdict_led_flattened_and_ungapped(monkeypatch):
         assert r.channels[agentic_mod._CHANNEL] == verdict
 
 
-def test_no_hand_rolled_failure_return_survives_in_invoke():
-    """Structural: a new failure return that bypasses the helper reintroduces the class.
+def test_invoke_constructs_no_failure_result_by_hand():
+    """Structural: only the SUCCESS return may build an InvokeResult in invoke().
 
-    Every one of these invariants was violated by at least one hand-rolled
-    return before centralisation, so the guard is that none come back.
+    The first version of this guard grepped for the literal
+    `channels={_CHANNEL: "failed`, and the auth branch survived it by using a
+    VARIABLE channel — a guard that could not fail for the one case that was
+    actually broken (fuko-henry, #147). Counting constructions is textual too,
+    but it cannot be evaded by naming: every failure path must go through
+    `_failure_result`, so exactly ONE `InvokeResult(` may remain, the success
+    return.
     """
     import inspect
 
     src = inspect.getsource(agentic_mod.AgenticBackend.invoke)
-    assert 'channels={_CHANNEL: "failed' not in src, (
-        "a failure return bypasses _failure_result; route it through the helper"
+    constructions = src.count("InvokeResult(")
+    assert constructions == 1, (
+        f"invoke() builds {constructions} InvokeResults; only the success return "
+        "may be hand-built — route failures through _failure_result"
     )
-    assert 'channels={_CHANNEL: "throttled' not in src
-    assert 'channels={_CHANNEL: "killed' not in src
+    # And the surviving one is the success path.
+    assert 'channels={_CHANNEL: "done"}' in src
