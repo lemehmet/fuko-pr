@@ -646,9 +646,39 @@ class AgenticBackend:
                 verdict = f"throttled:exit {result.returncode}"
             else:
                 verdict = f"failed:exit {result.returncode}"
+            # PRINT THE WHOLE STDERR, and lead with the verdict.
+            #
+            # `detail` below is capped at 500 chars for the published receipt,
+            # and headless Claude Code opens stderr with a benign
+            # `[claude-code:unrecognized_model]` warning on any gateway whose
+            # model is not in its catalog — i.e. every run here. That warning
+            # therefore FILLS the cap and becomes the entire published reason,
+            # while the actual error sits further down and is discarded: this
+            # buffer is the only copy in the process, so nothing else ever
+            # sees it.
+            #
+            # The cost of that is measured, not hypothetical. On mepro #2064 a
+            # seat failed identically across many rounds and the published text
+            # named the correctly-configured model as "unrecognized", which
+            # sent the investigation through a rotated API key (twice), a
+            # rolled-back subscription, a context-window change and a
+            # concurrency fix — none of which were the cause — because the real
+            # error was never once visible. Truncating the receipt is fine;
+            # having no unabridged copy anywhere is not.
+            if result.stderr.strip():
+                print(
+                    f"fuko: agentic {model_name} {verdict} — full harness stderr follows\n"
+                    f"{result.stderr.rstrip()}\n"
+                    f"fuko: agentic {model_name} stderr ends",
+                    file=sys.stderr,
+                    flush=True,
+                )
             return InvokeResult(
                 returncode=result.returncode,
-                detail=result.stderr.strip()[:500] or "agent run failed",
+                # Lead with the verdict so the receipt is diagnostic even when
+                # the stderr head is the benign warning: `failed:exit 1` beats
+                # any prose at telling a crash from a timeout from a throttle.
+                detail=f"{verdict}: {result.stderr.strip()[:460]}" or verdict,
                 throttled=throttled,
                 channels={_CHANNEL: verdict},
             )

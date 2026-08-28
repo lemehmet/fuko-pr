@@ -1341,3 +1341,26 @@ def test_api_key_branch_still_denies_the_ambient_claude_config_dir(monkeypatch):
     _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON), env=env)
     assert captured["env"]["CLAUDE_CONFIG_DIR"] != "/runner/ambient-claude"
     assert captured["env"]["FUKO_AMBIENT_CLAUDE_CONFIG_DIR"] == "/runner/ambient-claude"
+
+
+def test_failure_prints_full_stderr_and_leads_the_detail_with_the_verdict(monkeypatch, capsys):
+    """A failing branch must leave an unabridged copy of stderr in the log.
+
+    `detail` is capped for the receipt, and headless Claude Code opens stderr
+    with a benign `[claude-code:unrecognized_model]` warning on any non-catalog
+    gateway — so the cap is filled by noise and the real error is discarded.
+    That cost mepro #2064 several wrong fixes: the published reason named a
+    correctly-configured model as "unrecognized" while the actual failure was
+    never visible anywhere.
+    """
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    noise = '[claude-code:unrecognized_model] {"model":"qwen3.8-max"}\n' * 12
+    real = "RealError: the thing that actually broke"
+    result, _ = _invoke(monkeypatch, backend, HarnessResult(1, "", stderr=noise + real), env=None)
+
+    err = capsys.readouterr().err
+    assert real in err, "the real error must reach the log unabridged"
+    assert "stderr ends" in err, "the dump must be delimited so it is greppable"
+    # And the receipt leads with the verdict rather than the noise.
+    assert result.detail.startswith("failed:exit 1"), result.detail[:80]
