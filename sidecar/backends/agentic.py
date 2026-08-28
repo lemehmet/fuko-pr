@@ -94,7 +94,7 @@ def _dump_harness_output(model: str, returncode: int, stderr: str, text: str) ->
     the runner already flattens newlines out of progress arguments for exactly
     that reason. A raw multi-line dump would hand arbitrary text column 0 of its
     own line and let a crafted diff forge a gate line. Every line therefore
-    carries a `fuko: stderr|` / `fuko: stdout|` prefix, so nothing from the
+    carries a `fuko: stderr|` / `fuko: final-message|` prefix, so nothing from the
     harness can start a line, while the content stays fully readable and
     greppable.
 
@@ -680,13 +680,19 @@ class AgenticBackend:
             if is_auth_failure(output):
                 # Auth is neither a timeout nor a throttle -- failing over would burn
                 # the pool on a one-line runner fix -- so the channel is a plain fail.
+                auth_verdict = f"failed:exit {result.returncode}"
                 return InvokeResult(
                     returncode=result.returncode,
+                    # Flattened and verdict-led like every other failure path.
+                    # `strip()` removes only LEADING/TRAILING whitespace, so
+                    # internal newlines survived here and left the column-0
+                    # vector this PR closes open on exactly one branch
+                    # (fuko-henry, #147).
                     detail=(
-                        f"agent could not authenticate in {auth} mode: "
-                        f"{result.stderr.strip()[:300]}"
+                        f"{auth_verdict}: agent could not authenticate in {auth} mode: "
+                        f"{_flatten_for_log(result.stderr)[:300]}"
                     ),
-                    channels={_CHANNEL: f"failed:exit {result.returncode}"},
+                    channels={_CHANNEL: auth_verdict},
                 )
             # FLATTENED, for the same reason the runner flattens progress
             # arguments (27011698) and the dump prefixes its lines: this text

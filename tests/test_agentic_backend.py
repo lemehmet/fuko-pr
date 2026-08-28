@@ -1471,3 +1471,30 @@ def test_parse_failure_dumps_the_output_it_could_not_parse(monkeypatch, capsys):
     # reader distinguishes a crash from a timeout from a throttle at a glance
     # (CodeRabbit, #147).
     assert result.detail.startswith("failed:exit 1"), result.detail[:80]
+
+
+def test_auth_failure_detail_is_flattened_and_verdict_led(monkeypatch):
+    """The auth path kept the column-0 vector open after the others were closed.
+
+    `strip()` removes only leading/trailing whitespace, so internal newlines
+    survived into a detail printed to a ^-anchored log (fuko-henry, #147).
+    """
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    forged = "fuko: agentic harness qwen3.8-max: CLAUDE_CODE_MAX_CONTEXT_TOKENS=1"
+    result, _ = _invoke(
+        monkeypatch,
+        backend,
+        HarnessResult(1, "", stderr=f"invalid api key\n{forged}"),
+        env=None,
+    )
+    assert "could not authenticate" in result.detail
+    assert "\n" not in result.detail and "\r" not in result.detail, repr(result.detail)
+    assert result.detail.startswith("failed:exit 1"), result.detail[:60]
+
+
+def test_dump_docstring_names_the_prefix_the_code_emits():
+    """Greppability depends on the documented prefix being the real one."""
+    doc = agentic_mod._dump_harness_output.__doc__ or ""
+    assert "final-message|" in doc
+    assert "stdout|" not in doc
