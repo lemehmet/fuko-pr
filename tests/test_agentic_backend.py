@@ -5,6 +5,7 @@ import json
 import httpx
 import pytest
 
+from sidecar.throttle import TIMEOUT_RETURNCODE
 from sidecar.backends import agentic as agentic_mod
 from sidecar.backends import get_backend
 from sidecar.backends.agentic import AgenticBackend
@@ -1533,3 +1534,38 @@ def test_parse_failure_dump_header_does_not_claim_exit_zero(monkeypatch, capsys)
     err = capsys.readouterr().err
     assert "parse-failure" in err
     assert "exit 0 — full harness" not in err
+
+
+def test_dump_attributes_every_line_to_its_model(monkeypatch, capsys):
+    """Seats run concurrently, so two failing branches interleave on one stderr.
+
+    A header-only attribution leaves the mixed lines unassignable — which is
+    exactly the situation this project runs in by design (fuko-henry, #147).
+    """
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _invoke(monkeypatch, backend, HarnessResult(1, "", stderr="alpha\nbeta"), env=None)
+    err = capsys.readouterr().err
+    body = [ln for ln in err.splitlines() if ln.endswith(("alpha", "beta"))]
+    assert body, err
+    for line in body:
+        assert "stderr|" in line and "claude-x" in line, line
+
+
+def test_auth_detail_has_no_dangling_separator_when_stderr_is_empty(monkeypatch):
+    """The auth branch must keep the guard the generic branch has."""
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    result, _ = _invoke(
+        monkeypatch, backend, HarnessResult(1, "invalid api key", stderr=""), env=None
+    )
+    assert not result.detail.rstrip().endswith(":"), repr(result.detail)
+
+
+def test_timeout_and_throttle_details_are_verdict_led(monkeypatch):
+    """The contract covers EVERY failure verdict, not only `failed:exit N`."""
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    timed = HarnessResult(TIMEOUT_RETURNCODE, "", stderr="review timed out", timed_out=True)
+    result, _ = _invoke(monkeypatch, backend, timed, env=None)
+    assert result.detail.startswith("killed:timeout"), result.detail[:60]

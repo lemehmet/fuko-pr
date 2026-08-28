@@ -103,9 +103,12 @@ def _dump_harness_output(model: str, label: str, stderr: str, text: str) -> None
     the runner already flattens newlines out of progress arguments for exactly
     that reason. A raw multi-line dump would hand arbitrary text column 0 of its
     own line and let a crafted diff forge a gate line. Every line therefore
-    carries a `fuko: stderr|` / `fuko: final-message|` prefix, so nothing from the
-    harness can start a line, while the content stays fully readable and
-    greppable.
+    carries a `fuko: <model> stderr|` / `fuko: <model> final-message|` prefix, so
+    nothing from the harness can start a line, while the content stays fully
+    readable and greppable. The MODEL is on every line, not just the header,
+    because seats run concurrently by design -- two failing branches interleave
+    on one stderr and a header-only attribution leaves the mixed lines
+    unassignable (fuko-henry, #147).
 
     Both channels, because the cause does not always live in stderr. Be precise
     about what the second one IS, though: ``text`` is the harness's LIFTED
@@ -125,7 +128,7 @@ def _dump_harness_output(model: str, label: str, stderr: str, text: str) -> None
             file=sys.stderr,
         )
         for line in body.splitlines():
-            print(f"fuko: {stream}| {line}", file=sys.stderr)
+            print(f"fuko: {model} {stream}| {line}", file=sys.stderr)
         print(f"fuko: agentic {model} {stream} ends", file=sys.stderr, flush=True)
 
 
@@ -692,6 +695,7 @@ class AgenticBackend:
                 # Auth is neither a timeout nor a throttle -- failing over would burn
                 # the pool on a one-line runner fix -- so the channel is a plain fail.
                 auth_verdict = f"failed:exit {result.returncode}"
+                auth_tail = _flatten_for_log(result.stderr)[:300]
                 return InvokeResult(
                     returncode=result.returncode,
                     # Flattened and verdict-led like every other failure path.
@@ -699,9 +703,12 @@ class AgenticBackend:
                     # internal newlines survived here and left the column-0
                     # vector this PR closes open on exactly one branch
                     # (fuko-henry, #147).
+                    # Same dangling-separator guard the generic branch keeps:
+                    # with empty stderr this must not publish a trailing ": "
+                    # (fuko-henry, #147).
                     detail=(
-                        f"{auth_verdict}: agent could not authenticate in {auth} mode: "
-                        f"{_flatten_for_log(result.stderr)[:300]}"
+                        f"{auth_verdict}: agent could not authenticate in {auth} mode"
+                        + (f": {auth_tail}" if auth_tail else "")
                     ),
                     channels={_CHANNEL: auth_verdict},
                 )
