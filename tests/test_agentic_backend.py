@@ -1569,3 +1569,39 @@ def test_timeout_and_throttle_details_are_verdict_led(monkeypatch):
     timed = HarnessResult(TIMEOUT_RETURNCODE, "", stderr="review timed out", timed_out=True)
     result, _ = _invoke(monkeypatch, backend, timed, env=None)
     assert result.detail.startswith("killed:timeout"), result.detail[:60]
+
+
+def test_dump_is_exactly_one_write_so_it_cannot_splice(monkeypatch):
+    """The dump must reach the stream in ONE write, not one per line.
+
+    Branches are threads sharing one stderr; a per-line write can be spliced by
+    a concurrently failing sibling, scrambling the attribution and letting
+    harness content start a spliced line (fuko-henry, #147).
+
+    Asserted STRUCTURALLY rather than by racing threads: under the GIL a
+    StringIO write is effectively atomic, so a threaded test passes against the
+    unlocked form too — a test that cannot fail. Counting writes is
+    deterministic and actually discriminates.
+    """
+
+    class _CountingStream:
+        def __init__(self):
+            self.writes = []
+
+        def write(self, s):
+            self.writes.append(s)
+            return len(s)
+
+        def flush(self):
+            pass
+
+    spy = _CountingStream()
+    monkeypatch.setattr(agentic_mod.sys, "stderr", spy)
+    body = "\n".join(f"line{i}" for i in range(50))
+    agentic_mod._dump_harness_output("m", "exit 1", body, "")
+
+    assert len(spy.writes) == 1, f"dump made {len(spy.writes)} writes; splicing is possible"
+    emitted = spy.writes[0].splitlines()
+    assert len(emitted) == 52, emitted[:3]  # header + 50 lines + footer
+    for line in emitted:
+        assert line.startswith("fuko: "), line

@@ -79,6 +79,11 @@ _REVIEW_HEADER = "## fuko agentic review"
 #: reported" and cannot tell from a dead channel.
 _CHANNEL = "agentic-review"
 
+#: Serialises the failure dump. Concurrent branches are threads in one process
+#: sharing one stderr, so an unlocked multi-line dump can interleave with a
+#: sibling's and splice a line (fuko-henry, #147).
+_DUMP_LOCK = threading.Lock()
+
 
 def _flatten_for_log(value: str) -> str:
     r"""Collapse to ONE physical line: log gates downstream are ^-anchored.
@@ -110,6 +115,11 @@ def _dump_harness_output(model: str, label: str, stderr: str, text: str) -> None
     on one stderr and a header-only attribution leaves the mixed lines
     unassignable (fuko-henry, #147).
 
+    Emitted as ONE locked write rather than a sequence of prints: branches are
+    threads sharing this stream, and a per-line print can be spliced mid-line by
+    a concurrently failing seat -- which would both scramble the attribution and
+    let harness content start a spliced line.
+
     Both channels, because the cause does not always live in stderr. Be precise
     about what the second one IS, though: ``text`` is the harness's LIFTED
     FINAL MESSAGE (the terminal ``result`` event, or the last assistant text on
@@ -119,17 +129,26 @@ def _dump_harness_output(model: str, label: str, stderr: str, text: str) -> None
     the raw feed is a separate change with its own volume trade-off
     (fuko-henry, #147).
     """
+    chunks: list[str] = []
     for stream, body in (("stderr", stderr), ("final-message", text)):
         body = (body or "").rstrip()
         if not body:
             continue
-        print(
-            f"fuko: agentic {model} {label} — full harness {stream} follows",
-            file=sys.stderr,
-        )
-        for line in body.splitlines():
-            print(f"fuko: {model} {stream}| {line}", file=sys.stderr)
-        print(f"fuko: agentic {model} {stream} ends", file=sys.stderr, flush=True)
+        chunks.append(f"fuko: agentic {model} {label} — full harness {stream} follows")
+        chunks.extend(f"fuko: {model} {stream}| {line}" for line in body.splitlines())
+        chunks.append(f"fuko: agentic {model} {stream} ends")
+    if not chunks:
+        return
+    # ONE write, under a lock. Branches are threads sharing this stderr, so a
+    # per-line `print()` can be spliced mid-line by a concurrently failing seat
+    # -- which would defeat the per-line attribution above AND could place
+    # harness content at column 0 of a spliced line, reopening the very forgery
+    # the prefix exists to prevent (fuko-henry, #147). Composing the whole dump
+    # and emitting it under `_DUMP_LOCK` makes interleaving impossible between
+    # branches of this process.
+    with _DUMP_LOCK:
+        sys.stderr.write("\n".join(chunks) + "\n")
+        sys.stderr.flush()
 
 
 def _review_header(label: str = "") -> str:
