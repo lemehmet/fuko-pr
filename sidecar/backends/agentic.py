@@ -63,7 +63,7 @@ from ..reviewer.prompt import (
     parse_review,
 )
 from ..signals import ReviewSignal, make_id, with_marker, with_visible_label
-from ..throttle import is_throttle
+from ..throttle import TIMEOUT_RETURNCODE, is_throttle
 from .base import InvokeResult, PRRef
 
 #: The heading every agentic review body opens with.
@@ -78,6 +78,107 @@ _REVIEW_HEADER = "## fuko agentic review"
 #: leaving an empty map, which :func:`sidecar.status.fuko_states` reads as "not
 #: reported" and cannot tell from a dead channel.
 _CHANNEL = "agentic-review"
+
+#: Serialises the failure dump. Concurrent branches are threads in one process
+#: sharing one stderr, so an unlocked multi-line dump can interleave with a
+#: sibling's and splice a line (fuko-henry, #147).
+_DUMP_LOCK = threading.Lock()
+
+
+def _failure_result(verdict: str, message: str = "", *, throttled: bool = False) -> InvokeResult:
+    """Build EVERY failure return, so the receipt invariants cannot drift apart.
+
+    Three properties, each of which was independently violated by at least one
+    hand-rolled failure return in this module before it was centralised
+    (fuko-henry, #147):
+
+    * **Verdict-led.** `failed:exit 1` beats prose at telling a crash from a
+      timeout from a throttle, and a consumer should not parse English to learn
+      which happened.
+    * **Flattened.** Every message here is repo- or PR-author-influenced --
+      harness stderr, a git error carrying remote output, a parser complaint
+      quoting model text -- and `detail` is printed into a log whose gates are
+      ^-anchored. An embedded line break would hand chosen text column 0.
+    * **No dangling separator.** An empty message publishes the bare verdict,
+      never `failed:exit 1: `.
+
+    The returncode is derived from the verdict rather than passed separately:
+    they disagreed in an earlier draft, which is exactly the drift this exists
+    to prevent.
+    """
+    body = _flatten_for_log(message)[:460]
+    return InvokeResult(
+        returncode=TIMEOUT_RETURNCODE if verdict == "killed:timeout" else 1,
+        detail=f"{verdict}: {body}" if body else verdict,
+        throttled=throttled,
+        channels={_CHANNEL: verdict},
+    )
+
+
+def _flatten_for_log(value: str) -> str:
+    r"""Collapse to ONE physical line: log gates downstream are ^-anchored.
+
+    Flattens using ``splitlines()`` -- the SAME rule the dump splits on -- rather
+    than replacing ``\r``/``\n``. Python breaks lines on eight more characters
+    than those two (``\x0b``, ``\x0c``, ``\x1c``-``\x1e``, ``\x85``,
+    ``\u2028``, ``\u2029``), so a hand-rolled replace leaves a crafted payload
+    looking flat here while still splitting downstream -- reopening the column-0
+    forgery this exists to close (fuko-henry, #147). Defining "one line" by the
+    splitter's own definition makes the two agree by construction.
+    """
+    return " ".join(value.strip().splitlines())
+
+
+def _dump_harness_output(model: str, label: str, stderr: str, text: str) -> None:
+    """Print the harness's unabridged output on failure, one PREFIXED line at a time.
+
+    Why prefixed rather than dumped verbatim: this content is
+    PR-author-influenced (seats grep for strings drawn from the diff, and the
+    harness echoes those arguments), and downstream log gates are ^-anchored --
+    the runner already flattens newlines out of progress arguments for exactly
+    that reason. A raw multi-line dump would hand arbitrary text column 0 of its
+    own line and let a crafted diff forge a gate line. Every line therefore
+    carries a `fuko: <model> stderr|` / `fuko: <model> final-message|` prefix, so
+    nothing from the harness can start a line, while the content stays fully
+    readable and greppable. The MODEL is on every line, not just the header,
+    because seats run concurrently by design -- two failing branches interleave
+    on one stderr and a header-only attribution leaves the mixed lines
+    unassignable (fuko-henry, #147).
+
+    Emitted as ONE locked write rather than a sequence of prints: branches are
+    threads sharing this stream, and a per-line print can be spliced mid-line by
+    a concurrently failing seat -- which would both scramble the attribution and
+    let harness content start a spliced line.
+
+    Both channels, because the cause does not always live in stderr. Be precise
+    about what the second one IS, though: ``text`` is the harness's LIFTED
+    FINAL MESSAGE (the terminal ``result`` event, or the last assistant text on
+    schema drift) — NOT the raw NDJSON event feed, which ``_consume_stream``
+    folds away and no one retains. So a malformed final message is captured
+    here; a mid-stream protocol death still leaves nothing behind. Retaining
+    the raw feed is a separate change with its own volume trade-off
+    (fuko-henry, #147).
+    """
+    chunks: list[str] = []
+    for stream, body in (("stderr", stderr), ("final-message", text)):
+        body = (body or "").rstrip()
+        if not body:
+            continue
+        chunks.append(f"fuko: agentic {model} {label} — full harness {stream} follows")
+        chunks.extend(f"fuko: {model} {stream}| {line}" for line in body.splitlines())
+        chunks.append(f"fuko: agentic {model} {stream} ends")
+    if not chunks:
+        return
+    # ONE write, under a lock. Branches are threads sharing this stderr, so a
+    # per-line `print()` can be spliced mid-line by a concurrently failing seat
+    # -- which would defeat the per-line attribution above AND could place
+    # harness content at column 0 of a spliced line, reopening the very forgery
+    # the prefix exists to prevent (fuko-henry, #147). Composing the whole dump
+    # and emitting it under `_DUMP_LOCK` makes interleaving impossible between
+    # branches of this process.
+    with _DUMP_LOCK:
+        sys.stderr.write("\n".join(chunks) + "\n")
+        sys.stderr.flush()
 
 
 def _review_header(label: str = "") -> str:
@@ -456,10 +557,9 @@ class AgenticBackend:
         if not model_name:
             # An empty --model would reach the CLI as a confusing runtime error
             # after a full clone; say what is actually wrong, before paying for it.
-            return InvokeResult(
-                returncode=1,
-                detail=f"no model name in the harness environment ({_ENV_MODEL} unset or empty)",
-                channels={_CHANNEL: "failed:exit 1"},
+            return _failure_result(
+                "failed:exit 1",
+                f"no model name in the harness environment ({_ENV_MODEL} unset or empty)",
             )
         auth = env.get(_ENV_AUTH, _AUTH_SUBSCRIPTION)
 
@@ -507,31 +607,24 @@ class AgenticBackend:
                 harness_env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth
             status = check_auth(harness_env)
             if status is not None and not status.get("loggedIn"):
-                return InvokeResult(
-                    returncode=1,
-                    detail=(
-                        "agentic backend is in subscription auth mode but this "
-                        "runner has no logged-in Claude session; run `claude "
-                        "setup-token` and export CLAUDE_CODE_OAUTH_TOKEN, or set "
-                        "auth = 'api-key' on this model entry"
-                    ),
-                    channels={_CHANNEL: "failed:exit 1"},
+                return _failure_result(
+                    "failed:exit 1",
+                    "agentic backend is in subscription auth mode but this "
+                    "runner has no logged-in Claude session; run `claude "
+                    "setup-token` and export CLAUDE_CODE_OAUTH_TOKEN, or set "
+                    "auth = 'api-key' on this model entry",
                 )
 
         try:
             ctx = fetch_pr_context(pr.repo, pr.number, token=token, api_url=api_url)
         except httpx.HTTPError as e:
-            return InvokeResult(
-                returncode=1,
-                detail=f"could not fetch PR context: {e}",
-                channels={_CHANNEL: "failed:exit 1"},
-            )
+            return _failure_result("failed:exit 1", f"could not fetch PR context: {e}")
         try:
             checkout = checkout_pr_head(
                 pr.repo, pr.number, ctx.head_sha, token=token, server_url=server_url
             )
         except CheckoutError as e:
-            return InvokeResult(returncode=1, detail=str(e), channels={_CHANNEL: "failed:exit 1"})
+            return _failure_result("failed:exit 1", str(e))
 
         # Everything from here owns the checkout, so every exit path -- including
         # a failure to create the scratch cwd or to build the prompt -- goes
@@ -610,13 +703,9 @@ class AgenticBackend:
                 max_turns=self.max_turns,
             )
         except HarnessNotAvailableError as e:
-            return InvokeResult(returncode=1, detail=str(e), channels={_CHANNEL: "failed:exit 1"})
+            return _failure_result("failed:exit 1", str(e))
         except OSError as e:
-            return InvokeResult(
-                returncode=1,
-                detail=f"could not prepare the review sandbox: {e}",
-                channels={_CHANNEL: "failed:exit 1"},
-            )
+            return _failure_result("failed:exit 1", f"could not prepare the review sandbox: {e}")
         finally:
             rmtree(checkout, ignore_errors=True)
             if workdir is not None:
@@ -624,17 +713,36 @@ class AgenticBackend:
 
         if result.returncode != 0:
             output = result.stderr + "\n" + result.text
+            # Unabridged stderr for EVERY non-zero exit, before the paths below
+            # split on auth/throttle/other. Placing it here rather than in one
+            # branch is the point: the auth path truncates harder (300 chars)
+            # and is exactly as capable of hiding the real error, and a
+            # diagnostic that covers some failures is the kind of half-measure
+            # that teaches people to trust an incomplete log (CodeRabbit, #147).
+            #
+            # Claude Code opens stderr with a benign
+            # `[claude-code:unrecognized_model]` warning on any gateway whose
+            # model is not in its catalog — every run here — so the head of
+            # this buffer is noise and the cap in `detail` never reaches the
+            # cause. This buffer is the only copy in the process.
+            _dump_harness_output(
+                model_name, f"exit {result.returncode}", result.stderr, result.text
+            )
             if is_auth_failure(output):
                 # Auth is neither a timeout nor a throttle -- failing over would burn
                 # the pool on a one-line runner fix -- so the channel is a plain fail.
-                return InvokeResult(
-                    returncode=result.returncode,
-                    detail=(
-                        f"agent could not authenticate in {auth} mode: "
-                        f"{result.stderr.strip()[:300]}"
-                    ),
-                    channels={_CHANNEL: f"failed:exit {result.returncode}"},
+                auth_tail = _flatten_for_log(result.stderr)[:300]
+                return _failure_result(
+                    f"failed:exit {result.returncode}",
+                    f"agent could not authenticate in {auth} mode"
+                    + (f": {auth_tail}" if auth_tail else ""),
                 )
+            # FLATTENED, for the same reason the runner flattens progress
+            # arguments (27011698) and the dump prefixes its lines: this text
+            # is PR-author-influenced and `detail` is printed into a log whose
+            # gates are ^-anchored, so an embedded newline would hand chosen
+            # text column 0 of its own line (fuko-henry, #147).
+            stderr_tail = _flatten_for_log(result.stderr)[:460]
             throttled = is_throttle(result.returncode, output)
             # Same vocabulary the pr-agent driver records per tool, so a consumer
             # reads one channel map regardless of backend: a hung run is
@@ -646,18 +754,24 @@ class AgenticBackend:
                 verdict = f"throttled:exit {result.returncode}"
             else:
                 verdict = f"failed:exit {result.returncode}"
-            return InvokeResult(
-                returncode=result.returncode,
-                detail=result.stderr.strip()[:500] or "agent run failed",
-                throttled=throttled,
-                channels={_CHANNEL: verdict},
-            )
+            return _failure_result(verdict, stderr_tail, throttled=throttled)
         try:
             review = parse_review(result.text)
         except ReviewParseError as e:
-            return InvokeResult(
-                returncode=1, detail=str(e)[:500], channels={_CHANNEL: "failed:exit 1"}
+            # A parse failure is a FAILURE with an exit-0 harness, so it never
+            # reached the dump above — yet the malformed output is the entire
+            # evidence, and `str(e)[:500]` is a summary of it (fuko-henry,
+            # #147). Dump before returning.
+            _dump_harness_output(
+                model_name, "parse-failure (harness exit 0)", result.stderr, result.text
             )
+            # Lead with the verdict here too. This path returns
+            # `failed:exit 1` on the channel, so a detail opening with parser
+            # prose would break the contract the other failure paths keep
+            # (CodeRabbit, #147) — and the whole point of that contract is
+            # that a reader can tell a crash from a timeout from a throttle
+            # without parsing prose.
+            return _failure_result("failed:exit 1", str(e))
 
         # Case/whitespace-normalized: `confidence` is deliberately a free-form
         # str so an off-vocabulary value degrades to filtering rather than

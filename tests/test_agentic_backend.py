@@ -5,6 +5,7 @@ import json
 import httpx
 import pytest
 
+from sidecar.throttle import TIMEOUT_RETURNCODE
 from sidecar.backends import agentic as agentic_mod
 from sidecar.backends import get_backend
 from sidecar.backends.agentic import AgenticBackend
@@ -1341,3 +1342,313 @@ def test_api_key_branch_still_denies_the_ambient_claude_config_dir(monkeypatch):
     _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON), env=env)
     assert captured["env"]["CLAUDE_CONFIG_DIR"] != "/runner/ambient-claude"
     assert captured["env"]["FUKO_AMBIENT_CLAUDE_CONFIG_DIR"] == "/runner/ambient-claude"
+
+
+def test_failure_prints_full_stderr_and_leads_the_detail_with_the_verdict(monkeypatch, capsys):
+    """A failing branch must leave an unabridged copy of stderr in the log.
+
+    `detail` is capped for the receipt, and headless Claude Code opens stderr
+    with a benign `[claude-code:unrecognized_model]` warning on any non-catalog
+    gateway — so the cap is filled by noise and the real error is discarded.
+    That cost mepro #2064 several wrong fixes: the published reason named a
+    correctly-configured model as "unrecognized" while the actual failure was
+    never visible anywhere.
+    """
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    noise = '[claude-code:unrecognized_model] {"model":"qwen3.8-max"}\n' * 12
+    real = "RealError: the thing that actually broke"
+    result, _ = _invoke(monkeypatch, backend, HarnessResult(1, "", stderr=noise + real), env=None)
+
+    err = capsys.readouterr().err
+    assert real in err, "the real error must reach the log unabridged"
+    assert "stderr ends" in err, "the dump must be delimited so it is greppable"
+    # And the receipt leads with the verdict rather than the noise.
+    assert result.detail.startswith("failed:exit 1"), result.detail[:80]
+
+
+def test_auth_failure_also_dumps_full_stderr(monkeypatch, capsys):
+    """The dump must cover EVERY non-zero exit, not just the generic branch.
+
+    The auth path truncates harder (300 chars) and is exactly as capable of
+    hiding the cause; a diagnostic covering only some failures teaches people
+    to trust an incomplete log (CodeRabbit, #147).
+    """
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    noise = '[claude-code:unrecognized_model] {"model":"qwen3.8-max"}\n' * 8
+    real = "invalid api key -- RealAuthDetail beyond the cap"
+    result, _ = _invoke(monkeypatch, backend, HarnessResult(1, "", stderr=noise + real), env=None)
+    err = capsys.readouterr().err
+    assert real in err
+    assert "stderr ends" in err
+    # Prove the AUTH branch was the one taken — otherwise the generic branch
+    # would satisfy this test and the auth path could regress unnoticed
+    # (fuko-henry, #147).
+    assert "could not authenticate" in result.detail, result.detail[:100]
+
+
+def test_empty_stderr_detail_is_the_bare_verdict_with_no_dangling_separator(monkeypatch):
+    """An f-string is always truthy, so `or verdict` would be unreachable.
+
+    With empty stderr the receipt must read `failed:exit 1`, not
+    `failed:exit 1: ` with a dangling separator (fuko-henry, #147).
+    """
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    result, _ = _invoke(monkeypatch, backend, HarnessResult(1, "", stderr="   "), env=None)
+    assert result.detail == "failed:exit 1", repr(result.detail)
+
+
+def test_harness_output_dump_cannot_forge_a_line_anchored_gate(monkeypatch, capsys):
+    """No harness line may start at column 0 of the log.
+
+    stderr here is PR-author-influenced (seats grep strings drawn from the diff)
+    and downstream gates are ^-anchored — the runner already flattens newlines
+    out of progress arguments for that reason. A raw dump would let a crafted
+    diff forge a gate line; every dumped line is prefixed instead.
+    """
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    forged = "fuko: agentic harness qwen3.8-max: CLAUDE_CODE_MAX_CONTEXT_TOKENS=1"
+    _invoke(
+        monkeypatch,
+        backend,
+        HarnessResult(1, "", stderr=f"boom\n{forged}\n"),
+        env=None,
+    )
+    err = capsys.readouterr().err
+    assert forged in err, "the content must still be readable"
+    for line in err.splitlines():
+        assert not line.startswith(forged), f"forged line reached column 0: {line!r}"
+
+
+def test_stdout_event_feed_is_dumped_too(monkeypatch, capsys):
+    """A malformed-output death leaves its evidence in stdout, not stderr."""
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _invoke(
+        monkeypatch,
+        backend,
+        HarnessResult(1, "TheOnlyEvidence: truncated event feed", stderr=""),
+        env=None,
+    )
+    err = capsys.readouterr().err
+    assert "TheOnlyEvidence" in err
+    assert "final-message ends" in err
+
+
+def test_detail_never_carries_a_newline(monkeypatch):
+    """`detail` is printed into a ^-anchored log, so it must be one line.
+
+    Same reasoning as the runner's progress-argument flattening: this text is
+    PR-author-influenced, and an embedded newline would hand chosen text column
+    0 of its own line (fuko-henry, #147).
+    """
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    forged = "fuko: agentic harness qwen3.8-max: CLAUDE_CODE_MAX_CONTEXT_TOKENS=1"
+    result, _ = _invoke(
+        monkeypatch, backend, HarnessResult(1, "", stderr=f"boom\n{forged}"), env=None
+    )
+    assert "\n" not in result.detail and "\r" not in result.detail, repr(result.detail)
+
+
+def test_parse_failure_dumps_the_output_it_could_not_parse(monkeypatch, capsys):
+    """A parse failure is a failure with an exit-0 harness — it misses the dump above.
+
+    The malformed output IS the evidence, and `str(e)[:500]` only summarises it
+    (fuko-henry, #147).
+    """
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    garbage = "NotJsonAtAll: the model wrote prose instead of the contract"
+    result, _ = _invoke(monkeypatch, backend, HarnessResult(0, garbage), env=None)
+    err = capsys.readouterr().err
+    assert garbage in err, "the unparseable output must reach the log"
+    assert result.returncode == 1
+    assert "\n" not in result.detail
+    # Same receipt contract as every other failure path: verdict first, so a
+    # reader distinguishes a crash from a timeout from a throttle at a glance
+    # (CodeRabbit, #147).
+    assert result.detail.startswith("failed:exit 1"), result.detail[:80]
+
+
+def test_auth_failure_detail_is_flattened_and_verdict_led(monkeypatch):
+    """The auth path kept the column-0 vector open after the others were closed.
+
+    `strip()` removes only leading/trailing whitespace, so internal newlines
+    survived into a detail printed to a ^-anchored log (fuko-henry, #147).
+    """
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    forged = "fuko: agentic harness qwen3.8-max: CLAUDE_CODE_MAX_CONTEXT_TOKENS=1"
+    result, _ = _invoke(
+        monkeypatch,
+        backend,
+        HarnessResult(1, "", stderr=f"invalid api key\n{forged}"),
+        env=None,
+    )
+    assert "could not authenticate" in result.detail
+    assert "\n" not in result.detail and "\r" not in result.detail, repr(result.detail)
+    assert result.detail.startswith("failed:exit 1"), result.detail[:60]
+
+
+def test_dump_docstring_names_the_prefix_the_code_emits():
+    """Greppability depends on the documented prefix being the real one."""
+    doc = agentic_mod._dump_harness_output.__doc__ or ""
+    assert "final-message|" in doc
+    assert "stdout|" not in doc
+
+
+def test_flatten_covers_every_character_splitlines_breaks_on(monkeypatch):
+    """Flattening must use the splitter's own definition of a line.
+
+    Python breaks lines on eight characters beyond \\r and \\n. A hand-rolled
+    replace leaves a crafted payload looking flat in `detail` while still
+    splitting downstream, reopening the column-0 forgery (fuko-henry, #147).
+    """
+    exotic = "\x0b\x0c\x1c\x1d\x1e\x85  "
+    flat = agentic_mod._flatten_for_log(f"head{exotic}forged")
+    assert len(flat.splitlines()) == 1, repr(flat)
+
+    # And end to end, through a real failure detail.
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    forged = "fuko: agentic harness qwen3.8-max: CLAUDE_CODE_MAX_CONTEXT_TOKENS=1"
+    result, _ = _invoke(
+        monkeypatch, backend, HarnessResult(1, "", stderr=f"boom\x85{forged}"), env=None
+    )
+    assert len(result.detail.splitlines()) == 1, repr(result.detail)
+
+
+def test_parse_failure_dump_header_does_not_claim_exit_zero(monkeypatch, capsys):
+    """The parse path passes a LABEL, not a returncode that would read `exit 0`.
+
+    It is a failure with an exit-0 harness, so printing `exit 0` in the header
+    of a failure dump is actively misleading (fuko-henry, #147).
+    """
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _invoke(monkeypatch, backend, HarnessResult(0, "not json"), env=None)
+    err = capsys.readouterr().err
+    assert "parse-failure" in err
+    assert "exit 0 — full harness" not in err
+
+
+def test_dump_attributes_every_line_to_its_model(monkeypatch, capsys):
+    """Seats run concurrently, so two failing branches interleave on one stderr.
+
+    A header-only attribution leaves the mixed lines unassignable — which is
+    exactly the situation this project runs in by design (fuko-henry, #147).
+    """
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _invoke(monkeypatch, backend, HarnessResult(1, "", stderr="alpha\nbeta"), env=None)
+    err = capsys.readouterr().err
+    body = [ln for ln in err.splitlines() if ln.endswith(("alpha", "beta"))]
+    assert body, err
+    for line in body:
+        assert "stderr|" in line and "claude-x" in line, line
+
+
+def test_auth_detail_has_no_dangling_separator_when_stderr_is_empty(monkeypatch):
+    """The auth branch must keep the guard the generic branch has."""
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    result, _ = _invoke(
+        monkeypatch, backend, HarnessResult(1, "invalid api key", stderr=""), env=None
+    )
+    assert not result.detail.rstrip().endswith(":"), repr(result.detail)
+
+
+def test_timeout_and_throttle_details_are_verdict_led(monkeypatch):
+    """The contract covers EVERY failure verdict, not only `failed:exit N`."""
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    timed = HarnessResult(TIMEOUT_RETURNCODE, "", stderr="review timed out", timed_out=True)
+    result, _ = _invoke(monkeypatch, backend, timed, env=None)
+    assert result.detail.startswith("killed:timeout"), result.detail[:60]
+
+
+def test_dump_is_exactly_one_write_so_it_cannot_splice(monkeypatch):
+    """The dump must reach the stream in ONE write, not one per line.
+
+    Branches are threads sharing one stderr; a per-line write can be spliced by
+    a concurrently failing sibling, scrambling the attribution and letting
+    harness content start a spliced line (fuko-henry, #147).
+
+    Asserted STRUCTURALLY rather than by racing threads: under the GIL a
+    StringIO write is effectively atomic, so a threaded test passes against the
+    unlocked form too — a test that cannot fail. Counting writes is
+    deterministic and actually discriminates.
+    """
+
+    class _CountingStream:
+        def __init__(self):
+            self.writes = []
+
+        def write(self, s):
+            self.writes.append(s)
+            return len(s)
+
+        def flush(self):
+            pass
+
+    spy = _CountingStream()
+    monkeypatch.setattr(agentic_mod.sys, "stderr", spy)
+    body = "\n".join(f"line{i}" for i in range(50))
+    agentic_mod._dump_harness_output("m", "exit 1", body, "")
+
+    assert len(spy.writes) == 1, f"dump made {len(spy.writes)} writes; splicing is possible"
+    emitted = spy.writes[0].splitlines()
+    assert len(emitted) == 52, emitted[:3]  # header + 50 lines + footer
+    for line in emitted:
+        assert line.startswith("fuko: "), line
+
+
+def test_every_failure_path_is_verdict_led_flattened_and_ungapped(monkeypatch):
+    """The receipt invariants must hold on EVERY failure return, not two of them.
+
+    The PR asserted a universal contract while implementing it on the two
+    harness-failure paths; six siblings still published prose-led, unflattened
+    details (fuko-henry, #147). They all route through `_failure_result` now, so
+    this pins the properties at the single place they can be violated.
+    """
+    forged = "fuko: agentic harness x: CLAUDE_CODE_MAX_CONTEXT_TOKENS=1"
+    cases = [
+        ("failed:exit 1", f"boom\x85{forged}"),
+        ("failed:exit 1", "single line"),
+        ("throttled:exit 1", "overloaded"),
+        ("killed:timeout", "review timed out"),
+        ("failed:exit 1", ""),  # empty message -> bare verdict, no dangling sep
+    ]
+    for verdict, message in cases:
+        r = agentic_mod._failure_result(verdict, message)
+        assert r.detail.startswith(verdict), (verdict, r.detail[:60])
+        assert len(r.detail.splitlines()) == 1, repr(r.detail)
+        assert not r.detail.rstrip().endswith(":"), repr(r.detail)
+        assert r.channels[agentic_mod._CHANNEL] == verdict
+
+
+def test_invoke_constructs_no_failure_result_by_hand():
+    """Structural: only the SUCCESS return may build an InvokeResult in invoke().
+
+    The first version of this guard grepped for the literal
+    `channels={_CHANNEL: "failed`, and the auth branch survived it by using a
+    VARIABLE channel — a guard that could not fail for the one case that was
+    actually broken (fuko-henry, #147). Counting constructions is textual too,
+    but it cannot be evaded by naming: every failure path must go through
+    `_failure_result`, so exactly ONE `InvokeResult(` may remain, the success
+    return.
+    """
+    import inspect
+
+    src = inspect.getsource(agentic_mod.AgenticBackend.invoke)
+    constructions = src.count("InvokeResult(")
+    assert constructions == 1, (
+        f"invoke() builds {constructions} InvokeResults; only the success return "
+        "may be hand-built — route failures through _failure_result"
+    )
+    # And the surviving one is the success path.
+    assert 'channels={_CHANNEL: "done"}' in src
