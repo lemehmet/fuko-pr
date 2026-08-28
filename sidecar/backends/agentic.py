@@ -725,10 +725,17 @@ class AgenticBackend:
             # evidence, and `str(e)[:500]` is a summary of it (fuko-henry,
             # #147). Dump before returning.
             _dump_harness_output(model_name, 0, result.stderr, result.text)
+            # Lead with the verdict here too. This path returns
+            # `failed:exit 1` on the channel, so a detail opening with parser
+            # prose would break the contract the other failure paths keep
+            # (CodeRabbit, #147) — and the whole point of that contract is
+            # that a reader can tell a crash from a timeout from a throttle
+            # without parsing prose.
+            parse_verdict = "failed:exit 1"
             return InvokeResult(
                 returncode=1,
-                detail=_flatten_for_log(str(e))[:500],
-                channels={_CHANNEL: "failed:exit 1"},
+                detail=f"{parse_verdict}: {_flatten_for_log(str(e))[:460]}",
+                channels={_CHANNEL: parse_verdict},
             )
 
         # Case/whitespace-normalized: `confidence` is deliberately a free-form

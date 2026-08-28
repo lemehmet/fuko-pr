@@ -1467,3 +1467,7 @@ def test_parse_failure_dumps_the_output_it_could_not_parse(monkeypatch, capsys):
     assert garbage in err, "the unparseable output must reach the log"
     assert result.returncode == 1
     assert "\n" not in result.detail
+    # Same receipt contract as every other failure path: verdict first, so a
+    # reader distinguishes a crash from a timeout from a throttle at a glance
+    # (CodeRabbit, #147).
+    assert result.detail.startswith("failed:exit 1"), result.detail[:80]
