@@ -1318,3 +1318,26 @@ def test_subscription_branch_keeps_the_shared_claude_config_dir(monkeypatch):
     )
     _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON), env=env)
     assert "CLAUDE_CONFIG_DIR" not in captured["env"]
+
+
+def test_api_key_branch_still_denies_the_ambient_claude_config_dir(monkeypatch):
+    """Replacing CLAUDE_CONFIG_DIR must not drop the deny rule that covered it.
+
+    The read denylist keys on CLAUDE_CONFIG_DIR. Redirecting it at a private
+    per-branch directory would otherwise silently un-deny the RUNNER's real
+    config dir — an operator credential store, readable by an agent whose
+    findings are published verbatim to an untrusted PR author. The displaced
+    value must reach the harness so `_permission_settings` can deny both.
+    """
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/runner/ambient-claude")
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    env = backend.build_env(
+        get_preset("qwen-anthropic"),
+        ModelConfig(provider="qwen-anthropic", name="qwen3.8-max", auth="api-key"),
+        knowledge="",
+        tools=["review"],
+    )
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON), env=env)
+    assert captured["env"]["CLAUDE_CONFIG_DIR"] != "/runner/ambient-claude"
+    assert captured["env"]["FUKO_AMBIENT_CLAUDE_CONFIG_DIR"] == "/runner/ambient-claude"

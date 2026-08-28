@@ -842,3 +842,19 @@ def test_strip_agent_config_removes_other_tools_config_at_root_only(tmp_path):
     assert set(removed) == {".cursor", ".github/copilot-instructions.md"}
     assert not (tmp_path / ".cursor").exists()
     assert nested_cursor.exists()
+
+
+def test_permission_settings_denies_both_effective_and_ambient_config_dirs():
+    """Both config dirs get a deny rule: the replacement and the one it displaced."""
+    payload = json.loads(
+        harness_mod._permission_settings(
+            {
+                "HOME": "/home/runner",
+                "CLAUDE_CONFIG_DIR": "/tmp/branch-cfg",
+                "FUKO_AMBIENT_CLAUDE_CONFIG_DIR": "/runner/ambient-claude",
+            }
+        )
+    )
+    deny = payload["permissions"]["deny"]
+    assert "Read(//tmp/branch-cfg/**)" in deny
+    assert "Read(//runner/ambient-claude/**)" in deny

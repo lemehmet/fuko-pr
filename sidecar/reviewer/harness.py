@@ -42,6 +42,12 @@ from ..throttle import TIMEOUT_RETURNCODE
 
 ALLOWED_TOOLS = "Read,Grep,Glob"
 
+#: Set by a caller that REPLACES ``CLAUDE_CONFIG_DIR`` for isolation, carrying
+#: the value it replaced so the read denylist can still cover it. Consumed only
+#: by :func:`_permission_settings`; the harness itself never reads it, and
+#: Claude Code does not know the name.
+_ENV_AMBIENT_CONFIG_DIR = "FUKO_AMBIENT_CLAUDE_CONFIG_DIR"
+
 #: Directories the agent must never read, relative to the runner's home.
 #:
 #: ``--add-dir`` ADDS a readable root; it does NOT confine reads to it. Verified
@@ -152,9 +158,20 @@ def _permission_settings(env: dict[str, str]) -> str:
     if home:
         candidates += [(f"{home}/{d}", True) for d in SENSITIVE_HOME_DIRS]
         candidates += [(f"{home}/{f}", False) for f in SENSITIVE_HOME_FILES]
-    config_dir = (env.get("CLAUDE_CONFIG_DIR") or "").replace("\\", "/").rstrip("/")
-    if config_dir:
-        candidates.append((config_dir, True))
+    # Both the config dir the harness will USE and any ambient one it replaced.
+    #
+    # The caller may redirect CLAUDE_CONFIG_DIR at a private per-branch
+    # directory (the agentic backend does, to stop concurrent branches sharing
+    # one ~/.claude). Denying only the effective value would then silently drop
+    # the rule that had covered the RUNNER's real config dir, leaving an
+    # operator's credentials readable by an agent whose findings are published
+    # verbatim to an untrusted PR author. Deny both: the replacement, because
+    # it accumulates this run's own session state, and the ambient one,
+    # because it is the higher-value target and the reason this rule exists.
+    for key in ("CLAUDE_CONFIG_DIR", _ENV_AMBIENT_CONFIG_DIR):
+        config_dir = (env.get(key) or "").replace("\\", "/").rstrip("/")
+        if config_dir:
+            candidates.append((config_dir, True))
     # Unconditional: these do not depend on HOME, and on a runner without one
     # they are the only rules that remain.
     candidates += [(d, True) for d in SENSITIVE_SYSTEM_DIRS]

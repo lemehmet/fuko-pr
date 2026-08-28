@@ -410,9 +410,15 @@ class AgenticBackend:
         ``base_url`` on the model entry rather than exporting it, and
         subscription mode never gets a base URL at all -- an inherited one
         would point the runner's own authenticated session at a foreign host.
-        Everything else passes through untouched -- notably
-        ``HOME``/``CLAUDE_CONFIG_DIR``, which is where a subscription login
-        lives.
+        Everything else passes through untouched, with ONE exception:
+        ``HOME`` is inherited as-is (a subscription login lives there), but in
+        **api-key mode** ``CLAUDE_CONFIG_DIR`` is REPLACED with a private
+        per-branch directory under this invocation's workdir, so concurrent
+        branches -- which are threads in one process -- cannot contend on a
+        single ``~/.claude``. The displaced value is forwarded as
+        ``FUKO_AMBIENT_CLAUDE_CONFIG_DIR`` purely so the read denylist can
+        still cover it. Subscription mode is untouched, because that is where
+        its credential lives.
 
         The agent runs from a clean scratch directory with the checkout mounted
         read-only beside it, never *inside* the checkout: project config in a
@@ -561,9 +567,31 @@ class AgenticBackend:
             # keep the shared directory and therefore keep the race; that is
             # the safe trade, and running two concurrent SUBSCRIPTION agentic
             # seats is not a configuration this fleet uses.
+            # SECOND-ORDER EFFECTS OF THE OVERRIDE, both deliberate:
+            #
+            # * The read denylist keys on CLAUDE_CONFIG_DIR, so replacing it
+            #   would silently drop the rule protecting the RUNNER's real config
+            #   dir — an operator credential store, readable by an agent whose
+            #   findings are published verbatim to an untrusted PR author. The
+            #   value we displace is therefore handed to the harness under
+            #   `FUKO_AMBIENT_CLAUDE_CONFIG_DIR`, which `_permission_settings`
+            #   denies alongside the replacement. (`~/.claude` under HOME stays
+            #   covered by SENSITIVE_HOME_DIRS regardless; this closes the case
+            #   where the runner points CLAUDE_CONFIG_DIR somewhere else.)
+            # * `--setting-sources user` resolves against CLAUDE_CONFIG_DIR, so
+            #   api-key branches now load NO user-scope settings. That is
+            #   acceptable and arguably right for a CI reviewer: every setting
+            #   this harness depends on is passed explicitly via `--settings`,
+            #   and inheriting an operator's ambient preferences into a
+            #   published review was never intended. Verified against Claude
+            #   Code with a fresh empty directory: the session runs normally
+            #   and populates its own state there.
             if auth == _AUTH_API_KEY:
                 branch_config = workdir / "claude-config"
                 branch_config.mkdir(parents=True, exist_ok=True)
+                ambient_config = harness_env.get("CLAUDE_CONFIG_DIR")
+                if ambient_config:
+                    harness_env["FUKO_AMBIENT_CLAUDE_CONFIG_DIR"] = ambient_config
                 harness_env["CLAUDE_CONFIG_DIR"] = str(branch_config)
             prompt = build_prompt(
                 ctx,
