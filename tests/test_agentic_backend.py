@@ -1364,3 +1364,32 @@ def test_failure_prints_full_stderr_and_leads_the_detail_with_the_verdict(monkey
     assert "stderr ends" in err, "the dump must be delimited so it is greppable"
     # And the receipt leads with the verdict rather than the noise.
     assert result.detail.startswith("failed:exit 1"), result.detail[:80]
+
+
+def test_auth_failure_also_dumps_full_stderr(monkeypatch, capsys):
+    """The dump must cover EVERY non-zero exit, not just the generic branch.
+
+    The auth path truncates harder (300 chars) and is exactly as capable of
+    hiding the cause; a diagnostic covering only some failures teaches people
+    to trust an incomplete log (CodeRabbit, #147).
+    """
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    noise = '[claude-code:unrecognized_model] {"model":"qwen3.8-max"}\n' * 8
+    real = "invalid api key -- RealAuthDetail beyond the cap"
+    _invoke(monkeypatch, backend, HarnessResult(1, "", stderr=noise + real), env=None)
+    err = capsys.readouterr().err
+    assert real in err
+    assert "stderr ends" in err
+
+
+def test_empty_stderr_detail_is_the_bare_verdict_with_no_dangling_separator(monkeypatch):
+    """An f-string is always truthy, so `or verdict` would be unreachable.
+
+    With empty stderr the receipt must read `failed:exit 1`, not
+    `failed:exit 1: ` with a dangling separator (fuko-henry, #147).
+    """
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    result, _ = _invoke(monkeypatch, backend, HarnessResult(1, "", stderr="   "), env=None)
+    assert result.detail == "failed:exit 1", repr(result.detail)

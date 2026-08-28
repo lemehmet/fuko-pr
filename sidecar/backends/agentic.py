@@ -624,6 +624,27 @@ class AgenticBackend:
 
         if result.returncode != 0:
             output = result.stderr + "\n" + result.text
+            # Unabridged stderr for EVERY non-zero exit, before the paths below
+            # split on auth/throttle/other. Placing it here rather than in one
+            # branch is the point: the auth path truncates harder (300 chars)
+            # and is exactly as capable of hiding the real error, and a
+            # diagnostic that covers some failures is the kind of half-measure
+            # that teaches people to trust an incomplete log (CodeRabbit, #147).
+            #
+            # Claude Code opens stderr with a benign
+            # `[claude-code:unrecognized_model]` warning on any gateway whose
+            # model is not in its catalog — every run here — so the head of
+            # this buffer is noise and the cap in `detail` never reaches the
+            # cause. This buffer is the only copy in the process.
+            if result.stderr.strip():
+                print(
+                    f"fuko: agentic {model_name} exit {result.returncode} — "
+                    f"full harness stderr follows\n"
+                    f"{result.stderr.rstrip()}\n"
+                    f"fuko: agentic {model_name} stderr ends",
+                    file=sys.stderr,
+                    flush=True,
+                )
             if is_auth_failure(output):
                 # Auth is neither a timeout nor a throttle -- failing over would burn
                 # the pool on a one-line runner fix -- so the channel is a plain fail.
@@ -635,6 +656,7 @@ class AgenticBackend:
                     ),
                     channels={_CHANNEL: f"failed:exit {result.returncode}"},
                 )
+            stderr_tail = result.stderr.strip()[:460]
             throttled = is_throttle(result.returncode, output)
             # Same vocabulary the pr-agent driver records per tool, so a consumer
             # reads one channel map regardless of backend: a hung run is
@@ -646,39 +668,15 @@ class AgenticBackend:
                 verdict = f"throttled:exit {result.returncode}"
             else:
                 verdict = f"failed:exit {result.returncode}"
-            # PRINT THE WHOLE STDERR, and lead with the verdict.
-            #
-            # `detail` below is capped at 500 chars for the published receipt,
-            # and headless Claude Code opens stderr with a benign
-            # `[claude-code:unrecognized_model]` warning on any gateway whose
-            # model is not in its catalog — i.e. every run here. That warning
-            # therefore FILLS the cap and becomes the entire published reason,
-            # while the actual error sits further down and is discarded: this
-            # buffer is the only copy in the process, so nothing else ever
-            # sees it.
-            #
-            # The cost of that is measured, not hypothetical. On mepro #2064 a
-            # seat failed identically across many rounds and the published text
-            # named the correctly-configured model as "unrecognized", which
-            # sent the investigation through a rotated API key (twice), a
-            # rolled-back subscription, a context-window change and a
-            # concurrency fix — none of which were the cause — because the real
-            # error was never once visible. Truncating the receipt is fine;
-            # having no unabridged copy anywhere is not.
-            if result.stderr.strip():
-                print(
-                    f"fuko: agentic {model_name} {verdict} — full harness stderr follows\n"
-                    f"{result.stderr.rstrip()}\n"
-                    f"fuko: agentic {model_name} stderr ends",
-                    file=sys.stderr,
-                    flush=True,
-                )
             return InvokeResult(
                 returncode=result.returncode,
                 # Lead with the verdict so the receipt is diagnostic even when
                 # the stderr head is the benign warning: `failed:exit 1` beats
                 # any prose at telling a crash from a timeout from a throttle.
-                detail=f"{verdict}: {result.stderr.strip()[:460]}" or verdict,
+                # An f-string is ALWAYS truthy, so an `or verdict` fallback here
+                # would be unreachable and an empty stderr would publish a
+                # dangling "failed:exit 1: " (fuko-henry, #147).
+                detail=(f"{verdict}: {stderr_tail}" if stderr_tail else verdict),
                 throttled=throttled,
                 channels={_CHANNEL: verdict},
             )
