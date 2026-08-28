@@ -358,14 +358,22 @@ def run_review(
 
 
 def _flatten(value: str) -> str:
-    """One PHYSICAL log line, always.
+    r"""One PHYSICAL log line, always.
 
     The argument is reviewer-chosen (and PR-author-influenced — seats grep for
     strings drawn from the diff), and downstream log gates anchor on line
     starts, so an embedded newline must not let an argument place chosen text
     at column 0 of its own line (mepro PR #2014 r2).
+
+    Flattened via ``splitlines()`` rather than by replacing ``\r``/``\n``:
+    Python breaks lines on eight further characters (``\x0b``, ``\x0c``,
+    ``\x1c``-``\x1e``, ``\x85``, ``\u2028``, ``\u2029``), so the replace form
+    left a crafted argument looking flat while any consumer splitting by the
+    normal rule still saw two lines — the very forgery this guards against
+    (fuko-henry, #147). Truncation happens AFTER flattening so a cut cannot
+    resurrect a break.
     """
-    return value.replace("\r", " ").replace("\n", " ")[:100]
+    return " ".join(value.splitlines())[:100]
 
 
 def _tool_arg(tool_input: dict) -> str:
