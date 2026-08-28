@@ -63,7 +63,7 @@ from ..reviewer.prompt import (
     parse_review,
 )
 from ..signals import ReviewSignal, make_id, with_marker, with_visible_label
-from ..throttle import is_throttle
+from ..throttle import TIMEOUT_RETURNCODE, is_throttle
 from .base import InvokeResult, PRRef
 
 #: The heading every agentic review body opens with.
@@ -83,6 +83,36 @@ _CHANNEL = "agentic-review"
 #: sharing one stderr, so an unlocked multi-line dump can interleave with a
 #: sibling's and splice a line (fuko-henry, #147).
 _DUMP_LOCK = threading.Lock()
+
+
+def _failure_result(verdict: str, message: str = "", *, throttled: bool = False) -> InvokeResult:
+    """Build EVERY failure return, so the receipt invariants cannot drift apart.
+
+    Three properties, each of which was independently violated by at least one
+    hand-rolled failure return in this module before it was centralised
+    (fuko-henry, #147):
+
+    * **Verdict-led.** `failed:exit 1` beats prose at telling a crash from a
+      timeout from a throttle, and a consumer should not parse English to learn
+      which happened.
+    * **Flattened.** Every message here is repo- or PR-author-influenced --
+      harness stderr, a git error carrying remote output, a parser complaint
+      quoting model text -- and `detail` is printed into a log whose gates are
+      ^-anchored. An embedded line break would hand chosen text column 0.
+    * **No dangling separator.** An empty message publishes the bare verdict,
+      never `failed:exit 1: `.
+
+    The returncode is derived from the verdict rather than passed separately:
+    they disagreed in an earlier draft, which is exactly the drift this exists
+    to prevent.
+    """
+    body = _flatten_for_log(message)[:460]
+    return InvokeResult(
+        returncode=TIMEOUT_RETURNCODE if verdict == "killed:timeout" else 1,
+        detail=f"{verdict}: {body}" if body else verdict,
+        throttled=throttled,
+        channels={_CHANNEL: verdict},
+    )
 
 
 def _flatten_for_log(value: str) -> str:
@@ -527,10 +557,9 @@ class AgenticBackend:
         if not model_name:
             # An empty --model would reach the CLI as a confusing runtime error
             # after a full clone; say what is actually wrong, before paying for it.
-            return InvokeResult(
-                returncode=1,
-                detail=f"no model name in the harness environment ({_ENV_MODEL} unset or empty)",
-                channels={_CHANNEL: "failed:exit 1"},
+            return _failure_result(
+                "failed:exit 1",
+                f"no model name in the harness environment ({_ENV_MODEL} unset or empty)",
             )
         auth = env.get(_ENV_AUTH, _AUTH_SUBSCRIPTION)
 
@@ -578,31 +607,24 @@ class AgenticBackend:
                 harness_env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth
             status = check_auth(harness_env)
             if status is not None and not status.get("loggedIn"):
-                return InvokeResult(
-                    returncode=1,
-                    detail=(
-                        "agentic backend is in subscription auth mode but this "
-                        "runner has no logged-in Claude session; run `claude "
-                        "setup-token` and export CLAUDE_CODE_OAUTH_TOKEN, or set "
-                        "auth = 'api-key' on this model entry"
-                    ),
-                    channels={_CHANNEL: "failed:exit 1"},
+                return _failure_result(
+                    "failed:exit 1",
+                    "agentic backend is in subscription auth mode but this "
+                    "runner has no logged-in Claude session; run `claude "
+                    "setup-token` and export CLAUDE_CODE_OAUTH_TOKEN, or set "
+                    "auth = 'api-key' on this model entry",
                 )
 
         try:
             ctx = fetch_pr_context(pr.repo, pr.number, token=token, api_url=api_url)
         except httpx.HTTPError as e:
-            return InvokeResult(
-                returncode=1,
-                detail=f"could not fetch PR context: {e}",
-                channels={_CHANNEL: "failed:exit 1"},
-            )
+            return _failure_result("failed:exit 1", f"could not fetch PR context: {e}")
         try:
             checkout = checkout_pr_head(
                 pr.repo, pr.number, ctx.head_sha, token=token, server_url=server_url
             )
         except CheckoutError as e:
-            return InvokeResult(returncode=1, detail=str(e), channels={_CHANNEL: "failed:exit 1"})
+            return _failure_result("failed:exit 1", str(e))
 
         # Everything from here owns the checkout, so every exit path -- including
         # a failure to create the scratch cwd or to build the prompt -- goes
@@ -681,13 +703,9 @@ class AgenticBackend:
                 max_turns=self.max_turns,
             )
         except HarnessNotAvailableError as e:
-            return InvokeResult(returncode=1, detail=str(e), channels={_CHANNEL: "failed:exit 1"})
+            return _failure_result("failed:exit 1", str(e))
         except OSError as e:
-            return InvokeResult(
-                returncode=1,
-                detail=f"could not prepare the review sandbox: {e}",
-                channels={_CHANNEL: "failed:exit 1"},
-            )
+            return _failure_result("failed:exit 1", f"could not prepare the review sandbox: {e}")
         finally:
             rmtree(checkout, ignore_errors=True)
             if workdir is not None:
@@ -748,18 +766,7 @@ class AgenticBackend:
                 verdict = f"throttled:exit {result.returncode}"
             else:
                 verdict = f"failed:exit {result.returncode}"
-            return InvokeResult(
-                returncode=result.returncode,
-                # Lead with the verdict so the receipt is diagnostic even when
-                # the stderr head is the benign warning: `failed:exit 1` beats
-                # any prose at telling a crash from a timeout from a throttle.
-                # An f-string is ALWAYS truthy, so an `or verdict` fallback here
-                # would be unreachable and an empty stderr would publish a
-                # dangling "failed:exit 1: " (fuko-henry, #147).
-                detail=(f"{verdict}: {stderr_tail}" if stderr_tail else verdict),
-                throttled=throttled,
-                channels={_CHANNEL: verdict},
-            )
+            return _failure_result(verdict, stderr_tail, throttled=throttled)
         try:
             review = parse_review(result.text)
         except ReviewParseError as e:
@@ -776,12 +783,7 @@ class AgenticBackend:
             # (CodeRabbit, #147) — and the whole point of that contract is
             # that a reader can tell a crash from a timeout from a throttle
             # without parsing prose.
-            parse_verdict = "failed:exit 1"
-            return InvokeResult(
-                returncode=1,
-                detail=f"{parse_verdict}: {_flatten_for_log(str(e))[:460]}",
-                channels={_CHANNEL: parse_verdict},
-            )
+            return _failure_result("failed:exit 1", str(e))
 
         # Case/whitespace-normalized: `confidence` is deliberately a free-form
         # str so an off-vocabulary value degrades to filtering rather than

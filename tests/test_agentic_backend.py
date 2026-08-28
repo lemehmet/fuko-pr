@@ -1605,3 +1605,43 @@ def test_dump_is_exactly_one_write_so_it_cannot_splice(monkeypatch):
     assert len(emitted) == 52, emitted[:3]  # header + 50 lines + footer
     for line in emitted:
         assert line.startswith("fuko: "), line
+
+
+def test_every_failure_path_is_verdict_led_flattened_and_ungapped(monkeypatch):
+    """The receipt invariants must hold on EVERY failure return, not two of them.
+
+    The PR asserted a universal contract while implementing it on the two
+    harness-failure paths; six siblings still published prose-led, unflattened
+    details (fuko-henry, #147). They all route through `_failure_result` now, so
+    this pins the properties at the single place they can be violated.
+    """
+    forged = "fuko: agentic harness x: CLAUDE_CODE_MAX_CONTEXT_TOKENS=1"
+    cases = [
+        ("failed:exit 1", f"boom\x85{forged}"),
+        ("failed:exit 1", "single line"),
+        ("throttled:exit 1", "overloaded"),
+        ("killed:timeout", "review timed out"),
+        ("failed:exit 1", ""),  # empty message -> bare verdict, no dangling sep
+    ]
+    for verdict, message in cases:
+        r = agentic_mod._failure_result(verdict, message)
+        assert r.detail.startswith(verdict), (verdict, r.detail[:60])
+        assert len(r.detail.splitlines()) == 1, repr(r.detail)
+        assert not r.detail.rstrip().endswith(":"), repr(r.detail)
+        assert r.channels[agentic_mod._CHANNEL] == verdict
+
+
+def test_no_hand_rolled_failure_return_survives_in_invoke():
+    """Structural: a new failure return that bypasses the helper reintroduces the class.
+
+    Every one of these invariants was violated by at least one hand-rolled
+    return before centralisation, so the guard is that none come back.
+    """
+    import inspect
+
+    src = inspect.getsource(agentic_mod.AgenticBackend.invoke)
+    assert 'channels={_CHANNEL: "failed' not in src, (
+        "a failure return bypasses _failure_result; route it through the helper"
+    )
+    assert 'channels={_CHANNEL: "throttled' not in src
+    assert 'channels={_CHANNEL: "killed' not in src
