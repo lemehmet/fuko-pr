@@ -20,12 +20,46 @@ no-ops -- metrics must never block or fail a review.
 
 from __future__ import annotations
 
+import math
+
 from .config import settings
 
 
 def _enabled() -> bool:
     """Run-metrics persistence requires the shared Postgres store."""
     return bool(settings.database_url)
+
+
+#: Largest value ``review_runs.cost_usd`` can hold: the column is
+#: ``NUMERIC(10, 4)`` (``migrations/004``), so ten digits with four after the
+#: point.
+_MAX_COST_USD = 999_999.9999
+
+
+def _storable_cost(value: float | None) -> float | None:
+    """Drop a ``cost_usd`` the column cannot hold, so the ROW still lands.
+
+    A figure outside the column's range is not a bigger bill, it is a garbled
+    one -- a unit or schema drift somewhere upstream; a bounded review cannot
+    legitimately spend a million dollars. What makes it worth a guard is not its
+    likelihood but its blast radius: the insert would raise ``numeric field
+    overflow``, and both transports discard the whole row on error (the HTTP
+    path at ``raise_for_status``, the direct path in ``_record_run``'s blanket
+    ``except``), so one unusable figure costs the duration, outcome, attempts
+    and token counts beside it too.
+
+    ``NaN`` is rejected for the opposite reason -- Postgres accepts it into a
+    ``NUMERIC``, after which every ``sum(cost_usd)`` group containing that row
+    is ``NaN`` for good. The harness already rejects both at capture; this is
+    the guard at the boundary that owns the column, so it holds for callers
+    that never went through a harness.
+    """
+    if value is None:
+        return None
+    number = float(value)
+    if not math.isfinite(number) or not 0 <= number <= _MAX_COST_USD:
+        return None
+    return number
 
 
 #: The cost aggregates every per-group summary selects, as its trailing columns.
@@ -95,7 +129,9 @@ def record(
 
     The token/cost arguments (#152) default to ``None`` for the same reason the
     columns are nullable: a caller that cannot measure a figure must write "not
-    measured", never a zero that would later be read as "free".
+    measured", never a zero that would later be read as "free". ``cost_usd``
+    passes :func:`_storable_cost` on the way in, so a figure the column cannot
+    hold costs only itself rather than the whole row.
     """
     if not _enabled():
         return
@@ -125,7 +161,7 @@ def record(
                 output_tokens,
                 cache_read_tokens,
                 cache_write_tokens,
-                cost_usd,
+                _storable_cost(cost_usd),
                 turns,
             ),
         )

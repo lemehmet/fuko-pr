@@ -258,6 +258,46 @@ def test_summary_row_mapping_preserves_unmeasured_groups():
     assert measured["cache_read_tokens"] == 339000
 
 
+def test_storable_cost_drops_only_what_the_column_cannot_hold():
+    """A cost outside NUMERIC(10,4) would raise `numeric field overflow`, and
+    both transports discard the whole row on error — so one garbled figure would
+    take the duration, outcome and token counts with it."""
+    assert run_metrics._storable_cost(None) is None
+    assert run_metrics._storable_cost(0) == 0.0
+    assert run_metrics._storable_cost(1.2345) == 1.2345
+    assert run_metrics._storable_cost(999_999.9999) == 999_999.9999
+    assert run_metrics._storable_cost(1e9) is None
+    assert run_metrics._storable_cost(-0.01) is None
+    # Postgres ACCEPTS a numeric NaN, after which every sum(cost_usd) group
+    # containing the row is NaN permanently. The harness rejects it at capture;
+    # this is the guard for callers that never went through one.
+    assert run_metrics._storable_cost(float("nan")) is None
+    assert run_metrics._storable_cost(float("inf")) is None
+
+
+def test_record_writes_an_unstorable_cost_as_unmeasured(monkeypatch):
+    """The row still lands; only the cost it could not hold degrades to NULL."""
+    import contextlib
+
+    import sidecar.db
+
+    monkeypatch.setattr(run_metrics.settings, "database_url", "postgres://x")
+    captured = {}
+
+    class _Conn:
+        def execute(self, sql, params):
+            captured["params"] = params
+
+    @contextlib.contextmanager
+    def _fake_db():
+        yield _Conn()
+
+    monkeypatch.setattr(sidecar.db, "db", _fake_db)
+    run_metrics.record("o/r", 7, "p", "m", input_tokens=5, cost_usd=1e9)
+    assert captured["params"][-2] is None
+    assert captured["params"][-6] == 5
+
+
 def test_cost_aggregates_are_not_coalesced():
     """Guards the one line that would quietly turn "unmeasured" into "free"."""
     assert "coalesce" not in run_metrics._COST_AGGREGATES.lower()
