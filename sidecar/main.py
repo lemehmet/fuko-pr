@@ -262,6 +262,12 @@ def metrics_run_endpoint(req: models.RunMetricRequest) -> dict:
         detail=req.detail or "",
         backend=req.backend,
         endpoint=req.endpoint,
+        input_tokens=req.input_tokens,
+        output_tokens=req.output_tokens,
+        cache_read_tokens=req.cache_read_tokens,
+        cache_write_tokens=req.cache_write_tokens,
+        cost_usd=req.cost_usd,
+        turns=req.turns,
     )
     return {"recorded": True, "persisted": bool(settings.database_url)}
 

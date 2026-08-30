@@ -283,7 +283,12 @@ class ReviewerHealthResponse(BaseModel):
 
 
 class RunMetricRequest(BaseModel):
-    """Body of ``POST /metrics/run``: one review-run row from the runner."""
+    """Body of ``POST /metrics/run``: one review-run row from the runner.
+
+    Every token/cost field defaults to ``None`` so a runner older than #152 --
+    or one whose backend has no usage feed -- posts a valid body that records
+    "not measured", which is the truth for those runs and never a zero.
+    """
 
     repo: str
     pr: int
@@ -297,10 +302,35 @@ class RunMetricRequest(BaseModel):
     detail: str | None = None
     backend: str = "pr-agent"
     endpoint: str = ""
+    input_tokens: int | None = Field(
+        default=None,
+        ge=0,
+        description="Fresh (uncached) input tokens; excludes the two cache counts below.",
+    )
+    output_tokens: int | None = Field(default=None, ge=0)
+    cache_read_tokens: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Input tokens served from the provider's prompt cache. Their ratio against "
+            "input_tokens is what shows whether a gateway honours prompt caching at all."
+        ),
+    )
+    cache_write_tokens: int | None = Field(
+        default=None, ge=0, description="Input tokens written into the prompt cache."
+    )
+    cost_usd: float | None = Field(default=None, ge=0)
+    turns: int | None = Field(default=None, ge=0)
 
 
 class RunSummaryRow(BaseModel):
-    """One provider+model aggregate returned by ``GET /metrics/summary``."""
+    """One provider+model aggregate returned by ``GET /metrics/summary``.
+
+    The token/cost totals are ``None`` -- not ``0`` -- for a model whose runs
+    reported none, e.g. every pr-agent row. They are declared here because a
+    ``response_model`` silently DROPS undeclared keys, so an aggregate missing
+    from this class is an aggregate the endpoint cannot return.
+    """
 
     provider: str
     model: str
@@ -309,6 +339,12 @@ class RunSummaryRow(BaseModel):
     not_ok: int
     avg_duration_s: float | None = None
     findings: int
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    cost_usd: float | None = None
+    turns: int | None = None
 
 
 class RunSummaryResponse(BaseModel):

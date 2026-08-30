@@ -558,6 +558,49 @@ def test_invoke_auth_failure_names_the_channel_failed_not_throttled(monkeypatch)
     assert not result.throttled
 
 
+_USAGE = {
+    "input_tokens": 29_000,
+    "output_tokens": 4_100,
+    "cache_read_input_tokens": 339_000,
+    "cache_creation_input_tokens": 12_000,
+}
+
+
+def test_invoke_carries_the_runs_token_and_cost_accounting(monkeypatch):
+    """#152: a completed run reports what it spent, flattened onto the fields the
+    metrics row stores — fresh input kept separate from cached input."""
+    backend = AgenticBackend()
+    result, _ = _invoke(
+        monkeypatch,
+        backend,
+        HarnessResult(0, REVIEW_JSON, usage=_USAGE, cost_usd=1.23, turns=57),
+    )
+    assert (result.input_tokens, result.cache_read_tokens) == (29_000, 339_000)
+    assert (result.output_tokens, result.cache_write_tokens) == (4_100, 12_000)
+    assert result.cost_usd == 1.23 and result.turns == 57
+
+
+def test_invoke_failure_still_reports_what_the_run_spent(monkeypatch):
+    """A failure is not a refund: a run that burned its turn budget and then
+    produced unparseable output is among the most expensive shapes there is."""
+    backend = AgenticBackend()
+    result, _ = _invoke(
+        monkeypatch,
+        backend,
+        HarnessResult(0, "not json at all", usage=_USAGE, cost_usd=4.5, turns=50),
+    )
+    assert result.returncode == 1
+    assert result.cost_usd == 4.5 and result.input_tokens == 29_000
+
+
+def test_invoke_reports_no_accounting_when_the_harness_reported_none(monkeypatch):
+    """None, never 0 — an unmeasured run must not read as a free one."""
+    backend = AgenticBackend()
+    result, _ = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert result.cost_usd is None and result.turns is None
+    assert result.input_tokens is None and result.cache_read_tokens is None
+
+
 def test_invoke_precondition_failure_marks_the_channel_failed(monkeypatch):
     """A failure before the run (no model) still reports the channel, never empty."""
     backend = AgenticBackend()

@@ -23,6 +23,18 @@ PAGE = page("metrics")
 
 router = APIRouter()
 
+#: The cost columns both aggregate tables carry (#152), in row order.
+#:
+#: `in` and `cache rd` are shown side by side on purpose: fresh input beside
+#: cached input IS the prompt-caching answer, and reading them apart is what
+#: made a ~25x difference in the bill invisible for as long as it was.
+_COST_COLUMNS: list[c.Column] = [
+    ("in", True),
+    ("cache rd", True),
+    ("out", True),
+    ("$", True),
+]
+
 _MODEL_COLUMNS: list[c.Column] = [
     ("provider", False),
     ("model", False),
@@ -31,6 +43,7 @@ _MODEL_COLUMNS: list[c.Column] = [
     ("not ok", True),
     ("avg s", True),
     ("findings", True),
+    *_COST_COLUMNS,
 ]
 
 _SLOT_COLUMNS: list[c.Column] = [
@@ -40,6 +53,7 @@ _SLOT_COLUMNS: list[c.Column] = [
     ("not ok", True),
     ("avg s", True),
     ("findings", True),
+    *_COST_COLUMNS,
 ]
 
 _RECENT_COLUMNS: list[c.Column] = [
@@ -76,6 +90,32 @@ def _pr_cell(repo: str, pr: object) -> str:
     )
 
 
+def _tokens(value: object) -> str:
+    """Format a token total compactly; an em dash when nothing was measured.
+
+    ``None`` must not render as ``0``: an unmeasured lane (every pr-agent row)
+    would otherwise be indistinguishable from a free one.
+    """
+    if value is None:
+        return "—"
+    count = int(value)
+    for unit, scale in (("G", 1_000_000_000), ("M", 1_000_000), ("k", 1_000)):
+        if count >= scale:
+            return f"{count / scale:.1f}{unit}"
+    return str(count)
+
+
+def _cost_cells(row: dict) -> str:
+    """Render the four cost cells shared by the model and slot tables."""
+    cost = row.get("cost_usd")
+    return (
+        c.cell(_tokens(row.get("input_tokens")), numeric=True)
+        + c.cell(_tokens(row.get("cache_read_tokens")), numeric=True)
+        + c.cell(_tokens(row.get("output_tokens")), numeric=True)
+        + c.cell("—" if cost is None else f"${float(cost):,.2f}", numeric=True)
+    )
+
+
 def _model_rows(summary: list[dict]) -> list[str]:
     return [
         "<tr>"
@@ -86,6 +126,7 @@ def _model_rows(summary: list[dict]) -> list[str]:
         + c.cell(m["not_ok"], numeric=True)
         + c.cell(m["avg_duration_s"], numeric=True)
         + c.cell(m["findings"], numeric=True)
+        + _cost_cells(m)
         + "</tr>"
         for m in summary
     ]
@@ -100,6 +141,7 @@ def _slot_rows(slots: list[dict]) -> list[str]:
         + c.cell(s["not_ok"], numeric=True)
         + c.cell(s["avg_duration_s"], numeric=True)
         + c.cell(s["findings"], numeric=True)
+        + _cost_cells(s)
         + "</tr>"
         for s in slots
     ]

@@ -48,6 +48,7 @@ contributor's pull request:
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -274,12 +275,95 @@ class HarnessNotAvailableError(RuntimeError):
 
 @dataclass(frozen=True)
 class HarnessResult:
-    """The raw outcome of one agent run."""
+    """The raw outcome of one agent run.
+
+    ``usage`` / ``cost_usd`` / ``turns`` are the terminal ``result`` event's own
+    accounting (#152), and are ``None`` whenever that event did not arrive or did
+    not carry them -- a killed run, CLI schema drift, a harness with no usage
+    feed at all. ``usage`` stays the raw mapping the CLI emitted rather than a
+    normalized one, so a field this repo does not yet read (thinking tokens, the
+    1h/5m cache split) is preserved for whoever adds the column;
+    :func:`usage_tokens` is the mapping onto the fields the metrics row stores.
+    """
 
     returncode: int
     text: str
     stderr: str = ""
     timed_out: bool = False
+    usage: dict | None = None
+    cost_usd: float | None = None
+    turns: int | None = None
+
+
+#: ``review_runs`` token column -> the key it reads from a ``result`` event's
+#: ``usage`` mapping.
+#:
+#: The spellings differ on purpose and the difference is the whole point of the
+#: pairing: an Anthropic-shaped ``input_tokens`` counts only the tokens actually
+#: billed as fresh input -- cache reads and cache writes are reported ALONGSIDE
+#: it, not inside it -- whereas an OpenAI-shaped ``prompt_tokens`` (the columns
+#: migration 004 reserved for a PR-Agent capture path) is the inclusive total.
+#: Storing them under distinct names keeps "what did this cost" and "is the
+#: gateway honouring prompt caching" separable, which is the question #152 exists
+#: to answer.
+_USAGE_FIELDS = {
+    "input_tokens": "input_tokens",
+    "output_tokens": "output_tokens",
+    "cache_read_tokens": "cache_read_input_tokens",
+    "cache_write_tokens": "cache_creation_input_tokens",
+}
+
+
+def _as_int(value: object) -> int | None:
+    """A non-negative int from an untrusted event field, else None.
+
+    ``bool`` is excluded explicitly because it is an ``int`` subclass, so a CLI
+    that ever emitted ``true`` for a count would otherwise be recorded as one
+    token rather than as "not reported".
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _as_float(value: object) -> float | None:
+    """A non-negative FINITE float from an untrusted event field, else None.
+
+    ``json.loads`` accepts the bare ``NaN`` / ``Infinity`` / ``-Infinity``
+    literals, and ``NaN`` compares false against every bound -- so a plain
+    ``value < 0`` guard admits both. Neither survives the trip: over HTTP
+    ``NaN`` fails ``RunMetricRequest``'s ``ge=0`` and infinity overflows
+    ``NUMERIC(10,4)``, either of which loses the WHOLE metrics row rather than
+    just the cost, and on the direct path a stored ``NaN`` poisons every
+    ``sum(cost_usd)`` group it lands in, permanently. Rejecting here keeps a
+    garbled figure degrading to "not measured" like any other field.
+
+    The conversion is guarded because it is the one that can raise: an
+    arbitrarily large JSON integer parses to a Python ``int`` that ``float()``
+    cannot represent, and an ``OverflowError`` out of a best-effort accounting
+    helper would kill the review it is only supposed to be measuring.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
+
+
+def usage_tokens(usage: dict | None) -> dict[str, int | None]:
+    """Map a ``result`` event's ``usage`` onto the metrics token fields (#152).
+
+    Every field degrades to ``None`` independently: a usage mapping that is
+    absent, not a mapping, or missing/garbled in one key yields ``None`` for
+    that key rather than a zero. The distinction is load-bearing downstream --
+    ``NULL`` reads as "not measured" while ``0`` reads as "free".
+    """
+    reported = usage if isinstance(usage, dict) else {}
+    return {column: _as_int(reported.get(key)) for column, key in _USAGE_FIELDS.items()}
 
 
 def is_auth_failure(output: str) -> bool:
@@ -346,7 +430,10 @@ def run_review(
     parsing is TOLERANT -- unknown or non-JSON lines are skipped, and if the
     ``result`` event never arrives (CLI schema drift, mid-stream kill) the
     last assistant text block stands in, so drift degrades to the old
-    behavior rather than a hard failure. ``env`` is the harness process
+    behavior rather than a hard failure. That same terminal event carries the
+    run's token usage, dollar cost and turn count, which ride back on the
+    result (#152) for the metrics row -- best-effort, ``None`` when absent.
+    ``env`` is the harness process
     environment (the caller decides exactly which credentials it carries) and
     is used as given rather than merged with this process's.
 
@@ -401,17 +488,31 @@ def run_review(
             flush=True,
         )
 
-    returncode, text, stderr, timed_out = _drive(
+    returncode, outcome, stderr, timed_out = _drive(
         cmd, prompt=prompt, cwd=cwd, env=env, timeout=timeout, emit=_emit
     )
     if timed_out:
+        # The text is deliberately dropped (a killed run has no verdict), but the
+        # accounting is not: a run killed at 30 minutes is the single most
+        # expensive shape this fleet produces, and if the terminal event did
+        # arrive before the kill its tokens were still spent and still billed.
         return HarnessResult(
             returncode=TIMEOUT_RETURNCODE,
             text="",
             stderr=stderr or f"review timed out after {timeout}s",
             timed_out=True,
+            usage=outcome.usage,
+            cost_usd=outcome.cost_usd,
+            turns=outcome.turns,
         )
-    return HarnessResult(returncode=returncode, text=text, stderr=stderr)
+    return HarnessResult(
+        returncode=returncode,
+        text=outcome.text,
+        stderr=stderr,
+        usage=outcome.usage,
+        cost_usd=outcome.cost_usd,
+        turns=outcome.turns,
+    )
 
 
 def _flatten(value: str) -> str:
@@ -445,17 +546,42 @@ def _tool_arg(tool_input: dict) -> str:
     return ""
 
 
-def _consume_stream(lines, emit) -> tuple[str, bool]:
-    """Fold the harness's NDJSON event feed into (final_text, saw_result).
+@dataclass(frozen=True)
+class _StreamOutcome:
+    """What folding one event feed yielded: the final text plus its accounting."""
+
+    text: str
+    saw_result: bool
+    usage: dict | None = None
+    cost_usd: float | None = None
+    turns: int | None = None
+
+
+def _consume_stream(lines, emit) -> _StreamOutcome:
+    """Fold the harness's NDJSON event feed into a :class:`_StreamOutcome`.
 
     ``emit(turn, tool, arg)`` fires once per ``tool_use`` block as it streams.
     Tolerant by design: blank/non-JSON/unknown lines are skipped, because a
     progress feature must never be the thing that kills a review. When no
     ``result`` event arrives, the last assistant text block stands in -- for a
     healthy run they are the same message.
+
+    The terminal event's ``usage`` / ``total_cost_usd`` / ``num_turns`` ride
+    along (#152); they were previously parsed and dropped, and they are the only
+    place a run's real token and cash cost is stated. They are read whether or
+    not that event's ``result`` field is usable text, because a schema change
+    that costs us the final message should not also cost us the bill.
+
+    ``turns`` is the event's own ``num_turns`` and nothing else. The assistant
+    messages counted here for the progress lines are a DIFFERENT quantity, so
+    substituting them would put two definitions in one column; a run whose
+    terminal event never arrived honestly reports ``None``.
     """
     result_text: str | None = None
     last_assistant_text = ""
+    reported_usage: dict | None = None
+    reported_cost: float | None = None
+    reported_turns: int | None = None
     turns = 0
     for raw in lines:
         raw = raw.strip()
@@ -478,11 +604,21 @@ def _consume_stream(lines, emit) -> tuple[str, bool]:
                     emit(turns, block.get("name") or "?", _tool_arg(block.get("input") or {}))
                 elif block.get("type") == "text" and block.get("text"):
                     last_assistant_text = block["text"]
-        elif kind == "result" and isinstance(event.get("result"), str):
-            result_text = event["result"]
-    if result_text is not None:
-        return result_text, True
-    return last_assistant_text, False
+        elif kind == "result":
+            usage = event.get("usage")
+            if isinstance(usage, dict):
+                reported_usage = usage
+            reported_cost = _as_float(event.get("total_cost_usd"))
+            reported_turns = _as_int(event.get("num_turns"))
+            if isinstance(event.get("result"), str):
+                result_text = event["result"]
+    return _StreamOutcome(
+        text=last_assistant_text if result_text is None else result_text,
+        saw_result=result_text is not None,
+        usage=reported_usage,
+        cost_usd=reported_cost,
+        turns=reported_turns,
+    )
 
 
 def _drive(
@@ -493,10 +629,10 @@ def _drive(
     env: dict[str, str],
     timeout: int,
     emit,
-) -> tuple[int, str, str, bool]:
+) -> tuple[int, _StreamOutcome, str, bool]:
     """Run ``cmd`` streaming stdout through :func:`_consume_stream`.
 
-    Returns ``(returncode, final_text, stderr, timed_out)``. Three pipes need
+    Returns ``(returncode, outcome, stderr, timed_out)``. Three pipes need
     three actors to avoid deadlock on a large prompt or chatty child: stdin is
     fed from its own thread (the child may start emitting before it finishes
     reading a multi-megabyte diff), stderr drains on a second thread, and the
@@ -536,9 +672,9 @@ def _drive(
     stdin_thread = threading.Thread(target=_feed, daemon=True)
     stdin_thread.start()
     try:
-        text, _saw_result = _consume_stream(proc.stdout, emit)
+        outcome = _consume_stream(proc.stdout, emit)
         proc.wait()
     finally:
         timer.cancel()
     stderr_thread.join(timeout=5)
-    return proc.returncode, text, "".join(stderr_chunks), timed_out.is_set()
+    return proc.returncode, outcome, "".join(stderr_chunks), timed_out.is_set()

@@ -334,6 +334,28 @@ def _slot_of(model: ModelConfig) -> str | None:
     return token_env.removeprefix("FUKO_GITHUB_TOKEN_").lower() or None
 
 
+#: The :class:`InvokeResult` fields that describe what a run spent (#152).
+_COST_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "cost_usd",
+    "turns",
+)
+
+
+def _costs_of(result: InvokeResult) -> dict:
+    """Lift the token/cost fields off a branch result for the metrics row.
+
+    Read through ``getattr`` with a ``None`` default so a third-party backend
+    returning an older ``InvokeResult`` shape records "not measured" rather than
+    crashing the metrics write; the key set is fixed here (never taken from the
+    result) so this can only ever produce arguments ``record()`` accepts.
+    """
+    return {field: getattr(result, field, None) for field in _COST_FIELDS}
+
+
 def _record_run(
     pr: PRRef,
     model: ModelConfig,
@@ -346,6 +368,7 @@ def _record_run(
     detail: str,
     backend: str = "pr-agent",
     endpoint: str = "",
+    costs: dict | None = None,
 ) -> None:
     """Persist one review-run metrics row (best-effort, never raises).
 
@@ -356,6 +379,12 @@ def _record_run(
     ``backend`` attributes the row to the driver that produced it (#99); it
     defaults to ``"pr-agent"`` so an omitting caller writes the same value the
     ``review_runs`` backfill uses.
+
+    ``costs`` is :func:`_costs_of` applied to the branch's result -- the tokens,
+    dollars and turns the run spent (#152), all-``None`` for a backend with no
+    usage feed. It travels as a mapping rather than six more keyword arguments
+    because it is written and read as one unit, and because both transports here
+    (HTTP body and direct call) then carry it identically.
     """
     try:
         fuko_url, fuko_token = _cb_endpoint()
@@ -375,6 +404,7 @@ def _record_run(
             # auth-aware for backends that route themselves) -- NOT re-derived
             # here, so the DB row and the receipt can never disagree.
             "endpoint": endpoint,
+            **(costs or {}),
         }
         if fuko_url:
             headers = {"Content-Type": "application/json"}
@@ -400,6 +430,7 @@ def _record_run(
                 detail=payload["detail"],
                 backend=backend,
                 endpoint=endpoint,
+                **(costs or {}),
             )
     except Exception as e:
         print(f"fuko: run-metrics record failed (continuing): {e}", file=sys.stderr)
@@ -829,6 +860,7 @@ def _run_pool(
                 detail=result.detail or "",
                 backend=getattr(model, "backend", None) or review.backend,
                 endpoint=result.endpoint or "",
+                costs=_costs_of(result),
             )
             return result
 
@@ -851,6 +883,10 @@ def _run_pool(
             detail=result.detail or "",
             backend=getattr(model, "backend", None) or review.backend,
             endpoint=result.endpoint or "",
+            # The LAST attempt's spend only. A pool that burned three providers
+            # writes one row, so this under-reports a failover chain rather than
+            # inventing a total the row's provider+model did not incur.
+            costs=_costs_of(result),
         )
     return result
 
