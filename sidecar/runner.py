@@ -1359,8 +1359,12 @@ def _review_compare(
                     tools,
                     api_url,
                     branch_token,
-                    head_sha,
-                    branch_seat,
+                    # By KEYWORD, not position: these two are adjacent strings,
+                    # and swapping them would type-check, run green, and hand
+                    # every branch the wrong ledger lane -- the one outcome
+                    # `_branch_seats` exists to make impossible.
+                    head_sha=head_sha,
+                    seat=branch_seat,
                 )
                 for entry, branch_token, branch_seat in zip(reviewers, identities, seats)
             ]
