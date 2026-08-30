@@ -36,6 +36,8 @@ def _cleanup():
 
     with db() as conn:
         conn.execute("DELETE FROM learnings WHERE repo = %s", (TEST_REPO,))
+        conn.execute("DELETE FROM review_findings WHERE repo = %s", (TEST_REPO,))
+        conn.execute("DELETE FROM review_coverage WHERE repo = %s", (TEST_REPO,))
 
 
 def test_ingest_query_roundtrip():
@@ -227,3 +229,67 @@ def test_cli_retrieve(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["fuko", "retrieve", "--repo", TEST_REPO, "--out", str(out)])
     main()
     assert out.exists()
+
+
+def test_review_state_ledgers_roundtrip_on_a_live_server():
+    """Exercise the review-state store against real SQL, not a fake connection.
+
+    Everything the unit tests cannot see lives here: ``make_interval``,
+    ``rowcount``, ``= ANY(%s)``, and above all the ledger's ids, which are
+    Python ``str`` bound against ``uuid`` columns. psycopg 3 sends a ``str``
+    parameter with an unspecified type, so the server resolves it from the
+    column it is compared against -- but that is a driver property a recording
+    connection can never demonstrate. Without this test a binding failure would
+    be swallowed by ``_best_effort`` and read as "nothing to settle": findings
+    would insert and read back while never transitioning, and the open ledger
+    would grow without bound.
+    """
+    from sidecar import review_state as R
+    from sidecar.reviewer.prompt import AgenticFinding, ExaminedRegion
+
+    head = "0" * 40
+
+    def _finding(title: str) -> AgenticFinding:
+        return AgenticFinding(
+            file="src/app.py",
+            line=42,
+            severity="high",
+            category="bug",
+            title=title,
+            body="body text",
+            evidence="src/app.py:40-44",
+        )
+
+    assert R.record_findings(TEST_REPO, 1, "henry", 0, head, [_finding("a"), _finding("b")]) == 2
+
+    stored = R.open_findings(TEST_REPO, 1, "henry")
+    assert sorted(s.prior.title for s in stored) == ["a", "b"]
+    # Same-round rows share a transaction timestamp, so their relative order is
+    # decided by the ``id`` tiebreaker: arbitrary, but the same on every read --
+    # which is the stability the minted ``pN`` ids depend on.
+    assert [s.id for s in R.open_findings(TEST_REPO, 1, "henry")] == [s.id for s in stored]
+
+    # str id against a uuid column, both shapes the store uses.
+    assert R.touch_findings([s.id for s in stored]) == 2
+    settled = next(s for s in stored if s.prior.title == "a")
+    assert R.transition(settled.id, "fixed", "rewritten in this head") is True
+    assert R.transition(settled.id, "fixed", "replayed stale id") is False
+
+    assert [s.prior.title for s in R.open_findings(TEST_REPO, 1, "henry")] == ["b"]
+
+    region = ExaminedRegion(
+        file="src/app.py",
+        region="L40-L44",
+        checked="does the caller handle None?",
+        conclusion="it does not; the guard is in the caller above",
+        evidence="src/app.py:40-44",
+    )
+    other = region.model_copy(update={"file": "src/util.py"})
+    assert R.record_coverage(TEST_REPO, 1, "henry", 0, head, [region, other]) == 2
+    assert len(R.live_coverage(TEST_REPO, 1, "henry")) == 2
+
+    assert R.expire_coverage(TEST_REPO, 1, "henry", []) == 0
+    assert R.expire_coverage(TEST_REPO, 1, "henry", ["src/app.py"]) == 1
+    assert [c.file for c in R.live_coverage(TEST_REPO, 1, "henry")] == ["src/util.py"]
+    assert R.expire_coverage(TEST_REPO, 1, "henry") == 1
+    assert R.live_coverage(TEST_REPO, 1, "henry") == []

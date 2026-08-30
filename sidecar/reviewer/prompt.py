@@ -306,6 +306,28 @@ def _indented(text: str, prefix: str = "      ") -> str:
     return "\n".join(f"{prefix}{line}" for line in text.splitlines() or [""])
 
 
+def _one_line(text: str) -> str:
+    """Flatten ``text`` so a stored value cannot open a second column-0 row.
+
+    The structural counterpart to :func:`_indented` (#168). A finding's ``title``
+    and ``body`` are indented, so every line they contribute is pushed off column
+    0 and reads as continuation. The header lines interpolate stored fields --
+    ``file``, ``severity``, ``category``, ``region`` -- directly, so a newline in
+    any of them would emit a second column-0 line that can be shaped exactly like
+    another ``[pN] path -- sev/cat -- round N`` header, letting one row's text
+    restate a real, already-minted id under a different file or severity than the
+    one fuko recorded.
+
+    Applied to the whole assembled header rather than field by field, so the
+    guarantee ("this call contributes exactly one line") does not depend on
+    remembering which of its fields came from a store. ``splitlines`` is what
+    makes it complete: it splits on carriage return, vertical tab, form feed and
+    the unicode line separators too, not just newline -- the same normalisation
+    :func:`_indented` already relies on.
+    """
+    return " ".join(str(text).splitlines())
+
+
 def render_prior_state(
     findings: Sequence[PriorFinding],
     coverage: Sequence[PriorCoverage] = (),
@@ -325,6 +347,13 @@ def render_prior_state(
     * coverage is capped at ``max_coverage``, newest round first, with the cut
       stated in-band the way a truncated diff is.
 
+    Every row's structure is owned here, not trusted to the store that supplies
+    the values: header lines go through :func:`_one_line` and free text through
+    :func:`_indented`, so no stored field can contribute a second column-0 line
+    and forge a row (#168). Keeping that at render time rather than at write
+    time means the store records what a round actually said, and one choke point
+    -- rather than every writer -- guarantees the section's shape.
+
     Returns an empty :class:`PriorState` when there is nothing to carry, so the
     caller's "empty means the section does not appear" convention holds.
     """
@@ -338,8 +367,10 @@ def render_prior_state(
         for prior_id, finding in ids.items():
             anchor = f"{finding.file}:{finding.line}" if finding.line else finding.file
             lines.append(
-                f"[{prior_id}] {anchor} -- {finding.severity}/{finding.category} "
-                f"-- round {finding.round}"
+                _one_line(
+                    f"[{prior_id}] {anchor} -- {finding.severity}/{finding.category} "
+                    f"-- round {finding.round}"
+                )
             )
             lines.append(_indented(finding.title))
             if finding.body:
@@ -352,7 +383,7 @@ def render_prior_state(
         lines.append("Regions earlier rounds examined, newest round first:")
         for entry in kept:
             where = f"{entry.file} {entry.region}".strip()
-            lines.append(f"- {where} -- round {entry.round}")
+            lines.append(_one_line(f"- {where} -- round {entry.round}"))
             lines.append(_indented(f"checked: {entry.checked}"))
             lines.append(_indented(f"established: {entry.conclusion}"))
             if entry.evidence:
