@@ -10,6 +10,14 @@ scoping, like the Postgres store. For knowledge bases larger than ``candidate_k`
 a file-scoped learning outside that semantic window is not separately boosted (the
 Postgres store does a second scoped pass); at typical repo scale the window covers
 the whole base, so the two agree.
+
+Deliberate non-parity, stated so it is not read as a gap: per-PR review state
+(:mod:`sidecar.review_state`) has no sqlite-vec implementation and is not planned
+to get one. This file mirrors the KNOWLEDGE base -- durable, repo-scoped,
+semantically retrieved. Review state is operational state with a pull request's
+lifetime: no embedding, never retrieved by similarity, mutated in place, and dead
+when the PR closes. A sqlite-vec deployment reviews statelessly, the same
+supported degradation an unreachable Postgres already produces.
 """
 
 from __future__ import annotations
