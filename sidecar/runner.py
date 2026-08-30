@@ -19,6 +19,7 @@ import os
 import re
 import sys
 import time
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
@@ -334,12 +335,24 @@ def _slot_of(model: ModelConfig) -> str | None:
     return token_env.removeprefix("FUKO_GITHUB_TOKEN_").lower() or None
 
 
-def _branch_seat(entry: ModelConfig, slot: str | None) -> str:
+def _branch_seat(entry: ModelConfig, slot: str | None, siblings: Sequence[str | None] = ()) -> str:
     """The ledger lane an A/B BRANCH occupies (#156), which is never shared.
 
-    ``slot`` whenever the branch declares an identity, because it is
-    model-agnostic: a promoted backup rescues its lane rather than opening one,
-    and swapping the model behind a slot keeps the state keyed to it.
+    ``slot`` whenever the branch declares an identity **no sibling also claims**,
+    because it is model-agnostic: a promoted backup rescues its lane rather than
+    opening one, and swapping the model behind a slot keeps the state keyed to
+    it.
+
+    ``siblings`` is every branch's slot in this run, this one included, and the
+    reason the rule is not simply "use the slot if there is one". A slot is
+    derived from ``token_env`` alone, and nothing rejects two entries naming the
+    same one: :func:`_resolve_branch_identities` sees the duplicate actor,
+    declines concurrency, and the sequential path then runs BOTH branches under
+    one slot. They would share a ledger exactly as identity-less branches did,
+    which is the hole this function exists to close, so a slot two branches claim
+    is not a lane and both fall back to their labels. An empty ``siblings``
+    belongs to the concurrent path, where every ``token_env`` is distinct by
+    construction -- that is the precondition for running concurrently at all.
 
     The fallback exists because a *compare* run of entries with no ``token_env``
     is legal -- :func:`_resolve_branch_identities` returns ``None`` for exactly
@@ -354,7 +367,9 @@ def _branch_seat(entry: ModelConfig, slot: str | None) -> str:
     it against two models settling each other's rows, and avoidable by declaring
     ``token_env``.
     """
-    return slot or f"{entry.provider}/{entry.name}"
+    if slot and list(siblings).count(slot) <= 1:
+        return slot
+    return f"{entry.provider}/{entry.name}"
 
 
 #: The :class:`InvokeResult` fields that describe what a run spent (#152).
@@ -1325,6 +1340,10 @@ def _review_compare(
             outcomes = [f.result() for f in futures]
     else:
         outcomes = []
+        # Every branch's slot, so `_branch_seat` can tell a lane from a slot two
+        # entries happen to claim. This path is exactly where that matters: a
+        # duplicate `token_env` is one of the reasons the run is sequential.
+        sibling_slots = [_slot_of(e) for e in reviewers]
         for index, entry in enumerate(reviewers):
             label = f"{entry.provider}/{entry.name}"
             slot = _slot_of(entry)
@@ -1367,7 +1386,7 @@ def _review_compare(
                     api_url=api_url,
                     actor=actor,
                     slot=slot,
-                    seat=_branch_seat(entry, slot),
+                    seat=_branch_seat(entry, slot, sibling_slots),
                     role=entry.role,
                 )
             except Exception as e:

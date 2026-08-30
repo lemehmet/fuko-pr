@@ -2190,6 +2190,26 @@ def test_an_identity_less_compare_branch_gets_its_own_seat():
     assert runner._branch_seat(slotted, runner._slot_of(slotted)) == "dorian"
 
 
+def test_two_branches_claiming_one_token_env_do_not_share_a_seat():
+    """A slot two entries claim is not a lane.
+
+    Nothing rejects a duplicate ``token_env``: `_resolve_branch_identities` sees
+    one actor for both, declines concurrency, and the sequential path then runs
+    BOTH branches -- under one slot, and so one ledger, where either could close
+    the other's findings with a bare ``fixed``.
+    """
+    left = ReviewModel(provider="anthropic", name="claude-a", token_env="FUKO_GITHUB_TOKEN_DORIAN")
+    right = ReviewModel(provider="openrouter", name="glm-b", token_env="FUKO_GITHUB_TOKEN_DORIAN")
+    siblings = [runner._slot_of(left), runner._slot_of(right)]
+
+    seats = {runner._branch_seat(e, runner._slot_of(e), siblings) for e in (left, right)}
+
+    assert seats == {"anthropic/claude-a", "openrouter/glm-b"}
+    # An unshared slot is still the lane, so the normal fleet is unaffected.
+    solo = ReviewModel(provider="anthropic", name="claude-a", token_env="FUKO_GITHUB_TOKEN_GRAY")
+    assert runner._branch_seat(solo, "gray", ["dorian", "gray"]) == "gray"
+
+
 def test_primary_success_is_not_reported_as_a_promotion(monkeypatch):
     """End-to-end guard on the bug above: label == model means no promotion text."""
     patched = {}
