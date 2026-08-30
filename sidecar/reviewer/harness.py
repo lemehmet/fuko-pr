@@ -20,10 +20,29 @@ contributor's pull request:
   in the working directory executes, and the same hook does not execute when
   the directory is passed via ``--add-dir`` instead.
 * **The tool surface is pinned to read-only navigation**
-  (:data:`ALLOWED_TOOLS`). Headless mode cannot prompt for permissions, so
-  every tool outside the allowlist is denied by construction -- the agent
-  cannot run repository code, write files, or reach the network even if the
-  repository content asks it to.
+  (:data:`ALLOWED_TOOLS`), by ``--tools`` -- which selects the built-in set the
+  session HAS -- and not by ``--allowedTools``, which only pre-approves tools
+  the session already has. That distinction was a live vulnerability
+  (GHSA-wc47-w25x-54fc): with ``--allowedTools Read,Grep,Glob`` alone the agent
+  still had ``Bash`` and used it, executing shell against an untrusted checkout
+  on a runner holding the seat's provider key and a GitHub App token. Verified
+  on Claude Code 2.1.251, clean cwd, empty user-scope ``permissions``:
+
+  ===================================================  ==========
+  flags                                                Bash
+  ===================================================  ==========
+  ``--allowedTools "Read,Grep,Glob"``                  **RUNS**
+  ``+ permissions.deny ["Bash", ...]``                 blocked
+  ``--tools "Read,Grep,Glob"``                         not offered
+  ===================================================  ==========
+
+  Both mechanisms are emitted, and they fail in different directions on
+  purpose: ``--tools`` never presents the tool (so a denied call cannot even
+  cost a turn), while the ``permissions.deny`` entries in
+  :data:`DENIED_TOOLS` still hold if a future CLI renames or drops ``--tools``.
+  Neither is a sandbox -- ``Read`` and ``Grep`` still reach the whole runner
+  (see :data:`SENSITIVE_HOME_DIRS`); this closes the arbitrary-execution and
+  network vectors, not the read surface.
 """
 
 from __future__ import annotations
@@ -41,6 +60,33 @@ from pathlib import Path
 from ..throttle import TIMEOUT_RETURNCODE
 
 ALLOWED_TOOLS = "Read,Grep,Glob"
+
+#: Built-in tools denied by NAME in the ``--settings`` payload, as the standing
+#: half of the two-mechanism surface described in the module docstring.
+#:
+#: This is an enumeration, so it is only as complete as the CLI's built-in set
+#: at the time of writing -- which is precisely why it is the SECONDARY
+#: mechanism. ``--tools`` is authoritative (it closes the set by construction
+#: and needs no maintenance as tools are added); this list is what survives
+#: that flag being renamed or dropped, and it covers the tools whose loss of
+#: containment would matter: arbitrary execution, writes, and network egress.
+#:
+#: Deliberately NOT the complement of :data:`ALLOWED_TOOLS`: naming a tool that
+#: does not exist in some CLI version is inert, while omitting a dangerous one
+#: is not, so this errs toward listing too much.
+DENIED_TOOLS = (
+    "Bash",
+    "BashOutput",
+    "KillShell",
+    "Write",
+    "Edit",
+    "MultiEdit",
+    "NotebookEdit",
+    "WebFetch",
+    "WebSearch",
+    "Task",
+    "SlashCommand",
+)
 
 #: Set by a caller that REPLACES ``CLAUDE_CONFIG_DIR`` for isolation, carrying
 #: the value it replaced so the read denylist can still cover it. Consumed only
@@ -184,7 +230,12 @@ def _permission_settings(env: dict[str, str]) -> str:
     # Stripping and re-adding makes exactly one `//` prefix by construction, so
     # the broken spelling cannot be produced at all rather than merely asserted
     # against.
-    deny = [
+    # Bare tool names first, so the execution/egress denial is present even on a
+    # runner where every path rule is dropped as non-POSIX (see below). Those
+    # two failures are independent: a Windows-shaped HOME must not silently take
+    # the arbitrary-execution denial down with the credential denylist.
+    deny = list(DENIED_TOOLS)
+    deny += [
         f"Read(//{path.lstrip('/')}/**)" if is_dir else f"Read(//{path.lstrip('/')})"
         for path, is_dir in candidates
         if path.startswith("/")
@@ -318,6 +369,12 @@ def run_review(
         # Print mode refuses stream-json without it; it gates the event feed,
         # not log chattiness.
         "--verbose",
+        # `--tools` selects the built-in set the session HAS; `--allowedTools`
+        # only pre-approves tools it already has. Only the first is a boundary
+        # (GHSA-wc47-w25x-54fc) -- keep both: the allowlist is what stops the
+        # permitted three from prompting, which headless mode cannot answer.
+        "--tools",
+        ALLOWED_TOOLS,
         "--allowedTools",
         ALLOWED_TOOLS,
         "--add-dir",

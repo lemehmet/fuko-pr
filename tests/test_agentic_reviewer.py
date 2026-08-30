@@ -638,6 +638,17 @@ def test_runner_credentials_are_denied_as_files_not_as_a_directory():
     assert not any(rule.startswith("Read(//home/runner/actions-runner/_work") for rule in deny)
 
 
+def _path_rules(deny: list[str]) -> list[str]:
+    """The `Read(...)` path rules only, without the bare tool names.
+
+    `permissions.deny` carries two kinds of entry since GHSA-wc47-w25x-54fc:
+    bare tool names (`Bash`) and path rules (`Read(//abs/**)`). The spelling
+    assertions below are about the path form and would otherwise trip over the
+    tool names, which have no path to spell.
+    """
+    return [rule for rule in deny if rule.startswith("Read(")]
+
+
 def test_permission_rules_use_the_double_slash_absolute_spelling():
     """Pin the exact spelling: `//abs` matches, `/abs` and `///abs` silently do not.
 
@@ -648,8 +659,9 @@ def test_permission_rules_use_the_double_slash_absolute_spelling():
     deny = json.loads(harness_mod._permission_settings({"HOME": "/home/runner"}))["permissions"][
         "deny"
     ]
-    assert deny, "a runner with HOME must get rules"
-    for rule in deny:
+    rules = _path_rules(deny)
+    assert rules, "a runner with HOME must get rules"
+    for rule in rules:
         assert rule.startswith("Read(//"), rule
         assert "///" not in rule, rule
         assert not rule.startswith("Read(/home"), rule  # the single-slash form
@@ -669,8 +681,9 @@ def test_permission_rules_skip_non_posix_roots_and_say_so(capsys):
 def test_permission_rules_normalize_repeated_leading_slashes(home):
     """POSIX allows a leading `//`, and `Read(///...)` matches nothing."""
     deny = json.loads(harness_mod._permission_settings({"HOME": home}))["permissions"]["deny"]
-    assert deny
-    for rule in deny:
+    rules = _path_rules(deny)
+    assert rules
+    for rule in rules:
         assert rule.startswith("Read(//"), rule
         assert not rule.startswith("Read(///"), rule
         assert "///" not in rule, rule
@@ -715,12 +728,15 @@ def test_run_review_settings_survive_a_home_less_environment(monkeypatch, tmp_pa
     monkeypatch.setattr(harness_mod, "_drive", _fake_drive(seen))
     run_review("p", tmp_path, cwd=tmp_path, model="m", env={}, timeout=9)
     settings = json.loads(seen["cmd"][seen["cmd"].index("--settings") + 1])
-    # No HOME means no home rules, but the system rules still apply.
-    assert settings["permissions"]["deny"] == [
+    # No HOME means no home rules, but the system rules still apply -- and the
+    # tool denials do not depend on HOME at all.
+    deny = settings["permissions"]["deny"]
+    assert _path_rules(deny) == [
         "Read(//proc/**)",
         "Read(//sys/**)",
         "Read(//dev/**)",
     ]
+    assert list(harness_mod.DENIED_TOOLS) == [r for r in deny if not r.startswith("Read(")]
 
 
 def test_run_review_timeout_maps_to_throttle_returncode(monkeypatch, tmp_path):
@@ -871,3 +887,55 @@ def test_flatten_covers_every_character_splitlines_breaks_on():
     for ch in ("\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
         out = harness_mod._flatten(f"head{ch}{forged}")
         assert len(out.splitlines()) == 1, (ch, out)
+
+
+def test_tool_surface_is_closed_by_tools_not_only_by_allowedtools(monkeypatch, tmp_path):
+    """GHSA-wc47-w25x-54fc: `--allowedTools` pre-approves, it does not confine.
+
+    Measured on Claude Code 2.1.251 with the exact harness flag set, a clean cwd
+    and empty user-scope permissions: `--allowedTools "Read,Grep,Glob"` alone
+    left `Bash` available and it executed. `--tools` selects the built-in set the
+    session HAS, so the tool is never offered. Both flags must be emitted with
+    the same value -- dropping `--allowedTools` would leave the three permitted
+    tools prompting, which headless mode cannot answer.
+    """
+    seen = {}
+    monkeypatch.setattr(harness_mod.shutil, "which", lambda *a, **k: "/bin/claude")
+    monkeypatch.setattr(harness_mod, "_drive", _fake_drive(seen, text="{}"))
+    run_review("p", tmp_path / "repo", cwd=tmp_path / "work", model="m", env={}, timeout=5)
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--tools") + 1] == harness_mod.ALLOWED_TOOLS
+    assert cmd[cmd.index("--allowedTools") + 1] == harness_mod.ALLOWED_TOOLS
+
+
+def test_execution_and_egress_tools_are_denied_by_name():
+    """The standing half of the surface: bare tool names in `permissions.deny`.
+
+    Verified on 2.1.251 that a bare `Bash` entry yields "No such tool available:
+    Bash. Bash is disabled for this session, in subagents as well as here." This
+    is what survives `--tools` being renamed or dropped by a future CLI.
+    """
+    deny = json.loads(harness_mod._permission_settings({"HOME": "/home/runner"}))["permissions"][
+        "deny"
+    ]
+    for tool in ("Bash", "Write", "Edit", "WebFetch", "WebSearch", "Task"):
+        assert tool in deny
+    # The permitted three must never appear -- a deny entry beats the allowlist
+    # and would leave the reviewer unable to read the code it is reviewing.
+    for tool in harness_mod.ALLOWED_TOOLS.split(","):
+        assert tool not in deny
+
+
+def test_tool_denial_survives_a_home_that_yields_no_path_rules(capsys):
+    """A Windows-shaped HOME drops every path rule; execution must still be denied.
+
+    The two failures are independent by construction: `_permission_settings`
+    emits the tool names before it builds any path rule, so an operator whose
+    credential denylist is inert (announced on stderr) does not ALSO silently
+    lose the arbitrary-execution denial.
+    """
+    payload = json.loads(harness_mod._permission_settings({"USERPROFILE": r"C:\Users\runner"}))
+    deny = payload["permissions"]["deny"]
+    assert "Bash" in deny
+    assert not any(rule.startswith("Read(//C:") for rule in deny)
+    assert "credential denylist NOT applied" in capsys.readouterr().err
