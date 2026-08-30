@@ -2166,48 +2166,76 @@ def test_run_pool_names_the_branchs_seat_in_the_backend_env(monkeypatch):
         assert seen[-1].get("FUKO_SEAT") == expected
 
 
-def test_an_identity_less_compare_branch_gets_its_own_seat():
-    """N branches must never share one ledger (#156).
+def test_declared_slots_are_the_lanes_when_they_are_the_branchs_own():
+    """The normal fleet keeps its slots: model-agnostic, so failover cannot split them."""
+    reviewers = [
+        ReviewModel(provider="anthropic", name="claude-a", token_env="FUKO_GITHUB_TOKEN_DORIAN"),
+        ReviewModel(provider="openrouter", name="glm-b", token_env="FUKO_GITHUB_TOKEN_HENRY"),
+    ]
 
-    A compare run whose entries declare no ``token_env`` is legal -- it is
-    exactly the config that falls back to the sequential path -- and every one of
-    those branches has ``slot`` None. Collapsing them onto the shared default
-    would let one model close a sibling's findings with a ``fixed`` verdict.
+    assert runner._branch_seats(reviewers) == ["dorian", "henry"]
+
+
+@pytest.mark.parametrize(
+    ("reviewers", "expected"),
+    [
+        # No token_env at all: legal, forces the sequential path, and every slot
+        # is None -- so they would have shared DEFAULT_SEAT.
+        (
+            [
+                ReviewModel(provider="anthropic", name="claude-a"),
+                ReviewModel(provider="openrouter", name="glm-b"),
+            ],
+            ["anthropic/claude-a", "openrouter/glm-b"],
+        ),
+        # Same token_env: one actor, so concurrency is declined and the
+        # SEQUENTIAL path runs both branches under one slot.
+        (
+            [
+                ReviewModel(
+                    provider="anthropic", name="claude-a", token_env="FUKO_GITHUB_TOKEN_DORIAN"
+                ),
+                ReviewModel(
+                    provider="openrouter", name="glm-b", token_env="FUKO_GITHUB_TOKEN_DORIAN"
+                ),
+            ],
+            ["anthropic/claude-a", "openrouter/glm-b"],
+        ),
+        # Different env vars, different tokens, different actors -- so the run
+        # goes CONCURRENT -- but `_slot_of` lowercases both to `dorian`.
+        (
+            [
+                ReviewModel(
+                    provider="anthropic", name="claude-a", token_env="FUKO_GITHUB_TOKEN_DORIAN"
+                ),
+                ReviewModel(
+                    provider="openrouter", name="glm-b", token_env="FUKO_GITHUB_TOKEN_Dorian"
+                ),
+            ],
+            ["anthropic/claude-a", "openrouter/glm-b"],
+        ),
+        # Neither the slot nor the label distinguishes them.
+        (
+            [
+                ReviewModel(provider="anthropic", name="claude-a"),
+                ReviewModel(provider="anthropic", name="claude-a"),
+            ],
+            ["anthropic/claude-a", "anthropic/claude-a#1"],
+        ),
+    ],
+    ids=["no-token-env", "same-token-env", "case-folded-collision", "same-label"],
+)
+def test_branches_never_share_a_ledger_lane(reviewers, expected):
+    """Every way two branches can collide onto one seat (#156).
+
+    Sharing a lane means each branch is offered the other's still-open findings
+    and can close them with a ``fixed`` verdict, which needs no reason -- one
+    model silently retiring another's finding.
     """
-    left = ReviewModel(provider="anthropic", name="claude-a")
-    right = ReviewModel(provider="openrouter", name="glm-b")
+    seats = runner._branch_seats(reviewers)
 
-    seats = {runner._branch_seat(e, runner._slot_of(e)) for e in (left, right)}
-
-    assert seats == {"anthropic/claude-a", "openrouter/glm-b"}
-    # A declared identity still wins: it is model-agnostic, so a promoted backup
-    # stays in the lane it rescued instead of opening one of its own.
-    slotted = ReviewModel(
-        provider="anthropic",
-        name="claude-a",
-        token_env="FUKO_GITHUB_TOKEN_DORIAN",
-    )
-    assert runner._branch_seat(slotted, runner._slot_of(slotted)) == "dorian"
-
-
-def test_two_branches_claiming_one_token_env_do_not_share_a_seat():
-    """A slot two entries claim is not a lane.
-
-    Nothing rejects a duplicate ``token_env``: `_resolve_branch_identities` sees
-    one actor for both, declines concurrency, and the sequential path then runs
-    BOTH branches -- under one slot, and so one ledger, where either could close
-    the other's findings with a bare ``fixed``.
-    """
-    left = ReviewModel(provider="anthropic", name="claude-a", token_env="FUKO_GITHUB_TOKEN_DORIAN")
-    right = ReviewModel(provider="openrouter", name="glm-b", token_env="FUKO_GITHUB_TOKEN_DORIAN")
-    siblings = [runner._slot_of(left), runner._slot_of(right)]
-
-    seats = {runner._branch_seat(e, runner._slot_of(e), siblings) for e in (left, right)}
-
-    assert seats == {"anthropic/claude-a", "openrouter/glm-b"}
-    # An unshared slot is still the lane, so the normal fleet is unaffected.
-    solo = ReviewModel(provider="anthropic", name="claude-a", token_env="FUKO_GITHUB_TOKEN_GRAY")
-    assert runner._branch_seat(solo, "gray", ["dorian", "gray"]) == "gray"
+    assert seats == expected
+    assert len(set(seats)) == len(seats)
 
 
 def test_primary_success_is_not_reported_as_a_promotion(monkeypatch):

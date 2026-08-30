@@ -871,10 +871,15 @@ class AgenticBackend:
             )
             # Named, not just counted: a suppressed write is the one settle
             # outcome the store cannot show afterwards, since the surviving row
-            # keeps the earlier body.
+            # keeps the earlier body. FLATTENED like every other
+            # author-influenced value this module logs (#147): the claim is a
+            # model's file and title, read out of a contributor-controlled
+            # checkout, and an embedded line break would hand that text column 0
+            # of its own line in a log whose gates are ^-anchored.
             for claim in settlement.deduped:
                 print(
-                    f"fuko: review-state seat {seat} re-asserted, not re-recorded: {claim}",
+                    f"fuko: review-state seat {seat} re-asserted, not re-recorded: "
+                    f"{_flatten_for_log(claim)}",
                     file=sys.stderr,
                 )
         with self._lock:

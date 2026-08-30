@@ -70,12 +70,17 @@ The rules that matter:
   label (`dorian`, `gray`) — model-agnostic, so swapping the model behind a
   seat keeps its ledger. There is deliberately no shared cross-seat ledger: it
   would raise fleet coverage at the cost of the independent second opinion that
-  is the reason for running two seats. A branch whose slot is not its own — it
-  declares no `token_env`, or declares one a sibling branch also declares — is
-  keyed by its `provider/name` label instead of sharing a lane, since either
-  case would otherwise put several branches on one ledger and let one model
-  settle another's findings. The trade is that renaming such a branch's model
-  resets its ledger; giving each branch its own `token_env` avoids it.
+  is the reason for running two seats.
+
+  The runner resolves one lane per branch for the whole run, and they are always
+  distinct. A branch keeps its slot when the slot is its own; when two branches
+  project onto the same slot — the same `token_env`, or names differing only in
+  case, since the slot is lowercased — both fall back to their `provider/name`
+  label, and a label two branches also share gains its index. A **solo** run is
+  the one case with no branch to collide with, so it keeps the constant
+  `default` seat. The trade on any fallback is that renaming that branch's model
+  resets its ledger, which a slot would have survived; giving each branch its
+  own distinctly-named `token_env` avoids it.
 - **Only the agent closes a finding**, with two exceptions in fuko's own hands:
   a verdict it cannot read closes nothing, and a finding whose file the current
   head no longer contains is retired as `stale`. Line drift never closes

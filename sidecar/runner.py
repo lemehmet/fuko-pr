@@ -335,41 +335,58 @@ def _slot_of(model: ModelConfig) -> str | None:
     return token_env.removeprefix("FUKO_GITHUB_TOKEN_").lower() or None
 
 
-def _branch_seat(entry: ModelConfig, slot: str | None, siblings: Sequence[str | None] = ()) -> str:
-    """The ledger lane an A/B BRANCH occupies (#156), which is never shared.
+def _branch_seats(reviewers: Sequence[ModelConfig]) -> list[str]:
+    """The ledger lane each A/B BRANCH occupies (#156), one per reviewer, all distinct.
 
-    ``slot`` whenever the branch declares an identity **no sibling also claims**,
-    because it is model-agnostic: a promoted backup rescues its lane rather than
-    opening one, and swapping the model behind a slot keeps the state keyed to
-    it.
+    Derived for the whole run at once rather than per entry, because "is this
+    name mine alone?" is a question about the run and every attempt to answer it
+    locally has been wrong in a different way.
 
-    ``siblings`` is every branch's slot in this run, this one included, and the
-    reason the rule is not simply "use the slot if there is one". A slot is
-    derived from ``token_env`` alone, and nothing rejects two entries naming the
-    same one: :func:`_resolve_branch_identities` sees the duplicate actor,
-    declines concurrency, and the sequential path then runs BOTH branches under
-    one slot. They would share a ledger exactly as identity-less branches did,
-    which is the hole this function exists to close, so a slot two branches claim
-    is not a lane and both fall back to their labels. An empty ``siblings``
-    belongs to the concurrent path, where every ``token_env`` is distinct by
-    construction -- that is the precondition for running concurrently at all.
+    Per branch, in order:
 
-    The fallback exists because a *compare* run of entries with no ``token_env``
-    is legal -- :func:`_resolve_branch_identities` returns ``None`` for exactly
-    that config and the run goes sequential -- and those branches would otherwise
-    all land on :data:`sidecar.reviewer.ledger.DEFAULT_SEAT`. That is not the
-    single-seat case the default is for: it is N models sharing ONE ledger, where
-    each round is offered its siblings' findings and can close them with a
-    ``fixed`` verdict that needs no reason. One model silently retiring another's
-    finding is the precise loss #156 exists to stop, so a seatless branch is
-    named by its configured label instead. The cost is that renaming that
-    branch's model resets its ledger, which a slot would have survived -- worth
-    it against two models settling each other's rows, and avoidable by declaring
-    ``token_env``.
+    * its ``slot`` (from ``token_env``: ``FUKO_GITHUB_TOKEN_DORIAN`` ->
+      ``dorian``) when no sibling projects onto the same one. The slot is
+      preferred because it is model-agnostic: a promoted backup rescues its lane
+      rather than opening one, and swapping the model behind a slot keeps the
+      state keyed to it.
+    * else its ``provider/name`` label. A branch that declares no ``token_env``
+      is legal -- :func:`_resolve_branch_identities` returns ``None`` for exactly
+      that config and the run goes sequential -- and would otherwise land on
+      :data:`sidecar.reviewer.ledger.DEFAULT_SEAT` along with every other such
+      branch. The cost of the label is that renaming that branch's model resets
+      its ledger, which a slot would have survived.
+    * else the label plus its index, for the case the label is not unique either
+      (two entries may name the same ``provider/name``).
+
+    Slots are checked against SIBLINGS rather than trusted because two entries
+    can project onto one slot in two different ways, and each of them defeats a
+    guard that reads plausibly on its own. They may name the same ``token_env``,
+    which :func:`_resolve_branch_identities` answers by declining concurrency --
+    and the sequential path then runs both branches anyway. Or they may name
+    ``..._DORIAN`` and ``..._Dorian``: different env vars, different tokens,
+    different actors, so the run goes CONCURRENT, while :func:`_slot_of`
+    lowercases both to ``dorian``. Neither path may assume distinctness, so
+    neither is given the chance to.
+
+    Sharing a lane is the one outcome this must never produce: both branches
+    would carry the other's still-open findings and could close them with a
+    ``fixed`` verdict, which needs no reason. One model silently retiring
+    another's finding is the precise loss #156 exists to stop, so the last
+    resort is a name that cannot collide rather than a name that reads well.
     """
-    if slot and list(siblings).count(slot) <= 1:
-        return slot
-    return f"{entry.provider}/{entry.name}"
+    slots = [_slot_of(entry) for entry in reviewers]
+    seats: list[str] = []
+    taken: set[str] = set()
+    for index, entry in enumerate(reviewers):
+        slot = slots[index]
+        seat = slot if slot and slots.count(slot) == 1 else f"{entry.provider}/{entry.name}"
+        # Terminates: each pass appends to a name already in `taken`, and the
+        # set is finite. Reached only by configs that duplicate a label.
+        while seat in taken:
+            seat = f"{seat}#{index}"
+        seats.append(seat)
+        taken.add(seat)
+    return seats
 
 
 #: The :class:`InvokeResult` fields that describe what a run spent (#152).
@@ -1162,8 +1179,13 @@ def _run_compare_branch(
     api_url: str,
     token: str,
     head_sha: str = "",
+    seat: str = "",
 ) -> tuple[str, InvokeResult]:
     """Run one A/B branch end-to-end under its own ``token`` identity.
+
+    ``seat`` is the branch's ledger lane, resolved for the whole run by
+    :func:`_branch_seats`. It is passed in rather than derived here because
+    uniqueness is a property of the run, not of one entry.
 
     Posts the branch's model-labelled header, then its fresh summary + inline
     suggestions, with marker injection restricted to the ``actor`` identity the
@@ -1216,7 +1238,7 @@ def _run_compare_branch(
             api_url=api_url,
             actor=actor,
             slot=slot,
-            seat=_branch_seat(entry, slot),
+            seat=seat,
             role=entry.role,
         )
     except Exception as e:
@@ -1311,6 +1333,10 @@ def _review_compare(
             detail="A/B compare disables 'describe'; configure at least one non-describe tool",
         )
 
+    # One lane per branch, resolved for the whole run so neither path has to
+    # decide locally whether a name is shared -- both ways two branches can
+    # collide onto one slot defeat a local guard (see `_branch_seats`).
+    seats = _branch_seats(reviewers)
     identities = _resolve_branch_identities(reviewers, api_url)
     if identities is not None:
         print(
@@ -1334,16 +1360,13 @@ def _review_compare(
                     api_url,
                     branch_token,
                     head_sha,
+                    branch_seat,
                 )
-                for entry, branch_token in zip(reviewers, identities)
+                for entry, branch_token, branch_seat in zip(reviewers, identities, seats)
             ]
             outcomes = [f.result() for f in futures]
     else:
         outcomes = []
-        # Every branch's slot, so `_branch_seat` can tell a lane from a slot two
-        # entries happen to claim. This path is exactly where that matters: a
-        # duplicate `token_env` is one of the reasons the run is sequential.
-        sibling_slots = [_slot_of(e) for e in reviewers]
         for index, entry in enumerate(reviewers):
             label = f"{entry.provider}/{entry.name}"
             slot = _slot_of(entry)
@@ -1386,7 +1409,7 @@ def _review_compare(
                     api_url=api_url,
                     actor=actor,
                     slot=slot,
-                    seat=_branch_seat(entry, slot, sibling_slots),
+                    seat=seats[index],
                     role=entry.role,
                 )
             except Exception as e:
