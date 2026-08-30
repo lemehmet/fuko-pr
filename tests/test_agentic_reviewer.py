@@ -28,6 +28,7 @@ from sidecar.reviewer.harness import (
 from sidecar.reviewer.prompt import (
     MAX_FINDINGS,
     MAX_PRIOR_COVERAGE,
+    PRIOR_STATUS_VOCABULARY,
     PriorCoverage,
     PriorFinding,
     PriorFindingStatus,
@@ -419,6 +420,46 @@ def test_prior_state_keeps_one_verdict_per_id():
 
     assert len(accepted) == 1
     assert accepted[0].reason == "first"
+
+
+def test_prior_state_drops_off_vocabulary_verdicts_on_minted_ids():
+    """The id gate and the verdict gate live on the same object."""
+    state = render_prior_state([_prior_finding()])
+
+    accepted = state.accepted_status(
+        [PriorFindingStatus(id="p1", status="partially_fixed", reason="halfway")]
+    )
+
+    assert accepted == []
+
+
+def test_prior_state_accepts_every_word_of_the_vocabulary():
+    findings = [_prior_finding(title=f"finding {n}") for n in range(3)]
+    state = render_prior_state(findings)
+
+    accepted = state.accepted_status(
+        [
+            PriorFindingStatus(id="p1", status="fixed"),
+            PriorFindingStatus(id="p2", status="still_open"),
+            PriorFindingStatus(id="p3", status="rejected"),
+        ]
+    )
+
+    assert {e.status for e in accepted} == PRIOR_STATUS_VOCABULARY
+
+
+def test_prior_state_ignored_verdict_does_not_consume_its_row():
+    """An ignored status line is absent, not this row's verdict."""
+    state = render_prior_state([_prior_finding()])
+
+    accepted = state.accepted_status(
+        [
+            PriorFindingStatus(id="p1", status="approved", reason="ignored"),
+            PriorFindingStatus(id="p1", status="fixed", reason="the real verdict"),
+        ]
+    )
+
+    assert [(e.status, e.reason) for e in accepted] == [("fixed", "the real verdict")]
 
 
 def test_prior_state_with_no_ids_accepts_nothing():

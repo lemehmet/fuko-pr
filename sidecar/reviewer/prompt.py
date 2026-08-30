@@ -54,6 +54,15 @@ meant to save. Open findings are deliberately NOT capped here -- they are small,
 and dropping one re-creates the 86% one-shot loss the ledger exists to fix.
 """
 
+PRIOR_STATUS_VOCABULARY = frozenset({"fixed", "still_open", "rejected"})
+"""The only verdicts a round may transition a prior finding with.
+
+Matched exactly, against the same three words the output schema asks for. No
+case folding and no synonyms: guessing what an unrecognised word meant is how a
+finding gets closed by a verdict nobody wrote, and the fail-safe reading of
+"unrecognised" is that the row keeps the state it already had.
+"""
+
 
 class AgenticFinding(BaseModel):
     """One finding the agent reports, before it becomes a Review Signal."""
@@ -166,7 +175,11 @@ class PriorFindingStatus(BaseModel):
             "'fixed' | 'still_open' | 'rejected', this round's verdict against "
             "the current head. Kept a plain str -- like ``confidence`` -- so an "
             "off-vocabulary word degrades to an ignored status line, not a "
-            "parse failure of the whole review."
+            "parse failure of the whole review. That degradation is enforced "
+            "rather than requested, on the same object as the id gate: "
+            ":meth:`PriorState.accepted_status` drops a verdict whose status is "
+            "outside :data:`PRIOR_STATUS_VOCABULARY`, so the row simply keeps "
+            "the state it had."
         ),
     )
     reason: str = Field(
@@ -260,16 +273,29 @@ class PriorState:
         return bool(self.text)
 
     def accepted_status(self, entries: Iterable[PriorFindingStatus]) -> list[PriorFindingStatus]:
-        """Keep only verdicts that address an id this round was handed.
+        """Keep only recognised verdicts that address an id this round was handed.
 
-        Drops entries whose id was never minted for this prompt -- including one
-        the model copied out of a finding's body rather than out of the id
-        column -- and keeps the first verdict per id, so a caller applying these
-        transitions never has to break a tie between two verdicts on one row.
+        Both halves of a transition are gated here, so a caller never has to
+        re-derive either:
+
+        * the **row** -- entries whose id was never minted for this prompt are
+          dropped, including one the model copied out of a finding's body rather
+          than out of the id column;
+        * the **verdict** -- a status outside :data:`PRIOR_STATUS_VOCABULARY` is
+          the "ignored status line" the field description promises. Dropping it
+          is the fail-safe direction: an un-transitioned finding stays open,
+          where inventing a meaning for an unrecognised word could close one.
+
+        An ignored line is treated as absent rather than as this row's verdict,
+        so a later well-formed entry on the same id is still accepted; past that,
+        the first verdict per id wins, and a caller applying these transitions
+        never has to break a tie between two verdicts on one row.
         """
         seen: set[str] = set()
         kept: list[PriorFindingStatus] = []
         for entry in entries:
+            if entry.status not in PRIOR_STATUS_VOCABULARY:
+                continue
             if entry.id in self.ids and entry.id not in seen:
                 seen.add(entry.id)
                 kept.append(entry)
