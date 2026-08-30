@@ -290,9 +290,19 @@ def next_round(repo: str, pr: int, seat: str) -> int:
     prompt a human is expected to audit.
 
     Returns 1 when persistence is disabled or the read fails, which is also the
-    value for a seat's first round -- both mean "nothing recorded before this",
-    and a round number is a label on rows that in the failure case are never
-    written.
+    value for a seat's first round -- both mean "nothing recorded before this".
+
+    That fallback is honest about losing a LABEL, not a row. Disabled
+    persistence writes nothing, so the number never lands anywhere. A transient
+    read failure is different: the caller reads the round before the review and
+    writes rows after it, so a store that recovers in between records this
+    round's findings under ``1`` while rounds ``1..N`` already exist. Nothing is
+    lost -- the rows are stored, carried and settled like any other -- but they
+    sort into the round-1 block of :func:`open_findings`, so that read's promise
+    that a finding keeps its minted id "unless something ahead of it closed"
+    does not survive this brownout. The alternative, refusing to record a round
+    whose label is uncertain, trades a wrong label for a lost finding, which is
+    the direction this table exists to avoid.
     """
     from .db import db
 

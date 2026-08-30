@@ -43,7 +43,7 @@ from .prompt import (
 )
 
 DEFAULT_SEAT = "default"
-"""Seat label for a branch that has no dedicated App identity.
+"""Seat label for a SOLO run that has no dedicated App identity.
 
 The runner derives a seat from the branch's ``token_env``
 (``FUKO_GITHUB_TOKEN_DORIAN`` -> ``dorian``), which a solo config or a laptop run
@@ -51,6 +51,13 @@ does not have. Such a deployment is genuinely ONE seat, so it gets one ledger
 rather than none: falling back to a constant keeps the single-seat case working,
 while the multi-seat fleets that motivated "every ledger is keyed per seat" all
 name their seats.
+
+"Solo" is the load-bearing word, and it is the runner that guarantees it: an A/B
+branch is ALWAYS handed an explicit seat, falling back to its configured label
+when it declares no ``token_env`` (:func:`sidecar.runner._branch_seat`). Without
+that, a compare run of identity-less entries would land every branch on this one
+constant and let one model close another's findings by ``fixed`` verdict -- so
+this default must never be how a multi-branch run gets its seat.
 """
 
 
@@ -108,14 +115,20 @@ def _within_checkout(root: Path, rel: str) -> Path | None:
     return root / normalized
 
 
-def _is_gone(root: Path, rel: str) -> bool:
+def _is_gone(root: Path, real_root: str, rel: str) -> bool:
     """Whether ``rel`` is a path this checkout provably no longer carries.
 
     Every uncertain answer is ``False``, which keeps the finding open:
 
     * a checkout root that is not a directory means nothing can be judged
       (the caller checks that once, before any path);
-    * a path that leaves the root is unjudgeable rather than absent;
+    * a path that leaves the root is unjudgeable rather than absent. Lexical
+      containment is not enough for that: ``lstat`` does not follow the FINAL
+      component but the kernel still resolves every PARENT, so ``link/gone.py``
+      under a ``link`` that points out of the tree is answered by the host
+      filesystem, and a host path that happens not to exist would retire a live
+      finding. So the parent is resolved through its symlinks first and the
+      answer is only trusted while it lands back inside ``real_root``;
     * only ``FileNotFoundError`` retires anything. This is why the check is
       ``lstat`` and not ``os.path.lexists``, which swallows every ``OSError``
       into the same ``False`` -- a name too long for the filesystem, a component
@@ -123,9 +136,17 @@ def _is_gone(root: Path, rel: str) -> bool:
       "deleted" and close a live finding;
     * ``lstat`` rather than ``stat``: a dangling symlink is still a path the tree
       carries, and a finding about one is not a finding about a deleted file.
+      Resolving only the PARENT is what keeps that true -- the last component is
+      never followed, so a broken link is still judged live.
     """
     target = _within_checkout(root, rel)
     if target is None:
+        return False
+    try:
+        parent = os.path.realpath(target.parent)
+    except (OSError, ValueError):
+        return False
+    if parent != real_root and not parent.startswith(real_root + os.sep):
         return False
     try:
         os.lstat(target)
@@ -151,14 +172,21 @@ def _retire_missing(
 
     A checkout root that is missing or is not a directory retires NOTHING: under
     a root that does not exist every path is "missing", which would silently
-    close the entire ledger the first time a caller passed a bad path.
+    close the entire ledger the first time a caller passed a bad path. The root
+    is resolved through its own symlinks once, here, so that every per-path
+    containment check compares like with like: on a host whose temp or work dir
+    is itself a link, a real parent under a lexical root would never match.
     """
     root = Path(checkout_root) if checkout_root else None
     if root is None or not root.is_dir():
         return list(stored)
+    try:
+        real_root = os.path.realpath(root)
+    except (OSError, ValueError):
+        return list(stored)
     live: list[StoredFinding] = []
     for row in stored:
-        if _is_gone(root, row.prior.file):
+        if _is_gone(root, real_root, row.prior.file):
             review_state.transition(row.id, "stale", f"file absent from the tree at {head_sha}")
         else:
             live.append(row)

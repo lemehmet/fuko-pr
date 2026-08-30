@@ -2166,6 +2166,30 @@ def test_run_pool_names_the_branchs_seat_in_the_backend_env(monkeypatch):
         assert seen[-1].get("FUKO_SEAT") == expected
 
 
+def test_an_identity_less_compare_branch_gets_its_own_seat():
+    """N branches must never share one ledger (#156).
+
+    A compare run whose entries declare no ``token_env`` is legal -- it is
+    exactly the config that falls back to the sequential path -- and every one of
+    those branches has ``slot`` None. Collapsing them onto the shared default
+    would let one model close a sibling's findings with a ``fixed`` verdict.
+    """
+    left = ReviewModel(provider="anthropic", name="claude-a")
+    right = ReviewModel(provider="openrouter", name="glm-b")
+
+    seats = {runner._branch_seat(e, runner._slot_of(e)) for e in (left, right)}
+
+    assert seats == {"anthropic/claude-a", "openrouter/glm-b"}
+    # A declared identity still wins: it is model-agnostic, so a promoted backup
+    # stays in the lane it rescued instead of opening one of its own.
+    slotted = ReviewModel(
+        provider="anthropic",
+        name="claude-a",
+        token_env="FUKO_GITHUB_TOKEN_DORIAN",
+    )
+    assert runner._branch_seat(slotted, runner._slot_of(slotted)) == "dorian"
+
+
 def test_primary_success_is_not_reported_as_a_promotion(monkeypatch):
     """End-to-end guard on the bug above: label == model means no promotion text."""
     patched = {}

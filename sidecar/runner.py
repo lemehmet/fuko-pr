@@ -334,6 +334,29 @@ def _slot_of(model: ModelConfig) -> str | None:
     return token_env.removeprefix("FUKO_GITHUB_TOKEN_").lower() or None
 
 
+def _branch_seat(entry: ModelConfig, slot: str | None) -> str:
+    """The ledger lane an A/B BRANCH occupies (#156), which is never shared.
+
+    ``slot`` whenever the branch declares an identity, because it is
+    model-agnostic: a promoted backup rescues its lane rather than opening one,
+    and swapping the model behind a slot keeps the state keyed to it.
+
+    The fallback exists because a *compare* run of entries with no ``token_env``
+    is legal -- :func:`_resolve_branch_identities` returns ``None`` for exactly
+    that config and the run goes sequential -- and those branches would otherwise
+    all land on :data:`sidecar.reviewer.ledger.DEFAULT_SEAT`. That is not the
+    single-seat case the default is for: it is N models sharing ONE ledger, where
+    each round is offered its siblings' findings and can close them with a
+    ``fixed`` verdict that needs no reason. One model silently retiring another's
+    finding is the precise loss #156 exists to stop, so a seatless branch is
+    named by its configured label instead. The cost is that renaming that
+    branch's model resets its ledger, which a slot would have survived -- worth
+    it against two models settling each other's rows, and avoidable by declaring
+    ``token_env``.
+    """
+    return slot or f"{entry.provider}/{entry.name}"
+
+
 #: The :class:`InvokeResult` fields that describe what a run spent (#152).
 _COST_FIELDS = (
     "input_tokens",
@@ -777,6 +800,7 @@ def _run_pool(
     api_url: str | None = None,
     actor: str | None = None,
     slot: str | None = None,
+    seat: str | None = None,
     role: str = "active",
 ) -> InvokeResult:
     """Run one review over ``pool`` with failover, normalizing the winner's output.
@@ -812,8 +836,13 @@ def _run_pool(
         # opening a lane of its own. Same rule the metrics row follows for
         # `slot`, and the reason this is set here instead of derived inside
         # `build_env` from `model.token_env` -- a backup has none.
-        if slot:
-            env[ENV_SEAT] = slot
+        #
+        # `seat` overrides `slot` for a compare branch that declares no identity
+        # (`_branch_seat`); a SOLO run passes neither and keeps the backend's
+        # DEFAULT_SEAT, which is the one case where "no slot" really is one lane.
+        lane = seat or slot
+        if lane:
+            env[ENV_SEAT] = lane
         if fresh_comment:
             env.update(_FRESH_COMMENT_ENV)
 
@@ -1172,6 +1201,7 @@ def _run_compare_branch(
             api_url=api_url,
             actor=actor,
             slot=slot,
+            seat=_branch_seat(entry, slot),
             role=entry.role,
         )
     except Exception as e:
@@ -1337,6 +1367,7 @@ def _review_compare(
                     api_url=api_url,
                     actor=actor,
                     slot=slot,
+                    seat=_branch_seat(entry, slot),
                     role=entry.role,
                 )
             except Exception as e:

@@ -323,6 +323,100 @@ def test_a_dangling_symlink_is_still_a_path_the_tree_carries(store, tmp_path):
     assert list(carry_in(REPO, PR, SEAT, str(tmp_path), "head2").rows) == ["p1"]
 
 
+def test_a_symlinked_parent_out_of_the_tree_is_unjudgeable(store, tmp_path):
+    """`lstat` follows PARENTS, so lexical containment alone answers off-host.
+
+    The checkout carries `link` -> somewhere outside it. Nothing under that link
+    is a path this tree can speak for, and the host's answer for
+    `outside/host-only.py` -- absent here -- must not retire the finding.
+    """
+    root = tmp_path / "checkout"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    (root / "link").symlink_to(outside, target_is_directory=True)
+    settle(
+        carry_in(REPO, PR, SEAT),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        findings=[_finding(file="link/host-only.py")],
+    )
+
+    carried = carry_in(REPO, PR, SEAT, str(root), "head2")
+
+    assert list(carried.rows) == ["p1"]
+    assert all(r["status"] == "open" for r in store.rows.values())
+
+
+def test_a_symlinked_parent_inside_the_tree_still_judges(store, tmp_path):
+    """The rule is 'lands outside', not 'is a link': an in-tree link still counts."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "alias").symlink_to(tmp_path / "src", target_is_directory=True)
+    settle(
+        carry_in(REPO, PR, SEAT),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        findings=[_finding(file="alias/deleted.py")],
+    )
+
+    carried = carry_in(REPO, PR, SEAT, str(tmp_path), "head2")
+
+    assert carried.rows == {}
+    assert [r["status"] for r in store.rows.values()] == ["stale"]
+
+
+def test_a_root_that_will_not_resolve_retires_nothing(store, tmp_path, monkeypatch):
+    """`carry_in` promises to be best-effort: a refusing filesystem is not evidence."""
+    (tmp_path / "src").mkdir()
+    settle(
+        carry_in(REPO, PR, SEAT),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        findings=[_finding(file="src/deleted.py")],
+    )
+    monkeypatch.setattr(
+        ledger.os.path, "realpath", lambda *a, **kw: (_ for _ in ()).throw(OSError("nope"))
+    )
+
+    carried = carry_in(REPO, PR, SEAT, str(tmp_path), "head2")
+
+    assert list(carried.rows) == ["p1"]
+    assert all(r["status"] == "open" for r in store.rows.values())
+
+
+def test_a_parent_that_will_not_resolve_keeps_its_finding(store, tmp_path, monkeypatch):
+    """Same promise one level down: the root resolved, this path's parent did not."""
+    (tmp_path / "src").mkdir()
+    settle(
+        carry_in(REPO, PR, SEAT),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        findings=[_finding(file="src/deleted.py")],
+    )
+    real = ledger.os.path.realpath
+    root = str(tmp_path)
+
+    def _only_the_root(path, *a, **kw):
+        if str(path) == root:
+            return real(path)
+        raise OSError("nope")
+
+    monkeypatch.setattr(ledger.os.path, "realpath", _only_the_root)
+
+    carried = carry_in(REPO, PR, SEAT, root, "head2")
+
+    assert list(carried.rows) == ["p1"]
+    assert all(r["status"] == "open" for r in store.rows.values())
+
+
 def _forbidden(name):
     def _fail(*a, **kw):
         raise AssertionError(f"Tier 1 must not call {name}")
