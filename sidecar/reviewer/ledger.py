@@ -46,18 +46,24 @@ DEFAULT_SEAT = "default"
 """Seat label for a SOLO run that has no dedicated App identity.
 
 The runner derives a seat from the branch's ``token_env``
-(``FUKO_GITHUB_TOKEN_DORIAN`` -> ``dorian``), which a solo config or a laptop run
-does not have. Such a deployment is genuinely ONE seat, so it gets one ledger
-rather than none: falling back to a constant keeps the single-seat case working,
-while the multi-seat fleets that motivated "every ledger is keyed per seat" all
-name their seats.
+(``FUKO_GITHUB_TOKEN_DORIAN`` -> ``dorian``), which a laptop run and many solo
+configs do not declare. Such a deployment is genuinely ONE seat, so it gets one
+ledger rather than none: falling back to a constant keeps the single-seat case
+working, while the multi-seat fleets that motivated "every ledger is keyed per
+seat" all name their seats.
 
-"Solo" is the load-bearing word, and it is the runner that guarantees it: an A/B
-branch is ALWAYS handed an explicit seat, falling back to its configured label
-when it declares no ``token_env`` (:func:`sidecar.runner._branch_seat`). Without
-that, a compare run of identity-less entries would land every branch on this one
-constant and let one model close another's findings by ``fixed`` verdict -- so
-this default must never be how a multi-branch run gets its seat.
+Reached only when there is NO name to prefer. A solo run that DOES declare a
+``token_env`` keeps its slot -- which is the better key, since the ledger then
+survives that config growing into an A/B run -- and only a solo run declaring
+none lands here.
+
+"Solo" is the other load-bearing word, and it is the runner that guarantees it:
+an A/B branch is ALWAYS handed an explicit seat, and
+:func:`sidecar.runner._branch_seats` guarantees those are distinct. Without that,
+a compare run whose branches share a name (or declare none) would land every
+branch on this one constant and let one model close another's findings by
+``fixed`` verdict -- so this default must never be how a multi-branch run gets
+its seat.
 """
 
 

@@ -869,9 +869,13 @@ def _run_pool(
         # `slot`, and the reason this is set here instead of derived inside
         # `build_env` from `model.token_env` -- a backup has none.
         #
-        # `seat` overrides `slot` for a compare branch that declares no identity
-        # (`_branch_seat`); a SOLO run passes neither and keeps the backend's
-        # DEFAULT_SEAT, which is the one case where "no slot" really is one lane.
+        # `seat` is the A/B branch's lane, resolved across the run by
+        # `_branch_seats`. A SOLO run passes no `seat` and keeps its `slot` when
+        # it has one -- better continuity, since the ledger survives the config
+        # later growing into an A/B run -- and reaches the backend's
+        # DEFAULT_SEAT only when it declares no `token_env` either. That is the
+        # one case where "no slot" really does mean one lane: a single branch has
+        # no sibling whose findings it could close.
         lane = seat or slot
         if lane:
             env[ENV_SEAT] = lane

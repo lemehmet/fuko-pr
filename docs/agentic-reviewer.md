@@ -76,9 +76,11 @@ The rules that matter:
   distinct. A branch keeps its slot when the slot is its own; when two branches
   project onto the same slot — the same `token_env`, or names differing only in
   case, since the slot is lowercased — both fall back to their `provider/name`
-  label, and a label two branches also share gains its index. A **solo** run is
-  the one case with no branch to collide with, so it keeps the constant
-  `default` seat. The trade on any fallback is that renaming that branch's model
+  label, and a label two branches also share gains its index. A **solo** run has
+  no branch to collide with, so it simply keeps its own slot when it declares a
+  `token_env` — which also means its ledger survives the config later growing
+  into an A/B run — and falls back to the constant `default` seat only when it
+  declares none. The trade on any fallback is that renaming that branch's model
   resets its ledger, which a slot would have survived; giving each branch its
   own distinctly-named `token_env` avoids it.
 - **Only the agent closes a finding**, with two exceptions in fuko's own hands:
