@@ -149,6 +149,72 @@ def test_settling_closes_only_what_the_round_settled(store):
     assert store.touched == [carried.rows["p2"]]
 
 
+def test_re_reporting_a_carried_finding_touches_it_instead_of_duplicating_it(store):
+    """A round that re-reports rather than settles must not mint a second row.
+
+    Two open rows for one claim compound per round, and past the read cap the
+    rows cut are the NEWEST -- never rendered, never minted an id, never touched,
+    so they age out unseen. That is this module's own loss arriving by volume.
+    """
+    settle(
+        carry_in(REPO, PR, SEAT),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        findings=[_finding(file="src/a.py", title="leaks the handle")],
+    )
+    carried = carry_in(REPO, PR, SEAT)
+
+    outcome = settle(
+        carried,
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head2",
+        findings=[
+            # Same claim, re-reported instead of settled -- and cased differently,
+            # since the match is on the claim, not on the model's capitalisation.
+            _finding(file="src/a.py", title="Leaks The Handle"),
+            _finding(file="src/b.py", title="drops the error"),
+        ],
+    )
+
+    assert outcome == ledger.Settlement(reasserted=1, recorded=1, deduped=1)
+    assert sorted(f.prior.title for f in store.open_findings(REPO, PR, SEAT)) == [
+        "drops the error",
+        "leaks the handle",
+    ]
+    # Touched, not left to age out: a re-report is evidence a round looked at it.
+    assert store.touched == [carried.rows["p1"]]
+
+
+def test_a_settled_row_does_not_suppress_the_same_claim_recorded_again(store):
+    """Dedup keys on rows this round LEFT OPEN, so a closed one cannot swallow a write."""
+    settle(
+        carry_in(REPO, PR, SEAT),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        findings=[_finding(file="src/a.py", title="leaks the handle")],
+    )
+    carried = carry_in(REPO, PR, SEAT)
+
+    outcome = settle(
+        carried,
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head2",
+        prior_status=[PriorFindingStatus(id="p1", status="fixed", reason="closed in 9f2a1c")],
+        findings=[_finding(file="src/a.py", title="leaks the handle")],
+    )
+
+    assert outcome == ledger.Settlement(closed=1, recorded=1)
+    assert [f.prior.title for f in store.open_findings(REPO, PR, SEAT)] == ["leaks the handle"]
+
+
 def test_rejected_without_a_reason_does_not_close_a_row(store):
     """A seat must not close its predecessor's finding by assertion alone."""
     settle(

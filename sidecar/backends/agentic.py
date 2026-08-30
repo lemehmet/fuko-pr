@@ -865,7 +865,8 @@ class AgenticBackend:
             print(
                 f"fuko: review-state seat {seat} round {carried.round}: carried "
                 f"{len(carried.rows)}, closed {settlement.closed}, re-asserted "
-                f"{settlement.reasserted}, recorded {settlement.recorded}",
+                f"{settlement.reasserted}, recorded {settlement.recorded}, "
+                f"deduped {settlement.deduped}",
                 file=sys.stderr,
             )
         with self._lock:

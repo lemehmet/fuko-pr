@@ -87,15 +87,20 @@ class CarriedState:
 class Settlement:
     """What one round's settle pass actually changed, for the log line.
 
-    ``reasserted`` counts both the explicit ``still_open`` verdicts and the
-    ``rejected``-without-a-reason ones this module downgrades to them, because
-    the row's outcome is identical: it stays open, with its ``updated_at``
-    refreshed to say a round looked at it against this head.
+    ``reasserted`` counts every row whose outcome was "stays open, with its
+    ``updated_at`` refreshed to say a round looked at it against this head": the
+    explicit ``still_open`` verdicts, the ``rejected``-without-a-reason ones this
+    module downgrades to them, and the rows a round re-reported as a new finding
+    instead of settling. All three are the same outcome, so they are one number.
+
+    ``deduped`` counts published findings that were NOT recorded because they
+    merely restated such a row -- see :func:`settle`.
     """
 
     closed: int = 0
     reasserted: int = 0
     recorded: int = 0
+    deduped: int = 0
 
 
 def _within_checkout(root: Path, rel: str) -> Path | None:
@@ -193,6 +198,17 @@ def _retire_missing(
     return live
 
 
+def _anchor(file: str, title: str) -> tuple[str, str]:
+    """The key two claims are "the same finding" under.
+
+    Deliberately coarse -- file plus case-folded title, not the body -- because
+    it is only ever used to decide whether a round RE-REPORTED something it was
+    already holding. A near-miss costs a duplicate row (noise); it can never
+    close anything, so the usual asymmetry does not apply here.
+    """
+    return (file.strip(), title.strip().casefold())
+
+
 def carry_in(
     repo: str, pr: int, seat: str, checkout_root: str = "", head_sha: str = ""
 ) -> CarriedState:
@@ -252,6 +268,20 @@ def settle(
     dropped off-vocabulary statuses and any id this round was not handed, so the
     fenced channel cannot address a row it was never shown.
 
+    A round may also RE-REPORT a finding it was handed instead of settling it --
+    the prompt asks it to settle each carried row, and nothing enforces that. A
+    plain record would then leave two open rows for one claim, both offered next
+    round, with settling one still leaving the other. Duplicates compound per
+    round, and the compounding has an end: past :data:`review_state.
+    MAX_OPEN_FINDINGS` the read keeps the oldest rows, so the ones cut are the
+    newest -- never rendered, never minted an id, never touched, and so ageing
+    out of the retention window unseen. That is this module's own loss arriving
+    by volume, so a published finding whose ``(file, title)`` matches a carried
+    row this round left open is treated as a re-assertion of that row: the row
+    is touched (a round did look at it against this head) and the finding is not
+    recorded again. Matching stays coarse on purpose -- it only ever suppresses
+    a WRITE, never a close, so a near-miss costs one duplicate row.
+
     ``findings`` must be the findings the round actually PUBLISHED, not
     everything the model returned. The 86% loss this ledger repairs is about
     claims a developer saw and did not act on; carrying a low-confidence finding
@@ -263,15 +293,37 @@ def settle(
     """
     touch: list[str] = []
     closed = 0
+    settled: set[str] = set()
     for entry in carried.state.accepted_status(prior_status):
         row_id = carried.rows.get(entry.id)
         if row_id is None:
             continue
         reason = entry.reason.strip()
         if entry.status == "fixed" or (entry.status == "rejected" and reason):
+            settled.add(entry.id)
             closed += int(review_state.transition(row_id, entry.status, reason))
         else:
             touch.append(row_id)
+    # Rows this round leaves open, keyed by claim. A verdict that MEANT to close
+    # is excluded even if the write failed: the row is then still open, so the
+    # worst case is recording the duplicate anyway -- the noise direction.
+    still_open = {
+        _anchor(prior.file, prior.title): carried.rows[minted]
+        for minted, prior in carried.state.ids.items()
+        if minted in carried.rows and minted not in settled
+    }
+    fresh: list[AgenticFinding] = []
+    for finding in findings:
+        row_id = still_open.get(_anchor(finding.file, finding.title))
+        if row_id is None:
+            fresh.append(finding)
+        elif row_id not in touch:
+            touch.append(row_id)
     review_state.touch_findings(touch)
-    recorded = review_state.record_findings(repo, pr, seat, carried.round, head_sha, findings)
-    return Settlement(closed=closed, reasserted=len(touch), recorded=recorded)
+    recorded = review_state.record_findings(repo, pr, seat, carried.round, head_sha, fresh)
+    return Settlement(
+        closed=closed,
+        reasserted=len(touch),
+        recorded=recorded,
+        deduped=len(findings) - len(fresh),
+    )
