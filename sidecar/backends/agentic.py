@@ -866,9 +866,17 @@ class AgenticBackend:
                 f"fuko: review-state seat {seat} round {carried.round}: carried "
                 f"{len(carried.rows)}, closed {settlement.closed}, re-asserted "
                 f"{settlement.reasserted}, recorded {settlement.recorded}, "
-                f"deduped {settlement.deduped}",
+                f"deduped {len(settlement.deduped)}",
                 file=sys.stderr,
             )
+            # Named, not just counted: a suppressed write is the one settle
+            # outcome the store cannot show afterwards, since the surviving row
+            # keeps the earlier body.
+            for claim in settlement.deduped:
+                print(
+                    f"fuko: review-state seat {seat} re-asserted, not re-recorded: {claim}",
+                    file=sys.stderr,
+                )
         with self._lock:
             key = (pr.url, model_name, _identity(token))
             while len(self._pending) >= _MAX_PENDING and key not in self._pending:

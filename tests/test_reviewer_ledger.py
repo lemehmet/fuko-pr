@@ -180,7 +180,11 @@ def test_re_reporting_a_carried_finding_touches_it_instead_of_duplicating_it(sto
         ],
     )
 
-    assert outcome == ledger.Settlement(reasserted=1, recorded=1, deduped=1)
+    # Named, not counted: the surviving row keeps the EARLIER body, so which
+    # claim was suppressed is the one thing the store cannot answer afterwards.
+    assert outcome == ledger.Settlement(
+        reasserted=1, recorded=1, deduped=("src/a.py: Leaks The Handle",)
+    )
     assert sorted(f.prior.title for f in store.open_findings(REPO, PR, SEAT)) == [
         "drops the error",
         "leaks the handle",

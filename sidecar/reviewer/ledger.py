@@ -93,14 +93,18 @@ class Settlement:
     module downgrades to them, and the rows a round re-reported as a new finding
     instead of settling. All three are the same outcome, so they are one number.
 
-    ``deduped`` counts published findings that were NOT recorded because they
-    merely restated such a row -- see :func:`settle`.
+    ``deduped`` names the published findings that were NOT recorded because they
+    restated such a row -- see :func:`settle`. It is the claims and not a count
+    because suppressing a write is the one thing this module does that a reader
+    cannot reconstruct from the store afterwards: the row that survived carries
+    the EARLIER body, so a silent count would leave "which claim did this round
+    decide it already had?" unanswerable. The caller logs them.
     """
 
     closed: int = 0
     reasserted: int = 0
     recorded: int = 0
-    deduped: int = 0
+    deduped: tuple[str, ...] = ()
 
 
 def _within_checkout(root: Path, rel: str) -> Path | None:
@@ -279,8 +283,22 @@ def settle(
     by volume, so a published finding whose ``(file, title)`` matches a carried
     row this round left open is treated as a re-assertion of that row: the row
     is touched (a round did look at it against this head) and the finding is not
-    recorded again. Matching stays coarse on purpose -- it only ever suppresses
-    a WRITE, never a close, so a near-miss costs one duplicate row.
+    recorded again.
+
+    ``(file, title)`` is therefore this module's DEFINITION of claim identity,
+    not a guess at one: two findings naming the same file under the same headline
+    are one claim here, and a round that means to record a distinct claim has to
+    title it distinctly. That definition has a cost, and it is the only one in
+    this module that runs toward loss rather than noise -- a genuinely new claim
+    sharing a file and a case-folded title with a carried row is not written, and
+    the row that survives carries the EARLIER body. It is accepted because the
+    alternative is worse in kind, not in degree: keying on the body as well would
+    miss every reworded re-report, which is most of them, and restore the
+    unbounded growth above, whose end state is rows cut, unreachable and aged out
+    unseen. A miss here costs one round's phrasing of a claim that is still open,
+    still titled the same and still in the next prompt; a miss there costs the
+    claim. Every suppression is named in :attr:`Settlement.deduped` and logged by
+    the caller, so it is never the silent kind.
 
     ``findings`` must be the findings the round actually PUBLISHED, not
     everything the model returned. The 86% loss this ledger repairs is about
@@ -313,11 +331,14 @@ def settle(
         if minted in carried.rows and minted not in settled
     }
     fresh: list[AgenticFinding] = []
+    deduped: list[str] = []
     for finding in findings:
         row_id = still_open.get(_anchor(finding.file, finding.title))
         if row_id is None:
             fresh.append(finding)
-        elif row_id not in touch:
+            continue
+        deduped.append(f"{finding.file}: {finding.title}")
+        if row_id not in touch:
             touch.append(row_id)
     review_state.touch_findings(touch)
     recorded = review_state.record_findings(repo, pr, seat, carried.round, head_sha, fresh)
@@ -325,5 +346,5 @@ def settle(
         closed=closed,
         reasserted=len(touch),
         recorded=recorded,
-        deduped=len(findings) - len(fresh),
+        deduped=tuple(deduped),
     )
