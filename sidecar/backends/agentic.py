@@ -51,9 +51,11 @@ from ..reviewer.checkout import (
 from ..reviewer.harness import (
     DEFAULT_MAX_TURNS,
     HarnessNotAvailableError,
+    HarnessResult,
     check_auth,
     is_auth_failure,
     run_review,
+    usage_tokens,
 )
 from ..reviewer.prompt import (
     MAX_FINDINGS,
@@ -85,7 +87,30 @@ _CHANNEL = "agentic-review"
 _DUMP_LOCK = threading.Lock()
 
 
-def _failure_result(verdict: str, message: str = "", *, throttled: bool = False) -> InvokeResult:
+def _run_costs(result: HarnessResult | None) -> dict:
+    """The token/cost fields one harness run contributes to its result (#152).
+
+    Kept as a single mapping splatted into :class:`InvokeResult` so every return
+    path -- success, parse failure, timeout, throttle -- carries the accounting
+    the same way. ``None`` (a failure that never reached the harness) yields the
+    all-unreported mapping, which is the honest value: no run, no bill.
+    """
+    if result is None:
+        return {}
+    return {
+        **usage_tokens(result.usage),
+        "cost_usd": result.cost_usd,
+        "turns": result.turns,
+    }
+
+
+def _failure_result(
+    verdict: str,
+    message: str = "",
+    *,
+    throttled: bool = False,
+    costs: dict | None = None,
+) -> InvokeResult:
     """Build EVERY failure return, so the receipt invariants cannot drift apart.
 
     Three properties, each of which was independently violated by at least one
@@ -105,6 +130,12 @@ def _failure_result(verdict: str, message: str = "", *, throttled: bool = False)
     The returncode is derived from the verdict rather than passed separately:
     they disagreed in an earlier draft, which is exactly the drift this exists
     to prevent.
+
+    ``costs`` (from :func:`_run_costs`) is what the failed run still spent. A
+    failure is not a refund -- a run killed at the timeout, or one that walked
+    its whole turn budget and then emitted unparseable output, is among the most
+    expensive shapes this fleet produces -- so the accounting rides the failure
+    returns too, whenever the harness got far enough to report it.
     """
     body = _flatten_for_log(message)[:460]
     return InvokeResult(
@@ -112,6 +143,7 @@ def _failure_result(verdict: str, message: str = "", *, throttled: bool = False)
         detail=f"{verdict}: {body}" if body else verdict,
         throttled=throttled,
         channels={_CHANNEL: verdict},
+        **(costs or {}),
     )
 
 
@@ -541,6 +573,11 @@ class AgenticBackend:
         :func:`sidecar.status.fuko_states` reads as "not reported", which it cannot
         tell from a dead channel, so a ``done`` receipt with no channels would read
         as a clean pass even if the one channel had failed.
+
+        Every path that reached the harness also carries what the run spent --
+        tokens, dollars, turns (#152) -- lifted from the CLI's terminal event by
+        :func:`_run_costs`. This is the only backend that can report it today;
+        PR-Agent exposes no equivalent feed and leaves the fields null.
         """
         # Must stay in lockstep with normalize_output's fallback: this value
         # fingerprints the stash key, so any divergence makes a completed review
@@ -736,6 +773,7 @@ class AgenticBackend:
                     f"failed:exit {result.returncode}",
                     f"agent could not authenticate in {auth} mode"
                     + (f": {auth_tail}" if auth_tail else ""),
+                    costs=_run_costs(result),
                 )
             # FLATTENED, for the same reason the runner flattens progress
             # arguments (27011698) and the dump prefixes its lines: this text
@@ -754,7 +792,9 @@ class AgenticBackend:
                 verdict = f"throttled:exit {result.returncode}"
             else:
                 verdict = f"failed:exit {result.returncode}"
-            return _failure_result(verdict, stderr_tail, throttled=throttled)
+            return _failure_result(
+                verdict, stderr_tail, throttled=throttled, costs=_run_costs(result)
+            )
         try:
             review = parse_review(result.text)
         except ReviewParseError as e:
@@ -771,7 +811,7 @@ class AgenticBackend:
             # (CodeRabbit, #147) — and the whole point of that contract is
             # that a reader can tell a crash from a timeout from a throttle
             # without parsing prose.
-            return _failure_result("failed:exit 1", str(e))
+            return _failure_result("failed:exit 1", str(e), costs=_run_costs(result))
 
         # Case/whitespace-normalized: `confidence` is deliberately a free-form
         # str so an off-vocabulary value degrades to filtering rather than
@@ -807,7 +847,10 @@ class AgenticBackend:
         # one path where the difference bites: a receipt finalized `done` with no
         # channels reads as a clean pass even if the channel had in fact failed.
         return InvokeResult(
-            returncode=0, detail=f"{len(kept)} findings", channels={_CHANNEL: "done"}
+            returncode=0,
+            detail=f"{len(kept)} findings",
+            channels={_CHANNEL: "done"},
+            **_run_costs(result),
         )
 
     def normalize_output(

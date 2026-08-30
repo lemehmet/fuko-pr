@@ -2,9 +2,16 @@
 
 One row per model branch per review round (see ``migrations/004``): which
 provider+model ran under which slot, how long it took, how many failover
-attempts it needed, how it ended, and how many findings it produced. This is
+attempts it needed, how it ended, how many findings it produced -- and, for a
+backend whose driver reports it, what it spent (``migrations/008``). This is
 the evidence base for promoting experimental models to known-good and for
-comparing slots by cost once token/cost capture exists.
+comparing slots by cost.
+
+The token and cost figures are nullable end to end and stay that way: only the
+agentic backend has a usage feed, so a pr-agent row -- and every row written
+before #152 -- reports ``NULL``, not ``0``. The aggregates below preserve that
+distinction (a group with nothing measured sums to ``None``), because a zero
+here would read as "these reviews were free".
 
 Best-effort by design, mirroring :mod:`sidecar.circuit_breaker`: with no
 Postgres configured (``FUKO_DATABASE_URL`` unset) these functions degrade to
@@ -21,6 +28,41 @@ def _enabled() -> bool:
     return bool(settings.database_url)
 
 
+#: The cost aggregates every per-group summary selects, as its trailing columns.
+#:
+#: Summed WITHOUT ``coalesce``: ``sum()`` over an all-NULL group is NULL, and
+#: that is the answer we want to keep. Wrapping these in ``coalesce(.., 0)`` --
+#: as the neighbouring ``findings`` sum legitimately does, findings being a
+#: count everyone can produce -- would render a fleet of unmeasured pr-agent
+#: runs as a fleet that cost nothing.
+_COST_AGGREGATES = (
+    "sum(input_tokens), sum(output_tokens), sum(cache_read_tokens), "
+    "sum(cache_write_tokens), sum(cost_usd), sum(turns)"
+)
+
+
+def _int_or_none(value) -> int | None:
+    """Coerce one aggregate to ``int``, preserving "nothing was measured"."""
+    return None if value is None else int(value)
+
+
+def _costs(row) -> dict:
+    """Map the trailing :data:`_COST_AGGREGATES` columns of a row onto their keys.
+
+    ``cost_usd`` is a ``NUMERIC`` and comes back as ``Decimal``, which does not
+    survive JSON serialization; it is floated at its stored scale.
+    """
+    input_tokens, output_tokens, cache_read, cache_write, cost_usd, turns = row
+    return {
+        "input_tokens": _int_or_none(input_tokens),
+        "output_tokens": _int_or_none(output_tokens),
+        "cache_read_tokens": _int_or_none(cache_read),
+        "cache_write_tokens": _int_or_none(cache_write),
+        "cost_usd": None if cost_usd is None else round(float(cost_usd), 4),
+        "turns": _int_or_none(turns),
+    }
+
+
 def record(
     repo: str,
     pr: int,
@@ -35,6 +77,12 @@ def record(
     detail: str = "",
     backend: str = "pr-agent",
     endpoint: str = "",
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cache_read_tokens: int | None = None,
+    cache_write_tokens: int | None = None,
+    cost_usd: float | None = None,
+    turns: int | None = None,
 ) -> None:
     """Insert one review-run row (no-op when persistence is disabled).
 
@@ -44,6 +92,10 @@ def record(
     entry was configured to reach (see ``RunReceipt.endpoint``); it defaults to
     ``""`` -- the SDK-default-endpoint value the backfill applied -- so an
     omitting caller stays consistent with pre-existing rows.
+
+    The token/cost arguments (#152) default to ``None`` for the same reason the
+    columns are nullable: a caller that cannot measure a figure must write "not
+    measured", never a zero that would later be read as "free".
     """
     if not _enabled():
         return
@@ -53,8 +105,9 @@ def record(
         conn.execute(
             "INSERT INTO review_runs "
             "(repo, pr, provider, model, slot, duration_s, attempts, outcome, findings, "
-            "detail, backend, endpoint) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "detail, backend, endpoint, input_tokens, output_tokens, cache_read_tokens, "
+            "cache_write_tokens, cost_usd, turns) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 repo,
                 pr,
@@ -68,6 +121,12 @@ def record(
                 (detail or "")[:500],
                 backend,
                 endpoint,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+                cost_usd,
+                turns,
             ),
         )
 
@@ -78,6 +137,8 @@ def slot_summary(repo: str | None = None, days: int = 30) -> list[dict]:
     The slot view shows lane health independent of which model currently
     occupies it (slots are model-agnostic by design); rows without a slot
     (solo configs, rescued-by-backup rows keep their branch slot) are skipped.
+    Token and cost totals ride along and are ``None`` for a lane whose runs
+    reported none (see the module docstring).
     """
     if not _enabled():
         return []
@@ -94,7 +155,8 @@ def slot_summary(repo: str | None = None, days: int = 30) -> list[dict]:
             "SELECT slot, count(*), "
             "count(*) FILTER (WHERE outcome = 'ok'), "
             "count(*) FILTER (WHERE outcome != 'ok'), "
-            "avg(duration_s), coalesce(sum(findings), 0) "
+            "avg(duration_s), coalesce(sum(findings), 0), "
+            f"{_COST_AGGREGATES} "
             f"FROM review_runs {where} "
             "GROUP BY slot ORDER BY slot",
             params,
@@ -107,8 +169,9 @@ def slot_summary(repo: str | None = None, days: int = 30) -> list[dict]:
             "not_ok": not_ok,
             "avg_duration_s": round(float(avg_duration), 1) if avg_duration is not None else None,
             "findings": int(findings),
+            **_costs(costs),
         }
-        for slot, runs, ok, not_ok, avg_duration, findings in rows
+        for slot, runs, ok, not_ok, avg_duration, findings, *costs in rows
     ]
 
 
@@ -170,7 +233,9 @@ def summary(repo: str | None = None, days: int = 30) -> list[dict]:
     """Aggregate runs per provider+model over the last ``days`` (empty when disabled).
 
     The grouping the whole exercise exists for: runs, outcomes, average
-    duration, and total findings per model -- filtered to one repo when given.
+    duration, total findings, and what they spent per model -- filtered to one
+    repo when given. Token and cost totals are ``None`` for a model whose runs
+    reported none (see the module docstring).
     """
     if not _enabled():
         return []
@@ -187,7 +252,8 @@ def summary(repo: str | None = None, days: int = 30) -> list[dict]:
             "SELECT provider, model, count(*), "
             "count(*) FILTER (WHERE outcome = 'ok'), "
             "count(*) FILTER (WHERE outcome != 'ok'), "
-            "avg(duration_s), coalesce(sum(findings), 0) "
+            "avg(duration_s), coalesce(sum(findings), 0), "
+            f"{_COST_AGGREGATES} "
             f"FROM review_runs {where} "
             "GROUP BY provider, model ORDER BY count(*) DESC",
             params,
@@ -201,6 +267,7 @@ def summary(repo: str | None = None, days: int = 30) -> list[dict]:
             "not_ok": not_ok,
             "avg_duration_s": round(float(avg_duration), 1) if avg_duration is not None else None,
             "findings": int(findings),
+            **_costs(costs),
         }
-        for provider, model, runs, ok, not_ok, avg_duration, findings in rows
+        for provider, model, runs, ok, not_ok, avg_duration, findings, *costs in rows
     ]

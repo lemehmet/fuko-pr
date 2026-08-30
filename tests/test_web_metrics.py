@@ -133,6 +133,44 @@ def test_view_with_unreachable_database_renders_notice(monkeypatch):
     assert "Database unreachable" in resp.text
 
 
+def test_view_renders_token_and_cost_columns(monkeypatch):
+    """#152: fresh input beside cached input is the prompt-caching answer, and
+    the dollar total is the number seats were being priced without."""
+    measured = dict(
+        _SUMMARY[0],
+        input_tokens=29_000,
+        output_tokens=4_100,
+        cache_read_tokens=339_000,
+        cache_write_tokens=12_000,
+        cost_usd=14.82,
+    )
+    _, client = _wire(monkeypatch, summary=[measured], slots=[dict(_SLOTS[0], **measured)])
+    page = client.get("/ui/metrics").text
+    assert "29.0k" in page and "339.0k" in page and "$14.82" in page
+
+
+def test_view_renders_unmeasured_costs_as_a_dash(monkeypatch):
+    """A pr-agent lane reports no cost; rendering 0 would call it free."""
+    import re
+
+    _, client = _wire(monkeypatch, summary=_SUMMARY, slots=_SLOTS)
+    page = client.get("/ui/metrics").text
+    # The `$` column header is always there; no row may carry an amount.
+    assert re.search(r"\$[\d.,]", page) is None
+    assert '<td class="num">—</td>' in page
+
+
+def test_token_formatting_scales_without_losing_the_zero_case():
+    from sidecar.web.metrics import _tokens
+
+    assert _tokens(None) == "—"
+    assert _tokens(0) == "0"
+    assert _tokens(999) == "999"
+    assert _tokens(29_000) == "29.0k"
+    assert _tokens(4_068_000) == "4.1M"
+    assert _tokens(2_500_000_000) == "2.5G"
+
+
 def test_view_renders_dash_for_absent_pr(monkeypatch):
     row = dict(_RECENT[0], pr=None)
     _, client = _wire(monkeypatch, recent=[row])

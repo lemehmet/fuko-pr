@@ -41,6 +41,12 @@ class InvokeResult:
     tolerance from becoming a blind spot: it records each tool's own terminal
     outcome, so "the branch succeeded" and "every channel the branch produces
     ran" stay separable facts (#108).
+
+    The token/cost fields are what the run actually spent (#152), reported by
+    backends whose driver exposes an accounting feed. They are ``None`` -- never
+    ``0`` -- for a backend that has none, and individually ``None`` when one
+    figure was not reported: a zero would read as "this review was free", which
+    is the one wrong answer to every question these fields exist to answer.
     """
 
     returncode: int
@@ -51,6 +57,17 @@ class InvokeResult:
     #: Base URL the answering pool entry was configured to reach (see
     #: :attr:`sidecar.signals.RunReceipt.endpoint`); ``None`` = SDK default.
     endpoint: str | None = None
+    #: Fresh (uncached) input tokens; excludes the two cache figures below.
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    #: Cached input served from, and written to, the provider's prompt cache.
+    #: Their ratio against ``input_tokens`` is what tells a gateway that honours
+    #: prompt caching from one that silently re-sends the context every turn --
+    #: a ~25x difference in the bill for the same review.
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    cost_usd: float | None = None
+    turns: int | None = None
 
 
 @runtime_checkable

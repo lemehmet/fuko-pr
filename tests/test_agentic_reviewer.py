@@ -23,6 +23,7 @@ from sidecar.reviewer.harness import (
     check_auth,
     is_auth_failure,
     run_review,
+    usage_tokens,
 )
 from sidecar.reviewer.prompt import (
     MAX_FINDINGS,
@@ -431,11 +432,16 @@ def test_run_review_missing_binary(monkeypatch, tmp_path):
         run_review("p", tmp_path, cwd=tmp_path, model="m", env={}, timeout=5)
 
 
-def _fake_drive(seen, text='{"findings": []}', returncode=0, timed_out=False):
+def _fake_drive(seen, text='{"findings": []}', returncode=0, timed_out=False, **outcome):
     def fake(cmd, *, prompt, cwd, env, timeout, emit):
         seen["cmd"] = cmd
         seen["kwargs"] = {"prompt": prompt, "cwd": cwd, "env": env, "timeout": timeout}
-        return returncode, text, "", timed_out
+        return (
+            returncode,
+            harness_mod._StreamOutcome(text=text, saw_result=True, **outcome),
+            "",
+            timed_out,
+        )
 
     return fake
 
@@ -535,8 +541,8 @@ def test_consume_stream_emits_progress_and_lifts_result():
         json.dumps({"type": "result", "subtype": "success", "result": '{"findings": []}'}),
     ]
     emitted = []
-    text, saw = harness_mod._consume_stream(events, lambda t, n, a: emitted.append((t, n, a)))
-    assert saw is True and text == '{"findings": []}'
+    outcome = harness_mod._consume_stream(events, lambda t, n, a: emitted.append((t, n, a)))
+    assert outcome.saw_result is True and outcome.text == '{"findings": []}'
     # pattern outranks path for display — the Grep line should show what it
     # searched for, and garbage lines must not have derailed the fold.
     assert emitted == [(1, "Grep", "foo")]
@@ -565,8 +571,102 @@ def test_consume_stream_falls_back_to_last_assistant_text():
             }
         ),
     ]
-    text, saw = harness_mod._consume_stream(events, lambda *a: None)
-    assert saw is False and text == '{"findings": []}'
+    outcome = harness_mod._consume_stream(events, lambda *a: None)
+    assert outcome.saw_result is False and outcome.text == '{"findings": []}'
+    # No terminal event = no accounting. NOT zeros: an unmeasured run must stay
+    # distinguishable from a free one all the way down to the column.
+    assert (outcome.usage, outcome.cost_usd, outcome.turns) == (None, None, None)
+
+
+def test_consume_stream_captures_usage_and_cost():
+    """#152: the terminal event's accounting was parsed and thrown away, which
+    is why no cost question about the fleet could be answered at all."""
+    events = [
+        json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "result": "{}",
+                "num_turns": 57,
+                "total_cost_usd": 1.2345,
+                "usage": {
+                    "input_tokens": 29_000,
+                    "output_tokens": 4_100,
+                    "cache_read_input_tokens": 339_000,
+                    "cache_creation_input_tokens": 12_000,
+                },
+            }
+        ),
+    ]
+    outcome = harness_mod._consume_stream(events, lambda *a: None)
+    assert outcome.cost_usd == 1.2345 and outcome.turns == 57
+    assert usage_tokens(outcome.usage) == {
+        "input_tokens": 29_000,
+        "output_tokens": 4_100,
+        # The pair that answers the ~25x prompt-caching question: cached input is
+        # reported ALONGSIDE input_tokens, never inside it.
+        "cache_read_tokens": 339_000,
+        "cache_write_tokens": 12_000,
+    }
+
+
+def test_consume_stream_captures_usage_even_when_the_result_text_is_unusable():
+    """Schema drift that costs us the final message must not also cost us the
+    bill: the tokens were spent either way."""
+    events = [
+        json.dumps(
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "fallback"}]}}
+        ),
+        json.dumps({"type": "result", "result": None, "usage": {"input_tokens": 7}}),
+    ]
+    outcome = harness_mod._consume_stream(events, lambda *a: None)
+    assert outcome.saw_result is False and outcome.text == "fallback"
+    assert usage_tokens(outcome.usage)["input_tokens"] == 7
+
+
+def test_usage_tokens_degrades_field_by_field():
+    """Best-effort per FIELD, not per event: one garbled count must not discard
+    the counts beside it, and a bogus one must read as None, never as 0."""
+    assert usage_tokens(None)["input_tokens"] is None
+    assert usage_tokens("not a mapping")["output_tokens"] is None
+    partial = usage_tokens(
+        {"input_tokens": 10, "output_tokens": "many", "cache_read_input_tokens": -1}
+    )
+    assert partial == {
+        "input_tokens": 10,
+        "output_tokens": None,
+        "cache_read_tokens": None,
+        "cache_write_tokens": None,
+    }
+    # bool is an int subclass; True must not be recorded as one token.
+    assert usage_tokens({"input_tokens": True})["input_tokens"] is None
+
+
+def test_run_review_carries_the_runs_accounting(monkeypatch, tmp_path):
+    """The harness result is where cost leaves the CLI boundary (#152)."""
+    seen = {}
+    monkeypatch.setattr(harness_mod.shutil, "which", lambda *a, **k: "/bin/claude")
+    monkeypatch.setattr(
+        harness_mod,
+        "_drive",
+        _fake_drive(seen, usage={"input_tokens": 5}, cost_usd=0.5, turns=3),
+    )
+    result = run_review("p", tmp_path, cwd=tmp_path, model="m", env={}, timeout=9)
+    assert result.usage == {"input_tokens": 5} and result.cost_usd == 0.5 and result.turns == 3
+
+
+def test_run_review_timeout_still_reports_what_it_spent(monkeypatch, tmp_path):
+    """A killed run is the most expensive shape this fleet produces; a failure
+    is not a refund, so whatever the stream did report still rides back."""
+    seen = {}
+    monkeypatch.setattr(harness_mod.shutil, "which", lambda *a, **k: "/bin/claude")
+    monkeypatch.setattr(
+        harness_mod,
+        "_drive",
+        _fake_drive(seen, text="", returncode=-9, timed_out=True, cost_usd=2.0),
+    )
+    result = run_review("p", tmp_path, cwd=tmp_path, model="m", env={}, timeout=9)
+    assert result.timed_out and result.text == "" and result.cost_usd == 2.0
 
 
 def test_drive_streams_a_real_process(tmp_path):
@@ -584,7 +684,7 @@ def test_drive_streams_a_real_process(tmp_path):
         'sys.stderr.write("child noise\\n")\n'
     )
     emitted = []
-    rc, text, stderr, timed_out = harness_mod._drive(
+    rc, outcome, stderr, timed_out = harness_mod._drive(
         [sys.executable, str(script)],
         prompt="p" * 100_000,
         cwd=tmp_path,
@@ -593,7 +693,7 @@ def test_drive_streams_a_real_process(tmp_path):
         emit=lambda t, n, a: emitted.append((t, n, a)),
     )
     assert rc == 0 and timed_out is False
-    assert json.loads(text) == {"promptLen": 100_000}
+    assert json.loads(outcome.text) == {"promptLen": 100_000}
     assert emitted == [(1, "Read", "a.rs")]
     assert "child noise" in stderr
 
