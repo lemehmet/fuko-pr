@@ -33,14 +33,13 @@ optional_tools = []
 # Keeping the number here means the arithmetic is checked at run time instead of
 # being re-derived by hand whenever a backup is added (#106).
 #
-# Recomputed for tool_timeout=1800, review-only, 3-seat fleet (2026-08-19):
-# sequential worst case 3 branches * 1 tool * 1800s = 90 min + ~5m setup,
-# which fits; the CONCURRENT path (all three Apps minting) is ~1800s + setup
-# ≈ 35 min. Promoting even one backup (4 * 1 * 1800s = 120 min) does not fit —
-# #106's runtime arithmetic refuses exactly that promotion, which is the
-# designed behavior, not an accident to fix by raising this. Every number here
-# is `branches * tools * tool_timeout`; recompute from the formula rather than
-# adjusting by feel.
+# Recomputed for tool_timeout=1800, review-only, 2-seat fleet (2026-08-30):
+# sequential worst case 2 branches * 1 tool * 1800s = 60 min + ~5m setup, and
+# the CONCURRENT path (both Apps minting) is ~1800s + setup ≈ 35 min. There is
+# now headroom for a promotion on paper — but the fleet mixes drivers, so
+# `plan_escalation` promotes nothing regardless (see the fleet notes below).
+# Every number here is `branches * tools * tool_timeout`; recompute from the
+# formula rather than adjusting by feel.
 #
 # HONESTY LIMIT of that formula (henry finding, PR #130 round 4 → issue #131):
 # it charges each branch ONE attempt, but a timeout is throttle-class and
@@ -50,104 +49,92 @@ optional_tools = []
 # pathological one. Failover-aware budget arithmetic is #131's scope.
 job_budget_minutes = 110
 
-# FLEET COMPOSITION (2026-08-14) — two gating seats, two backups.
+# FLEET COMPOSITION (2026-08-30) — one diff seat, one agentic seat, one backup
+# each. Both gating.
 #
-# WHY deepseek-v4-pro IS GONE. It held the `gray` seat and was dropped for
-# persistently low-quality findings. The deciding example, on PR #100: it filed
-# a CRITICAL-severity finding claiming the deny rules used a single leading
-# slash. The code already emitted the correct `Read(//…)` form, and its
-# suggested patch produced `Read(///…)` — the silently non-matching spelling.
-# Applying that "critical fix" would have DISABLED the credential denylist it
-# claimed to be protecting. A seat that inverts a security control while
-# sounding most confident is worse than an empty seat, because it costs
-# reviewer attention to refute.
+# WHY THIS FLEET LOOKS CHEAP. It is. The seats on THIS repo are not here to QA
+# fuko-pr's own PRs — they are here to exercise fuko-pr's two review paths
+# (PR-Agent diff review and the agentic checkout-walking driver) on every PR so
+# regressions in the runner surface as failed or malformed reviews. Optimise for
+# covering both code paths at the lowest token cost, not for review quality; the
+# quality bar is CodeRabbit's, and mehmet's. Do not "upgrade" these seats back to
+# expensive models on quality grounds without changing that premise first.
 #
-# WHY qwen3.8-max REPLACES IT. Validated on mepro's trial seat. Kimi K3 was the
-# other candidate and was rejected on cost.
+# WHY deepseek-v4-pro IS BACK, and only as a BACKUP. It previously held the
+# `gray` gating seat and was dropped 2026-08-14 for confidently wrong findings —
+# the deciding one, on PR #100, filed a CRITICAL claiming the deny rules used a
+# single leading slash and shipped a patch producing the silently non-matching
+# `Read(///…)` form, i.e. it would have DISABLED the credential denylist it
+# claimed to protect. That history is why it is a backup and not a seat: it only
+# runs when solar-pro4's provider throttles, on a repo where the premise above
+# says these seats validate plumbing rather than gate on judgement. If this fleet
+# is ever copied to a repo where fuko's verdict is load-bearing (mepro,
+# shuanda), drop this entry first.
 #
-# THIS FLEET IS GENUINELY MODEL-DIVERSE (glm + qwen) — do not "simplify" it back
-# to one model on two providers. An earlier revision of this change had both
-# gating seats on glm-5.2 via different providers; that buys provider diversity
-# and failover only, and two seats running the same model agree on their blind
-# spots by construction. The point of the second seat is a second opinion.
+# THROTTLE BUCKET, stated plainly: the diff seat and its backup BOTH ride
+# OPENROUTER_KEY, and cooldown is global per provider (`order_pool` in
+# sidecar/pool.py keys `cooled` by provider id). One OpenRouter throttle cools
+# both, so the diff branch has no surviving failover — and the agentic backup
+# cannot rescue it, because `_compatible_backups` keeps only SAME-driver
+# backups. Accepted: an OpenRouter outage costs the diff path for that round and
+# leaves an honest "pool exhausted" receipt, which is itself the signal.
 #
-# BACKUP ORDER IS ABOUT THROTTLE BUCKETS, NOT PREFERENCE. Cooldown is global per
-# provider because it keys on the shared API key (see `order_pool` in
-# sidecar/pool.py, `cooled` keyed by provider id). gray and backup 1 both ride
-# OPENROUTER_KEY, so a single OpenRouter throttle cools BOTH — a gray failover
-# cannot land on backup 1, because whatever cooled gray has already cooled it.
-# That makes backup 2 (ollama-cloud, its own OLLAMA_API_KEY) the only failover
-# that survives an OpenRouter outage, and therefore load-bearing rather than
-# decorative. dorian is unaffected either way: it holds a separate z.ai key.
-# Backup 1 still stays FIRST on purpose — `order_pool` ranks available ahead of
-# cooled, so backup 1 is used when OpenRouter is healthy and skipped when it is
-# not. The order costs nothing and the coupling is handled by health, not by
-# hand-ordering.
+# ESCALATION IS FROZEN BY CONSTRUCTION. A mixed-backend fleet gives
+# `plan_escalation` no single driver to promote a backup into, so it promotes
+# nothing (fail-closed, sidecar/runner.py). Unchanged from the henry-era fleet;
+# the backups still serve their real job, which is per-branch failover.
+#
+# BUDGET. 2 branches * 1 tool * 1800s = 60 min sequential worst case, inside
+# job_budget_minutes = 110 with room. Concurrent (both Apps minting) is ~35 min.
 
-# dorian — gating seat.
-[[review.models]]
-provider = "zai-coding"
-name = "glm-5.2"
-max_context = 1000000
-token_env = "FUKO_GITHUB_TOKEN_DORIAN"
-
-# gray — gating seat. Distinct token_env from dorian: two resolvable identities
-# is what keeps A/B concurrent. Collapse them and the run degrades to sequential
-# (#106), which blows the job's time budget rather than merely losing a name.
+# dorian — gating seat, diff path (PR-Agent). max_context is OpenRouter's
+# reported context_length for this model (524288), not the provider preset's
+# 1048576 default: overstating it invites a mid-review context error instead of
+# PR-Agent's own compression.
 [[review.models]]
 provider = "openrouter"
-name = "qwen/qwen3.8-max"
-max_context = 1000000
-token_env = "FUKO_GITHUB_TOKEN_GRAY"
+name = "upstage/solar-pro4"
+max_context = 524288
+token_env = "FUKO_GITHUB_TOKEN_DORIAN"
 
-# henry — TRIAL seat (non-gating): the agentic-vs-diff A/B, 2026-08-19.
-# Same MODEL as gray (qwen3.8-max) on purpose: gray reviews the diff via
-# PR-Agent, henry walks the checkout via the agentic driver (headless Claude
-# Code on QwenCloud's Anthropic-compatible Token Plan endpoint), so every PR
-# here gets the same model both ways and the harness is the only variable.
-# Score receipts-only (uniqueness vs gray in particular); one of the two qwen
-# seats is removed when the experiment concludes.
+# henry — gating seat, agentic path (headless Claude Code against QwenCloud's
+# Anthropic-compatible Token Plan endpoint). Distinct token_env from dorian:
+# two resolvable identities is what keeps the round concurrent; collapse them
+# and it degrades to sequential (#106).
 #
 # auth is PINNED to api-key: `auto` on a runner with a logged-in Claude session
 # would resolve to subscription mode, which never injects a base URL — the seat
 # would silently review with real Claude, the exact substitution class receipts
 # exist to catch.
-#
-# KNOWN LIMITS while trialing (accepted, on a repo where reviews gate nothing):
-# - Until the fuko-henry App exists (vars.FUKO_HENRY_APP_ID +
-#   secrets.FUKO_HENRY_APP_PRIVATE_KEY), FUKO_GITHUB_TOKEN_HENRY is empty and
-#   EVERY round runs sequentially under the base identity (#106 identity rule
-#   is all-or-nothing). Budget math lives on job_budget_minutes above.
-# - Mixed backends freeze backup escalation for the round (plan_escalation
-#   refuses to promote across drivers) — fix that before any agentic seat
-#   enters a GATING fleet (mepro).
-# - The shared backups are pr-agent-only, and a branch's failover pool keeps
-#   only SAME-driver backups (a failover must never swap harnesses
-#   mid-experiment): if henry's endpoint throttles or times out, its pool is
-#   exhausted and the branch fails with an honest receipt. First observed live
-#   on PR #130 round 1 — henry's 600s timeout walked into the pr-agent backup
-#   and died on the driver gate; the pool filter turns that into a clean
-#   "pool exhausted".
 [[review.models]]
 provider = "qwen-anthropic"
 name = "qwen3.8-max"
 max_context = 1000000
 auth = "api-key"
 backend = "agentic"
-role = "trial"
 token_env = "FUKO_GITHUB_TOKEN_HENRY"
 
-# Backup 1 — shares OPENROUTER_KEY with gray; see the throttle-bucket note above.
+# Backup for the diff path. Backups intentionally carry no token_env: a promoted
+# backup posts under the identity of the seat it covers.
 [[review.models]]
 provider = "openrouter"
-name = "z-ai/glm-5.2"
+name = "deepseek/deepseek-v4-pro-0813"
 max_context = 1048576
 role = "backup"
 
-# Backup 2 — the OpenRouter-outage survivor. Backups intentionally carry no
-# token_env: a promoted backup posts under the identity of the seat it covers.
+# Backup for the agentic path. `backend = "agentic"` is REQUIRED, not decorative:
+# `_compatible_backups` filters a branch's pool to same-driver entries, so
+# without it the agentic seat has an EMPTY pool and any throttle ends the branch.
+# Provider is `zai-anthropic` (z.ai's Anthropic-compatible surface), not the
+# `zai-coding` OpenAI-shaped one — the agentic driver speaks the Anthropic API.
+# The `glm-5.3` slug is confirmed to exist in the GLM 5.3 family but NOT yet
+# verified against this account's z.ai plan; the first failover that lands here
+# is the verification, and an unrecognized_model receipt is the expected shape of
+# a wrong guess.
 [[review.models]]
-provider = "ollama-cloud"
-name = "glm-5.2:cloud"
-max_context = 976000
+provider = "zai-anthropic"
+name = "glm-5.3"
+max_context = 1000000
+auth = "api-key"
+backend = "agentic"
 role = "backup"
