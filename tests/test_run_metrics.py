@@ -362,8 +362,8 @@ def test_review_records_metrics_with_failover(monkeypatch, tmp_path):
 
     results = iter(
         [
-            InvokeResult(returncode=1, detail="429 rate limit", throttled=True),
-            InvokeResult(returncode=0),
+            InvokeResult(returncode=1, detail="429 rate limit", throttled=True, cost_usd=9.99),
+            InvokeResult(returncode=0, input_tokens=5, cost_usd=0.5, turns=3),
         ]
     )
 
@@ -394,6 +394,17 @@ def test_review_records_metrics_with_failover(monkeypatch, tmp_path):
     assert kw["duration_s"] >= 0
     # #99 golden: a pr-agent-shaped config attributes its run to 'pr-agent'.
     assert kw["backend"] == "pr-agent"
+    # #152: the row's spend is the ANSWERING attempt's, matching the model it is
+    # attributed to. The throttled primary's 9.99 must not ride on a row whose
+    # provider says anthropic.
+    assert kw["costs"] == {
+        "input_tokens": 5,
+        "output_tokens": None,
+        "cache_read_tokens": None,
+        "cache_write_tokens": None,
+        "cost_usd": 0.5,
+        "turns": 3,
+    }
 
 
 def test_sequential_compare_records_per_branch_slots(monkeypatch, tmp_path):

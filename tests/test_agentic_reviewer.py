@@ -642,6 +642,33 @@ def test_usage_tokens_degrades_field_by_field():
     assert usage_tokens({"input_tokens": True})["input_tokens"] is None
 
 
+def test_as_float_rejects_non_finite_and_unrepresentable_costs():
+    """NaN/Infinity pass a bare `value < 0` guard, and neither survives the trip:
+    over HTTP they lose the WHOLE metrics row, and a stored NaN poisons every
+    sum(cost_usd) group it lands in. A huge int must not raise, either."""
+    assert harness_mod._as_float(float("nan")) is None
+    assert harness_mod._as_float(float("inf")) is None
+    assert harness_mod._as_float(float("-inf")) is None
+    # float(10**400) raises OverflowError; a guard that crashes on a garbled
+    # event would kill the review it is only supposed to be measuring.
+    assert harness_mod._as_float(10**400) is None
+    assert harness_mod._as_float(1.25) == 1.25 and harness_mod._as_float(0) == 0.0
+
+
+def test_consume_stream_drops_a_non_finite_cost_but_keeps_the_run():
+    """json.loads accepts the bare NaN literal, which is how one reaches us at
+    all. It degrades to "not measured" like any other garbled field — the text
+    and the token counts beside it still come back."""
+    events = [
+        '{"type": "result", "result": "{}", "total_cost_usd": NaN, "num_turns": 4,'
+        ' "usage": {"input_tokens": 11}}',
+    ]
+    outcome = harness_mod._consume_stream(events, lambda *a: None)
+    assert outcome.cost_usd is None
+    assert outcome.text == "{}" and outcome.turns == 4
+    assert usage_tokens(outcome.usage)["input_tokens"] == 11
+
+
 def test_run_review_carries_the_runs_accounting(monkeypatch, tmp_path):
     """The harness result is where cost leaves the CLI boundary (#152)."""
     seen = {}

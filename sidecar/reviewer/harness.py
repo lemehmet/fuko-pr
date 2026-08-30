@@ -48,6 +48,7 @@ contributor's pull request:
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -326,10 +327,31 @@ def _as_int(value: object) -> int | None:
 
 
 def _as_float(value: object) -> float | None:
-    """A non-negative float from an untrusted event field, else None."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+    """A non-negative FINITE float from an untrusted event field, else None.
+
+    ``json.loads`` accepts the bare ``NaN`` / ``Infinity`` / ``-Infinity``
+    literals, and ``NaN`` compares false against every bound -- so a plain
+    ``value < 0`` guard admits both. Neither survives the trip: over HTTP
+    ``NaN`` fails ``RunMetricRequest``'s ``ge=0`` and infinity overflows
+    ``NUMERIC(10,4)``, either of which loses the WHOLE metrics row rather than
+    just the cost, and on the direct path a stored ``NaN`` poisons every
+    ``sum(cost_usd)`` group it lands in, permanently. Rejecting here keeps a
+    garbled figure degrading to "not measured" like any other field.
+
+    The conversion is guarded because it is the one that can raise: an
+    arbitrarily large JSON integer parses to a Python ``int`` that ``float()``
+    cannot represent, and an ``OverflowError`` out of a best-effort accounting
+    helper would kill the review it is only supposed to be measuring.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
 
 
 def usage_tokens(usage: dict | None) -> dict[str, int | None]:
