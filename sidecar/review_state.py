@@ -147,6 +147,24 @@ def _is_uuid(value: str) -> bool:
     return True
 
 
+def _not_a_bare_string(values: Sequence[str], param: str) -> None:
+    """Reject a single string where a sequence of them is meant.
+
+    ``str`` satisfies ``Sequence[str]``, and no type checker objects, so
+    ``expire_coverage(..., "src/app.py")`` iterates CHARACTERS: the argument
+    survives every other guard and the call expires nothing while reporting the
+    same ``0`` as "there was no coverage for that file". That is the fail-unsafe
+    direction -- a stale assurance kept -- and it is the same shape as the
+    ``None``-vs-``[]`` mistake this module already warns about.
+
+    Raising is not a break with "state never fails a review": :func:`_best_effort`
+    turns it into the usual no-op, so the caller's review continues and the
+    operator gets a line on stderr instead of silence.
+    """
+    if isinstance(values, str):
+        raise TypeError(f"{param} must be a sequence of strings, not a single str: {values!r}")
+
+
 @dataclass(frozen=True)
 class StoredFinding:
     """One open ledger row: its database id, and the finding a round will see.
@@ -300,6 +318,7 @@ def touch_findings(finding_ids: Sequence[str]) -> int:
     ledger records that a round looked at it against the current head, so a
     later reader can tell a re-verified claim from one nobody has revisited.
     """
+    _not_a_bare_string(finding_ids, "finding_ids")
     ids = [i for i in finding_ids if _is_uuid(i)]
     if not ids:
         return 0
@@ -363,6 +382,15 @@ def live_coverage(
     Newest first so a read that hits ``limit`` keeps the entries the renderer
     would have kept anyway; the renderer sorts again, since ordering the prompt
     is its decision and not the store's.
+
+    ``id`` breaks the tie for the same reason it does in :func:`open_findings`,
+    and it matters here even though coverage carries no minted ids: one round's
+    rows share a transaction timestamp, and BOTH caps that can fall inside a
+    round -- this ``LIMIT`` and the renderer's ``max_coverage`` -- count entries.
+    Without a total tiebreaker, which same-round siblings survive a cut could
+    change between two reads that changed nothing, so entries would drift in and
+    out of the prompt on their own. The renderer's own sort does not repair it:
+    it sorts by round with a stable sort, inheriting whatever order arrives here.
     """
     from .db import db
 
@@ -372,7 +400,7 @@ def live_coverage(
             "FROM review_coverage "
             "WHERE repo = %s AND pr = %s AND seat = %s AND expired_at IS NULL "
             "AND created_at > now() - make_interval(days => %s) "
-            "ORDER BY round DESC, created_at DESC LIMIT %s",
+            "ORDER BY round DESC, created_at DESC, id DESC LIMIT %s",
             (repo, pr, seat, RETENTION_DAYS, min(max(1, limit), MAX_LIVE_COVERAGE)),
         ).fetchall()
     return [
@@ -406,9 +434,19 @@ def expire_coverage(repo: str, pr: int, seat: str, files: Sequence[str] | None =
     them are then written together and can only drift together. It also keeps
     every string reaching ``execute`` a literal, which is what a reader (and a
     static analyser) has to prove about a query built in Python.
+
+    The paths are put through :func:`_clip` on the way in because
+    :func:`record_coverage` clipped them on the way out. ``file`` is a MATCHING
+    KEY, not free text, so the two sides have to agree: a path over
+    :data:`MAX_TEXT` was stored truncated, and matching it raw would find
+    nothing and report the same ``0`` as "there was no coverage for that file" --
+    the stale assurance kept, which is the one direction this ledger must not
+    fail in.
     """
-    if files is not None and not files:
-        return 0
+    if files is not None:
+        _not_a_bare_string(files, "files")
+        if not files:
+            return 0
     from .db import db
 
     if files is None:
@@ -423,7 +461,7 @@ def expire_coverage(repo: str, pr: int, seat: str, files: Sequence[str] | None =
             "WHERE repo = %s AND pr = %s AND seat = %s AND expired_at IS NULL "
             "AND file = ANY(%s)"
         )
-        params = (repo, pr, seat, list(files))
+        params = (repo, pr, seat, [_clip(f) for f in files])
 
     with db() as conn:
         cur = conn.execute(sql, params)

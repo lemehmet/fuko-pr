@@ -291,6 +291,16 @@ def test_live_coverage_reads_unexpired_rows_newest_first(pg):
     assert params[4] == review_state.MAX_LIVE_COVERAGE
 
 
+def test_live_coverage_orders_same_round_entries_by_a_total_tiebreaker(pg):
+    """Coverage mints no ids, but both caps that can fall inside a round -- this
+    LIMIT and the renderer's max_coverage -- count entries, so which same-round
+    siblings survive a cut must not move between two reads that changed nothing."""
+    conn = pg()
+    review_state.live_coverage("o/r", 7, "henry")
+
+    assert conn.statements[0][0].endswith("ORDER BY round DESC, created_at DESC, id DESC LIMIT %s")
+
+
 def test_expire_coverage_scopes_to_the_files_the_delta_touched(pg):
     conn = pg(rowcount=3)
 
@@ -310,6 +320,32 @@ def test_expire_coverage_wholesale_needs_none_not_an_empty_list(pg):
 
     assert review_state.expire_coverage("o/r", 7, "henry", []) == 0
     assert len(conn.statements) == 1
+
+
+def test_expire_coverage_clips_paths_the_way_record_coverage_stored_them(pg):
+    """``file`` is a matching key, so both sides must apply the same transform:
+    a path over MAX_TEXT was stored truncated, and matching it raw would expire
+    nothing while reporting the same 0 as 'no coverage for that file'."""
+    conn = pg(rowcount=1)
+    long_path = "src/" + "a" * (review_state.MAX_TEXT + 90) + ".py"
+
+    assert review_state.expire_coverage("o/r", 7, "henry", [long_path]) == 1
+    assert conn.statements[0][1][3] == [long_path[: review_state.MAX_TEXT]]
+
+
+def test_a_bare_string_is_refused_where_a_sequence_of_them_is_meant(pg, capsys):
+    """``str`` satisfies ``Sequence[str]`` and no type checker objects, so the
+    argument would otherwise be iterated CHARACTER by character: coverage that
+    expires nothing, ids that match nothing, both reported as a plain 0."""
+    conn = pg(rowcount=5)
+
+    assert review_state.expire_coverage("o/r", 7, "henry", "src/app.py") == 0
+    assert review_state.touch_findings(_UUID) == 0
+    assert conn.statements == []
+
+    err = capsys.readouterr().err
+    assert "expire_coverage failed" in err and "files must be a sequence" in err
+    assert "touch_findings failed" in err and "finding_ids must be a sequence" in err
 
 
 def test_review_state_is_postgres_only_and_says_so():
