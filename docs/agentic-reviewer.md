@@ -92,6 +92,21 @@ The rules that matter:
   by the contract, and every unmentioned finding is simply offered again.
 - **Only published findings are recorded** — a low-confidence finding the
   pressure valve withheld must not re-enter through the next round's prompt.
+- **A re-report is a re-assertion, and `(file, title)` is what "the same claim"
+  means.** A round that re-publishes a finding it was handed, instead of
+  settling it, touches that row rather than opening a second one — otherwise
+  duplicates compound each round until the read cap sheds the newest rows, which
+  are then unreachable by any round and age out unseen.
+
+  This is the one rule here with a **known false negative**, and it is worth
+  stating rather than implying away: a genuinely new claim that names the same
+  file under the same case-folded headline is not recorded, and the row that
+  survives keeps the earlier body. Widening the key to the body would remove
+  that, at the price of missing every reworded re-report — most of them — and
+  restoring the growth above, which loses claims outright rather than one
+  round's phrasing of a claim that is still open and still in the next prompt.
+  Every suppression is logged by name (`re-asserted, not re-recorded: …`), so
+  the trade is visible in the round's output rather than silent.
 
 Storage is Postgres-only (`FUKO_DATABASE_URL`, `migrations/009_review_state.sql`)
 and entirely best-effort: with no store, an unreachable one, or a sqlite-vec

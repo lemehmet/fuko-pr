@@ -291,6 +291,31 @@ def test_a_minted_id_without_a_row_is_skipped(store):
     assert outcome == ledger.Settlement()
 
 
+def test_a_minted_id_without_a_row_is_skipped_by_the_dedup_pass_too(store):
+    """The ids/rows disagreement reaches the dedup pass as well as the verdict pass.
+
+    Both look up `carried.rows` for a key drawn from `carried.state.ids`, and the
+    guard has to hold on both. A minted id with no row is a claim fuko cannot map
+    back to the store, so it is neither settled nor treated as already-held: the
+    re-report is recorded FRESH rather than silently folded onto a row that does
+    not exist.
+    """
+    state = PriorState("p1 ...", {"p1": PriorFinding(file="a.py", title="t")})
+
+    outcome = settle(
+        CarriedState(state=state, rows={}),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head2",
+        prior_status=[PriorFindingStatus(id="p1", status="fixed", reason="gone")],
+        findings=[_finding(file="a.py", title="t")],
+    )
+
+    assert outcome == ledger.Settlement(recorded=1)
+    assert [f.prior.title for f in store.open_findings(REPO, PR, SEAT)] == ["t"]
+
+
 def test_ids_map_to_rows_in_the_renderers_own_minting_order(store):
     """The pN -> row mapping is derived from the renderer, not re-enumerated."""
     settle(
