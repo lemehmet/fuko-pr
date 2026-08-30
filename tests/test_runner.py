@@ -1516,6 +1516,51 @@ def test_review_compare_concurrent_branch_gets_own_github_user_token(monkeypatch
     assert sorted(user_tokens) == ["tok-a", "tok-b"]
 
 
+@pytest.mark.parametrize(
+    ("token_envs", "path"),
+    [(("TOK_A", "TOK_B"), "concurrent"), (("TOK_A", None), "sequential")],
+    ids=["concurrent", "sequential"],
+)
+def test_review_compare_hands_each_branch_its_own_seat(monkeypatch, tmp_path, token_envs, path):
+    """The seat has to survive the plumbing, not just be computed correctly.
+
+    `_branch_seats` is pure and `_run_pool` is unit-tested with `seat=` passed
+    directly; between them the value travels through `_review_compare` by two
+    different routes. Swapping it with an adjacent argument would type-check and
+    run green while handing every branch the wrong lane -- and a wrong lane is
+    one model closing another's findings with a bare `fixed`. So this asserts the
+    seat each branch's backend actually SEES, and that it is that branch's own.
+    """
+    cfg = _compare_cfg(tmp_path, token_envs=token_envs)
+    monkeypatch.setenv("TOK_A", "tok-a")
+    monkeypatch.setenv("TOK_B", "tok-b")
+    monkeypatch.setenv("GITHUB_TOKEN", "shared-ghtok")
+    monkeypatch.setenv("ANTHROPIC_KEY", "antkey")
+    _stub_compare_io(monkeypatch)
+    monkeypatch.setattr(runner, "_post_branch_header", lambda *a, **k: (None, None, None))
+
+    seen = []
+
+    class FakeBackend:
+        def build_env(self, preset, model, knowledge, tools):
+            return {"CONFIG__MODEL": preset.litellm_prefix + model.name}
+
+        def invoke(self, pr, env, tools):
+            seen.append((env["CONFIG__MODEL"][-1], env.get("FUKO_SEAT")))
+            return InvokeResult(returncode=0)
+
+        def normalize_output(self, pr, model="", **kw):
+            return []
+
+    monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
+    runner.review("https://github.com/o/r/pull/7", str(cfg))
+
+    # Neither branch names a FUKO_GITHUB_TOKEN_* env, so neither owns a slot and
+    # both fall back to their labels -- paired with the right branch, not merely
+    # both present.
+    assert sorted(seen) == [("a", "anthropic/a"), ("b", "ollama/b")]
+
+
 def test_review_compare_falls_back_to_sequential_shared_token(monkeypatch, tmp_path):
     # One branch lacks a token_env -> the whole run uses the sequential single
     # token path under GITHUB_TOKEN, unchanged.
@@ -2127,6 +2172,115 @@ def test_run_pool_records_the_full_pool_entry_identity(monkeypatch, tmp_path):
         tools=["review"],
     )
     assert result.provider == "anthropic/claude-sonnet-4-6"
+
+
+def test_run_pool_names_the_branchs_seat_in_the_backend_env(monkeypatch):
+    """Per-seat review state is keyed by the LANE (#156).
+
+    The seat comes from the branch's slot, not from the answering entry: a
+    promoted backup has no ``token_env`` of its own, so deriving it inside
+    ``build_env`` would split one lane's ledger mid-failover.
+    """
+    monkeypatch.setenv("ANTHROPIC_KEY", "antkey")
+    seen: list[dict] = []
+
+    class FakeBackend:
+        def build_env(self, preset, model, knowledge, tools):
+            return {}
+
+        def invoke(self, pr, env, tools):
+            seen.append(dict(env))
+            return InvokeResult(returncode=0)
+
+    monkeypatch.setattr(runner, "_normalize", lambda *a, **k: 0)
+    monkeypatch.setattr(runner, "_record_run", lambda *a, **k: None)
+    backup = ModelConfig(provider="anthropic", name="claude-backup", key_env="ANTHROPIC_KEY")
+    for slot, expected in (("dorian", "dorian"), (None, None)):
+        runner._run_pool(
+            FakeBackend(),
+            PRRef("o/r", 8, "u"),
+            "",
+            {},
+            _review_config_for_receipts(),
+            [backup],
+            set(),
+            None,
+            tools=["review"],
+            slot=slot,
+        )
+        assert seen[-1].get("FUKO_SEAT") == expected
+
+
+def test_declared_slots_are_the_lanes_when_they_are_the_branchs_own():
+    """The normal fleet keeps its slots: model-agnostic, so failover cannot split them."""
+    reviewers = [
+        ReviewModel(provider="anthropic", name="claude-a", token_env="FUKO_GITHUB_TOKEN_DORIAN"),
+        ReviewModel(provider="openrouter", name="glm-b", token_env="FUKO_GITHUB_TOKEN_HENRY"),
+    ]
+
+    assert runner._branch_seats(reviewers) == ["dorian", "henry"]
+
+
+@pytest.mark.parametrize(
+    ("reviewers", "expected"),
+    [
+        # No token_env at all: legal, forces the sequential path, and every slot
+        # is None -- so they would have shared DEFAULT_SEAT.
+        (
+            [
+                ReviewModel(provider="anthropic", name="claude-a"),
+                ReviewModel(provider="openrouter", name="glm-b"),
+            ],
+            ["anthropic/claude-a", "openrouter/glm-b"],
+        ),
+        # Same token_env: one actor, so concurrency is declined and the
+        # SEQUENTIAL path runs both branches under one slot.
+        (
+            [
+                ReviewModel(
+                    provider="anthropic", name="claude-a", token_env="FUKO_GITHUB_TOKEN_DORIAN"
+                ),
+                ReviewModel(
+                    provider="openrouter", name="glm-b", token_env="FUKO_GITHUB_TOKEN_DORIAN"
+                ),
+            ],
+            ["anthropic/claude-a", "openrouter/glm-b"],
+        ),
+        # Different env vars, different tokens, different actors -- so the run
+        # goes CONCURRENT -- but `_slot_of` lowercases both to `dorian`.
+        (
+            [
+                ReviewModel(
+                    provider="anthropic", name="claude-a", token_env="FUKO_GITHUB_TOKEN_DORIAN"
+                ),
+                ReviewModel(
+                    provider="openrouter", name="glm-b", token_env="FUKO_GITHUB_TOKEN_Dorian"
+                ),
+            ],
+            ["anthropic/claude-a", "openrouter/glm-b"],
+        ),
+        # Neither the slot nor the label distinguishes them.
+        (
+            [
+                ReviewModel(provider="anthropic", name="claude-a"),
+                ReviewModel(provider="anthropic", name="claude-a"),
+            ],
+            ["anthropic/claude-a", "anthropic/claude-a#1"],
+        ),
+    ],
+    ids=["no-token-env", "same-token-env", "case-folded-collision", "same-label"],
+)
+def test_branches_never_share_a_ledger_lane(reviewers, expected):
+    """Every way two branches can collide onto one seat (#156).
+
+    Sharing a lane means each branch is offered the other's still-open findings
+    and can close them with a ``fixed`` verdict, which needs no reason -- one
+    model silently retiring another's finding.
+    """
+    seats = runner._branch_seats(reviewers)
+
+    assert seats == expected
+    assert len(set(seats)) == len(seats)
 
 
 def test_primary_success_is_not_reported_as_a_promotion(monkeypatch):

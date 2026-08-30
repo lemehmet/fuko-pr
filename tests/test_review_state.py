@@ -220,6 +220,30 @@ def test_open_findings_clamps_a_caller_supplied_limit(pg):
     assert conn.statements[0][1][4] == review_state.MAX_OPEN_FINDINGS
 
 
+def test_next_round_counts_settled_rounds_too(pg):
+    """A round whose findings were all fixed still happened: re-issuing its
+    number would put two different rounds behind one label in the prompt."""
+    conn = pg(rows=[(4,)])
+
+    assert review_state.next_round("o/r", 7, "henry") == 4
+    sql, params = conn.statements[0]
+    assert "coalesce(max(round), 0) + 1" in sql and "status" not in sql
+    assert params == ("o/r", 7, "henry")
+
+
+def test_next_round_is_one_for_a_seats_first_round(pg):
+    """An empty read is "nothing recorded before this", the same as no store."""
+    pg()
+
+    assert review_state.next_round("o/r", 7, "henry") == 1
+
+
+def test_next_round_is_one_without_a_store(monkeypatch):
+    monkeypatch.setattr(review_state.settings, "database_url", "")
+
+    assert review_state.next_round("o/r", 7, "henry") == 1
+
+
 def test_transition_settles_only_open_rows(pg):
     conn = pg(rowcount=1)
 

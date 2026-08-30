@@ -23,6 +23,7 @@ sidecar/reviewer/            the reviewer (harness-agnostic core)
   checkout.py                PR head checkout + API diff fetch
   prompt.py                  review strategy + JSON output contract   <- the value
   harness.py                 agent runtimes (headless Claude Code today)
+  ledger.py                  per-seat open-findings policy (carry in / settle)
 sidecar/backends/agentic.py  the fuko driver (ReviewBackend protocol)
 ```
 
@@ -52,6 +53,72 @@ is authoritative): a `summary` plus up to 10 `findings`, each with
 hunk), and `confidence`. Low-confidence findings are dropped before posting and
 counted in the review body ("N withheld"), so the agent has a pressure valve
 that is not "report it anyway".
+
+## Rounds remember: the open-findings ledger
+
+Measured on mepro, **86% of findings are one-shot** — reported once, never
+re-noticed. A finding the author does not act on in the round it appears is
+simply lost, because the next round has no idea it was ever made. The ledger
+(#156, epic #160) closes that: when a review-state store is configured, each
+round loads its own seat's still-open findings, renders them into the prompt
+behind the `prior-review-state` fence, applies the verdicts the agent returns
+on them, and records what it published as the next round's open ledger.
+
+The rules that matter:
+
+- **Keyed per seat.** `(repo, pr, seat)`, where the seat is the branch's slot
+  label (`dorian`, `gray`) — model-agnostic, so swapping the model behind a
+  seat keeps its ledger. There is deliberately no shared cross-seat ledger: it
+  would raise fleet coverage at the cost of the independent second opinion that
+  is the reason for running two seats.
+
+  The runner resolves one lane per branch for the whole run, and they are always
+  distinct. A branch keeps its slot when the slot is its own; when two branches
+  project onto the same slot — the same `token_env`, or names differing only in
+  case, since the slot is lowercased — both fall back to their `provider/name`
+  label, and a label two branches also share gains its index. A **solo** run has
+  no branch to collide with, so it simply keeps its own slot when it declares a
+  `token_env` — which also means its ledger survives the config later growing
+  into an A/B run — and falls back to the constant `default` seat only when it
+  declares none. The trade on any fallback is that renaming that branch's model
+  resets its ledger, which a slot would have survived; giving each branch its
+  own distinctly-named `token_env` avoids it.
+- **Only the agent closes a finding**, with two exceptions in fuko's own hands:
+  a verdict it cannot read closes nothing, and a finding whose file the current
+  head no longer contains is retired as `stale`. Line drift never closes
+  anything — "the code moved" is not evidence the problem was fixed.
+- **`rejected` needs a reason.** Rejection is one round overruling its
+  predecessor; without a reason the entry is downgraded to `still_open`, so a
+  seat cannot close inherited findings by assertion.
+- **Silence keeps a finding open.** Omitting `prior_status` entirely is allowed
+  by the contract, and every unmentioned finding is simply offered again.
+- **Only published findings are recorded** — a low-confidence finding the
+  pressure valve withheld must not re-enter through the next round's prompt.
+- **A re-report is a re-assertion, and `(file, title)` is what "the same claim"
+  means.** A round that re-publishes a finding it was handed, instead of
+  settling it, touches that row rather than opening a second one — otherwise
+  duplicates compound each round until the read cap sheds the newest rows, which
+  are then unreachable by any round and age out unseen.
+
+  This is the one rule here with a **known false negative**, and it is worth
+  stating rather than implying away: a genuinely new claim that names the same
+  file under the same case-folded headline is not recorded, and the row that
+  survives keeps the earlier body. Widening the key to the body would remove
+  that, at the price of missing every reworded re-report — most of them — and
+  restoring the growth above, which loses claims outright rather than one
+  round's phrasing of a claim that is still open and still in the next prompt.
+  Every suppression is logged by name (`re-asserted, not re-recorded: …`), so
+  the trade is visible in the round's output rather than silent.
+
+Storage is Postgres-only (`FUKO_DATABASE_URL`, `migrations/009_review_state.sql`)
+and entirely best-effort: with no store, an unreachable one, or a sqlite-vec
+deployment, every ledger call is a no-op and the round builds exactly the prompt
+it built before the ledger existed. Note that today this needs the store
+reachable **from the runner**, which the homelab deployment (runner → sidecar
+over `FUKO_URL`) does not yet provide.
+
+The coverage half of the ledger — recording what a round *examined* so the next
+one can aim at unexplored surface — is a separate tier and is not wired here.
 
 ## Security model
 

@@ -17,6 +17,24 @@ from ..presets import ProviderPreset
 from ..signals import ReviewSignal
 
 
+ENV_SEAT = "FUKO_SEAT"
+"""Branch environment key naming the SEAT this invocation runs as.
+
+The seat is the branch's A/B slot label (``dorian``, ``gray``) -- model-agnostic
+on purpose, so swapping the model behind a seat does not orphan the per-seat
+state keyed by it (#156). It travels in the branch environment rather than as an
+``invoke`` argument because that dict is already the runner's per-branch channel
+into a backend and every driver receives it unchanged; a backend with no use for
+it ignores an extra key, where a new positional argument would break every
+third-party implementation of this protocol.
+
+The runner sets it in :func:`sidecar.runner._run_pool`, which is also the reason
+it is derived there rather than from the model entry: a promoted BACKUP has no
+``token_env`` of its own and would otherwise write under a different seat than
+the branch it rescued, splitting one lane's ledger mid-failover.
+"""
+
+
 @dataclass(frozen=True)
 class PRRef:
     """A pull request a backend should review or read back."""
