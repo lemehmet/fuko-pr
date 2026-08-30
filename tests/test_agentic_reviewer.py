@@ -424,6 +424,77 @@ def test_parse_review_rejects_garbage_and_bad_schema():
         parse_review("no json here")
     with pytest.raises(ReviewParseError):
         parse_review('{"findings": [{"file": "a.py", "severity": "apocalyptic"}]}')
+    # An examined entry that records no conclusion is structurally malformed and
+    # fails like a finding without a title -- the ledger's fail-open guarantee
+    # covers models that skip the section, not ones that file a hollow entry.
+    with pytest.raises(ReviewParseError):
+        parse_review('{"examined": [{"file": "a.py", "checked": "c", "evidence": "e"}]}')
+
+
+def test_parse_review_without_ledger_sections_reviews_exactly_as_before():
+    """A model that ignores the state contract must still produce a valid review."""
+    payload = {
+        "summary": "ok",
+        "findings": [{"file": "a.py", "line": 3, "title": "t", "body": "b"}],
+    }
+    review = parse_review(json.dumps(payload))
+
+    assert review.summary == "ok"
+    assert review.findings[0].file == "a.py"
+    assert review.examined == [] and review.prior_status == []
+
+
+def test_parse_review_carries_examined_and_prior_status():
+    payload = {
+        "summary": "ok",
+        "findings": [],
+        "examined": [
+            {
+                "file": "src/app.py",
+                "region": "open_source",
+                "checked": "whether every caller handles a None device",
+                "conclusion": "all four callers branch on None before use",
+                "evidence": "src/app.py:118-166, src/util.py:402",
+            }
+        ],
+        "prior_status": [{"id": "f-7", "status": "still_open", "reason": "head is unchanged here"}],
+    }
+    review = parse_review(json.dumps(payload))
+
+    assert review.examined[0].region == "open_source"
+    assert review.examined[0].conclusion.startswith("all four callers")
+    assert review.prior_status[0].id == "f-7"
+    assert review.prior_status[0].status == "still_open"
+
+
+def test_parse_review_keeps_off_vocabulary_prior_status():
+    """`status` is a plain str on purpose: an unknown word must not fail the review."""
+    payload = {
+        "summary": "s",
+        "findings": [{"file": "a.py", "line": 1, "title": "t", "body": "b"}],
+        "prior_status": [{"id": "f-1", "status": "partially_fixed"}],
+    }
+    review = parse_review(json.dumps(payload))
+
+    assert review.prior_status[0].status == "partially_fixed"
+    assert review.prior_status[0].reason == ""
+    assert review.findings[0].title == "t"  # the review itself survives
+
+
+def test_strategy_forbids_a_clean_bill_of_health_and_shows_the_counter_example():
+    """The one failure mode that turns a wrong inference into a permanent blind spot."""
+    prompt = build_prompt(_ctx())
+
+    assert "must never assert that code is fine" in prompt
+    # Both halves of the example pair: the falsifiable claim and the one that
+    # would suppress a real finding forever.
+    assert "verified all four callers of open_source() handle a None device" in prompt
+    assert "error handling in decklink.rs is fine" in prompt
+    # Directing exploration is a deprioritisation, never a skip.
+    assert "Deprioritise -- never skip" in prompt
+    assert "Prefer surface no previous round" in prompt
+    # And the round is asked to settle what earlier rounds left open.
+    assert "'fixed', 'still_open' or 'rejected'" in prompt
 
 
 def test_run_review_missing_binary(monkeypatch, tmp_path):
