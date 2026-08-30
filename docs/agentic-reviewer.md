@@ -23,6 +23,7 @@ sidecar/reviewer/            the reviewer (harness-agnostic core)
   checkout.py                PR head checkout + API diff fetch
   prompt.py                  review strategy + JSON output contract   <- the value
   harness.py                 agent runtimes (headless Claude Code today)
+  ledger.py                  per-seat open-findings policy (carry in / settle)
 sidecar/backends/agentic.py  the fuko driver (ReviewBackend protocol)
 ```
 
@@ -52,6 +53,45 @@ is authoritative): a `summary` plus up to 10 `findings`, each with
 hunk), and `confidence`. Low-confidence findings are dropped before posting and
 counted in the review body ("N withheld"), so the agent has a pressure valve
 that is not "report it anyway".
+
+## Rounds remember: the open-findings ledger
+
+Measured on mepro, **86% of findings are one-shot** — reported once, never
+re-noticed. A finding the author does not act on in the round it appears is
+simply lost, because the next round has no idea it was ever made. The ledger
+(#156, epic #160) closes that: when a review-state store is configured, each
+round loads its own seat's still-open findings, renders them into the prompt
+behind the `prior-review-state` fence, applies the verdicts the agent returns
+on them, and records what it published as the next round's open ledger.
+
+The rules that matter:
+
+- **Keyed per seat.** `(repo, pr, seat)`, where the seat is the branch's slot
+  label (`dorian`, `gray`) — model-agnostic, so swapping the model behind a
+  seat keeps its ledger. There is deliberately no shared cross-seat ledger: it
+  would raise fleet coverage at the cost of the independent second opinion that
+  is the reason for running two seats.
+- **Only the agent closes a finding**, with two exceptions in fuko's own hands:
+  a verdict it cannot read closes nothing, and a finding whose file the current
+  head no longer contains is retired as `stale`. Line drift never closes
+  anything — "the code moved" is not evidence the problem was fixed.
+- **`rejected` needs a reason.** Rejection is one round overruling its
+  predecessor; without a reason the entry is downgraded to `still_open`, so a
+  seat cannot close inherited findings by assertion.
+- **Silence keeps a finding open.** Omitting `prior_status` entirely is allowed
+  by the contract, and every unmentioned finding is simply offered again.
+- **Only published findings are recorded** — a low-confidence finding the
+  pressure valve withheld must not re-enter through the next round's prompt.
+
+Storage is Postgres-only (`FUKO_DATABASE_URL`, `migrations/009_review_state.sql`)
+and entirely best-effort: with no store, an unreachable one, or a sqlite-vec
+deployment, every ledger call is a no-op and the round builds exactly the prompt
+it built before the ledger existed. Note that today this needs the store
+reachable **from the runner**, which the homelab deployment (runner → sidecar
+over `FUKO_URL`) does not yet provide.
+
+The coverage half of the ledger — recording what a round *examined* so the next
+one can aim at unexplored surface — is a separate tier and is not wired here.
 
 ## Security model
 

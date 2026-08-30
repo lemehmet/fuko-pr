@@ -10,7 +10,10 @@ scrape/PATCH machinery PR-Agent needs does not exist here.
 Split of responsibilities across the protocol:
 
 * :meth:`AgenticBackend.invoke` runs the review (checkout, agent, parse) and
-  stashes the structured findings in memory. It posts nothing.
+  stashes the structured findings in memory. It posts nothing. It is also where
+  the per-seat open-findings ledger is carried in and settled
+  (:mod:`sidecar.reviewer.ledger`), because both ends of that -- the prompt and
+  the parsed verdicts -- exist only here.
 * :meth:`AgenticBackend.normalize_output` turns the stash into signals and
   posts them as ONE pull-request review (inline comments for anchored
   findings, the summary plus unanchored findings in the review body) under the
@@ -57,6 +60,7 @@ from ..reviewer.harness import (
     run_review,
     usage_tokens,
 )
+from ..reviewer.ledger import DEFAULT_SEAT, CarriedState, carry_in, settle
 from ..reviewer.prompt import (
     MAX_FINDINGS,
     AgenticFinding,
@@ -66,7 +70,7 @@ from ..reviewer.prompt import (
 )
 from ..signals import ReviewSignal, make_id, with_marker, with_visible_label
 from ..throttle import TIMEOUT_RETURNCODE, is_throttle
-from .base import InvokeResult, PRRef
+from .base import ENV_SEAT, InvokeResult, PRRef
 
 #: The heading every agentic review body opens with.
 _REVIEW_HEADER = "## fuko agentic review"
@@ -574,6 +578,14 @@ class AgenticBackend:
         tell from a dead channel, so a ``done`` receipt with no channels would read
         as a clean pass even if the one channel had failed.
 
+        The round is STATEFUL when a review-state store is configured (#156):
+        this seat's still-open findings from earlier rounds are rendered into the
+        prompt behind their own fence, the verdicts the agent returns on them are
+        applied, and this round's published findings become the next round's open
+        ledger. All of it is best-effort -- with no store, or an unreachable one,
+        every ledger call degrades to a no-op and the prompt is byte-for-byte the
+        one this backend built before the ledger existed.
+
         Every path that reached the harness also carries what the run spent --
         tokens, dollars, turns (#152) -- lifted from the CLI's terminal event by
         :func:`_run_costs`. This is the only backend that can report it today;
@@ -663,6 +675,15 @@ class AgenticBackend:
         except CheckoutError as e:
             return _failure_result("failed:exit 1", str(e))
 
+        # The lane this branch occupies, which is what per-PR review state is
+        # keyed by (#156). Absent for a solo config or a laptop run, which is one
+        # seat rather than none -- see `DEFAULT_SEAT`.
+        seat = env.get(ENV_SEAT, "").strip() or DEFAULT_SEAT
+        # Bound before the try so the settle pass below can read it on every path
+        # that gets that far; an empty state is exactly what a first round (or an
+        # unreachable ledger) carries.
+        carried = CarriedState()
+
         # Everything from here owns the checkout, so every exit path -- including
         # a failure to create the scratch cwd or to build the prompt -- goes
         # through the `finally` that removes it.
@@ -723,11 +744,16 @@ class AgenticBackend:
                 if ambient_config:
                     harness_env["FUKO_AMBIENT_CLAUDE_CONFIG_DIR"] = ambient_config
                 harness_env["CLAUDE_CONFIG_DIR"] = str(branch_config)
+            # Read the ledger with the checkout in hand: retiring a finding whose
+            # file this head no longer carries needs the tree, and it is the one
+            # closure fuko makes without the agent's verdict.
+            carried = carry_in(pr.repo, pr.number, seat, str(checkout), ctx.head_sha)
             prompt = build_prompt(
                 ctx,
                 env.get(_ENV_INSTRUCTIONS, ""),
                 checkout_root=str(checkout),
                 knowledge=env.get(_ENV_KNOWLEDGE, ""),
+                prior_state=carried.text,
             )
             strip_agent_config(Path(checkout))
             result = run_review(
@@ -820,6 +846,28 @@ class AgenticBackend:
         # too, or a finding the agent hedged on gets posted as a confident one.
         confident = [f for f in review.findings if f.confidence.strip().lower() != "low"]
         kept = confident[:MAX_FINDINGS]
+        # Settle the carried ledger and record this round's own findings (#156).
+        # `kept` and not `review.findings`: the ledger carries claims the author
+        # was actually shown, so a finding the confidence valve withheld must not
+        # re-enter through next round's prior-state section. Best-effort
+        # throughout -- with no store this is three no-ops and the round is
+        # indistinguishable from a pre-ledger one.
+        settlement = settle(
+            carried,
+            repo=pr.repo,
+            pr=pr.number,
+            seat=seat,
+            head_sha=ctx.head_sha,
+            prior_status=review.prior_status,
+            findings=kept,
+        )
+        if carried.rows or settlement.recorded:
+            print(
+                f"fuko: review-state seat {seat} round {carried.round}: carried "
+                f"{len(carried.rows)}, closed {settlement.closed}, re-asserted "
+                f"{settlement.reasserted}, recorded {settlement.recorded}",
+                file=sys.stderr,
+            )
         with self._lock:
             key = (pr.url, model_name, _identity(token))
             while len(self._pending) >= _MAX_PENDING and key not in self._pending:

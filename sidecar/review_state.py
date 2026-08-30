@@ -279,6 +279,32 @@ def open_findings(
     ]
 
 
+@_best_effort(lambda: 1)
+def next_round(repo: str, pr: int, seat: str) -> int:
+    """Return the round number this seat's next round should record under.
+
+    ``max(round) + 1`` over every row this seat has ever written for the pull
+    request, whatever state those rows are in now. Counting SETTLED rows too is
+    the point: a round whose findings were all fixed still happened, and
+    re-issuing its number would put two different rounds behind one label in a
+    prompt a human is expected to audit.
+
+    Returns 1 when persistence is disabled or the read fails, which is also the
+    value for a seat's first round -- both mean "nothing recorded before this",
+    and a round number is a label on rows that in the failure case are never
+    written.
+    """
+    from .db import db
+
+    with db() as conn:
+        row = conn.execute(
+            "SELECT coalesce(max(round), 0) + 1 FROM review_findings "
+            "WHERE repo = %s AND pr = %s AND seat = %s",
+            (repo, pr, seat),
+        ).fetchall()
+    return int(row[0][0]) if row and row[0] and row[0][0] is not None else 1
+
+
 @_best_effort(lambda: False)
 def transition(finding_id: str, status: str, reason: str = "") -> bool:
     """Move one ``open`` finding to ``status``; return whether a row changed.

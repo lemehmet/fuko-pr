@@ -25,7 +25,7 @@ from dataclasses import replace
 import httpx
 
 from .backends import get_backend
-from .backends.base import InvokeResult, PRRef
+from .backends.base import ENV_SEAT, InvokeResult, PRRef
 from .fukoconfig import (
     DEFAULT_CONFIG_PATH,
     FukoConfig,
@@ -807,6 +807,13 @@ def _run_pool(
         preset = get_preset(model.provider)
         env = backend.build_env(preset, model, knowledge, tools)
         env.update(gh_env)
+        # The BRANCH's seat, not the answering entry's: per-seat review state is
+        # keyed by the lane, and a promoted backup rescues its branch rather than
+        # opening a lane of its own. Same rule the metrics row follows for
+        # `slot`, and the reason this is set here instead of derived inside
+        # `build_env` from `model.token_env` -- a backup has none.
+        if slot:
+            env[ENV_SEAT] = slot
         if fresh_comment:
             env.update(_FRESH_COMMENT_ENV)
 

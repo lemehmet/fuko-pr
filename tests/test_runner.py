@@ -2129,6 +2129,43 @@ def test_run_pool_records_the_full_pool_entry_identity(monkeypatch, tmp_path):
     assert result.provider == "anthropic/claude-sonnet-4-6"
 
 
+def test_run_pool_names_the_branchs_seat_in_the_backend_env(monkeypatch):
+    """Per-seat review state is keyed by the LANE (#156).
+
+    The seat comes from the branch's slot, not from the answering entry: a
+    promoted backup has no ``token_env`` of its own, so deriving it inside
+    ``build_env`` would split one lane's ledger mid-failover.
+    """
+    monkeypatch.setenv("ANTHROPIC_KEY", "antkey")
+    seen: list[dict] = []
+
+    class FakeBackend:
+        def build_env(self, preset, model, knowledge, tools):
+            return {}
+
+        def invoke(self, pr, env, tools):
+            seen.append(dict(env))
+            return InvokeResult(returncode=0)
+
+    monkeypatch.setattr(runner, "_normalize", lambda *a, **k: 0)
+    monkeypatch.setattr(runner, "_record_run", lambda *a, **k: None)
+    backup = ModelConfig(provider="anthropic", name="claude-backup", key_env="ANTHROPIC_KEY")
+    for slot, expected in (("dorian", "dorian"), (None, None)):
+        runner._run_pool(
+            FakeBackend(),
+            PRRef("o/r", 8, "u"),
+            "",
+            {},
+            _review_config_for_receipts(),
+            [backup],
+            set(),
+            None,
+            tools=["review"],
+            slot=slot,
+        )
+        assert seen[-1].get("FUKO_SEAT") == expected
+
+
 def test_primary_success_is_not_reported_as_a_promotion(monkeypatch):
     """End-to-end guard on the bug above: label == model means no promotion text."""
     patched = {}
