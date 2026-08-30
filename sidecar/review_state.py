@@ -63,6 +63,12 @@ RETENTION_DAYS = 90
 Generous enough that no live pull request falls out of its own ledger (mepro's
 longest-running branches span weeks), tight enough that the reads stay bounded
 as the tables accumulate closed PRs.
+
+Measured from the column that records ACTIVITY, which differs per ledger: a
+finding from ``updated_at``, since a later round can re-assert it and that
+re-assertion is what keeps it live (:func:`open_findings`); a coverage row from
+``created_at``, since coverage is never touched after it is written -- it is
+expired, and expired rows are already excluded.
 """
 
 MAX_OPEN_FINDINGS = 200
@@ -210,6 +216,22 @@ def open_findings(
     Oldest first so the minted ``p1..pN`` ids stay stable as new rounds append:
     a finding keeps the id it had last round unless something ahead of it closed,
     which makes a prompt diff between two rounds readable by a human.
+
+    Two details make that ordering and that window mean what they say:
+
+    * the retention window is measured from ``updated_at``, not ``created_at``.
+      A round that re-asserts a finding refreshes ``updated_at``
+      (:func:`touch_findings`), so an unsettled finding a seat is still looking
+      at stays inside the window however long the branch lives; keyed on
+      ``created_at`` it would age out of its own ledger while still open, which
+      is exactly the silent loss this table exists to stop.
+    * ``id`` breaks the tie. One round's findings are inserted in a single
+      transaction, so ``now()`` -- and therefore ``created_at`` -- is identical
+      for every row of that round, and equal sort keys have no stable order in
+      Postgres. Ordering on the primary key makes same-round siblings arbitrary
+      but FIXED relative to each other, which is what the stability above needs;
+      without it their ``pN`` ids could permute between two reads that settled
+      nothing.
     """
     from .db import db
 
@@ -218,8 +240,8 @@ def open_findings(
             "SELECT id, file, line, severity, category, title, body, round "
             "FROM review_findings "
             "WHERE repo = %s AND pr = %s AND seat = %s AND status = 'open' "
-            "AND created_at > now() - make_interval(days => %s) "
-            "ORDER BY round, created_at LIMIT %s",
+            "AND updated_at > now() - make_interval(days => %s) "
+            "ORDER BY round, created_at, id LIMIT %s",
             (repo, pr, seat, RETENTION_DAYS, min(max(1, limit), MAX_OPEN_FINDINGS)),
         ).fetchall()
     return [
@@ -378,17 +400,31 @@ def expire_coverage(repo: str, pr: int, seat: str, files: Sequence[str] | None =
 
     An empty sequence expires NOTHING and is not the same as ``None``: a round
     whose delta touched no file must not silently discard the ledger.
+
+    Each branch carries its OWN complete statement rather than concatenating a
+    fragment onto a shared one: the placeholders and the parameters that fill
+    them are then written together and can only drift together. It also keeps
+    every string reaching ``execute`` a literal, which is what a reader (and a
+    static analyser) has to prove about a query built in Python.
     """
     if files is not None and not files:
         return 0
     from .db import db
 
-    where = "repo = %s AND pr = %s AND seat = %s AND expired_at IS NULL"
-    params: list = [repo, pr, seat]
-    if files is not None:
-        where += " AND file = ANY(%s)"
-        params.append(list(files))
+    if files is None:
+        sql = (
+            "UPDATE review_coverage SET expired_at = now() "
+            "WHERE repo = %s AND pr = %s AND seat = %s AND expired_at IS NULL"
+        )
+        params: tuple = (repo, pr, seat)
+    else:
+        sql = (
+            "UPDATE review_coverage SET expired_at = now() "
+            "WHERE repo = %s AND pr = %s AND seat = %s AND expired_at IS NULL "
+            "AND file = ANY(%s)"
+        )
+        params = (repo, pr, seat, list(files))
 
     with db() as conn:
-        cur = conn.execute(f"UPDATE review_coverage SET expired_at = now() WHERE {where}", params)
+        cur = conn.execute(sql, params)
         return cur.rowcount or 0

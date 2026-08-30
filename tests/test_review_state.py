@@ -186,9 +186,31 @@ def test_open_findings_returns_rows_paired_with_their_prior_finding(pg):
         round=2,
     )
     sql, params = conn.statements[0]
-    assert "status = 'open'" in sql and "ORDER BY round, created_at" in sql
+    assert "status = 'open'" in sql and "ORDER BY round, created_at, id" in sql
     assert params[3] == review_state.RETENTION_DAYS
     assert params[4] == review_state.MAX_OPEN_FINDINGS
+
+
+def test_open_findings_measures_retention_from_the_last_reassertion(pg):
+    """``touch_findings`` is what keeps an unsettled finding live, so the window
+    has to be measured from ``updated_at``: keyed on ``created_at`` a finding a
+    seat is still re-asserting would age out of its own ledger."""
+    conn = pg()
+    review_state.open_findings("o/r", 7, "henry")
+
+    sql = conn.statements[0][0]
+    assert "updated_at > now() - make_interval(days => %s)" in sql
+    assert "created_at > now()" not in sql
+
+
+def test_open_findings_orders_same_round_findings_by_a_total_tiebreaker(pg):
+    """One round's rows share a transaction timestamp, and equal sort keys have
+    no stable order in Postgres -- so the minted ``pN`` ids would permute between
+    reads without an immutable tiebreaker."""
+    conn = pg()
+    review_state.open_findings("o/r", 7, "henry")
+
+    assert conn.statements[0][0].endswith("ORDER BY round, created_at, id LIMIT %s")
 
 
 def test_open_findings_clamps_a_caller_supplied_limit(pg):
