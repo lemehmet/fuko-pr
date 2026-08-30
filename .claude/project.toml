@@ -20,14 +20,21 @@ url = "https://github.com/lemehmet/fuko-pr"
 # [bots.fuko_pr].login, [bots.coderabbit].resume_command and [fuko].github_ref,
 # so all of those sections must be present even if a reviewer is observe-only.
 [bots]
-gate_reviewers = ["coderabbit", "copilot"]
+# Copilot RETIRED 2026-08-30 (per mehmet) — dropped from the gate and from the
+# reply audit. Its [bots.copilot] section below is deliberately KEPT: issue.md
+# and address-pr-reviews.md both do a hard `c['bots']['copilot']['login']`
+# lookup in their preamble load block, so deleting the section crashes every
+# child before it starts.
+gate_reviewers = ["coderabbit"]
 # Substring-matched (case-insensitive) against comment author logins. "fuko-"
 # matches every fuko reviewer App instance (fuko-dorian[bot], fuko-gray[bot], …)
 # so a GitHub-App rename or a second instance can't silently drop fuko findings
 # from the §10 reply audit — the finding-detection path (fuko signals) is
 # format-based and already login-independent.
-triage_logins = ["coderabbitai", "copilot", "fuko-"]
+triage_logins = ["coderabbitai", "fuko-"]
 
+# RETIRED — kept only to satisfy the skills' hard config lookup (see the note on
+# gate_reviewers above). Nothing gates on it any more.
 [bots.copilot]
 login = "copilot-pull-request-reviewer[bot]"
 unresponsive_timeout_ms = 600000   # 10 min (Copilot doesn't self-recover)
@@ -46,14 +53,14 @@ gated = false   # observe-only: triaged + replied, but not a round-gate particip
 
 [ci]
 # Workflow names to ignore in BUILD_STATE (observe-only or bot-review mirrors,
-# not merge gates). On this repo the Copilot review surfaces in actions/runs as
-# "Running Copilot Code Review" (verified) — NOT the template's "Copilot code
-# review" — so match that exact name. "fuko-pr review" is the recursive-dogfood
+# not merge gates). The "Running Copilot Code Review" entry was dropped
+# 2026-08-30 with Copilot itself — the workflow no longer runs, so excluding it
+# described a reviewer that is gone. "fuko-pr review" is the recursive-dogfood
 # A/B self-review (observe-only per [bots.fuko_pr].gated=false); it runs ~30 min
 # on every push and must not gate the cycle. CodeRabbit posts check-runs, not
 # Actions runs, so it never enters BUILD_STATE and needs no exclusion here. The
 # real gate left is "ci" (ruff + pytest).
-excluded_workflow_names = ["Running Copilot Code Review", "fuko-pr review"]
+excluded_workflow_names = ["fuko-pr review"]
 
 # Local pre-push verification gates + web smoke build. Mirrors .github/workflows/ci.yml.
 [toolchain]
