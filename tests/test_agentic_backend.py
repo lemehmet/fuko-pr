@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from sidecar import review_state
+from sidecar import review_state_client as rsc
 from sidecar.review_state import StoredFinding
 from sidecar.reviewer.prompt import PriorCoverage, PriorFinding
 from sidecar.throttle import TIMEOUT_RETURNCODE
@@ -95,8 +96,19 @@ def _no_ambient_review_state(monkeypatch):
     driver's unit tests would quietly start reading and writing the live test
     Postgres. Tests that exercise the ledger patch the primitives directly
     (``_ledger``), which bypasses this gate on purpose.
+
+    That covers the LOCAL branch only, and since #171 the transport is chosen at
+    call time: a test that puts ``FUKO_URL`` back into the environment picks the
+    HTTP branch and routes around this fixture entirely. Only one test does --
+    the namespace-strip test, which has to, because ``FUKO_URL`` is one of the
+    variables whose stripping it asserts -- and it points at an unroutable
+    address for exactly that reason. The latch is pinned here too so that when
+    such a test trips it, the flag is restored on teardown: it is process-wide
+    and never reset by design, so a leaked ``True`` would silently no-op the
+    ledger for every test that ran afterwards in the same session.
     """
     monkeypatch.setattr(review_state.settings, "database_url", "")
+    monkeypatch.setattr(rsc, "_transport_down", False)
 
 
 def test_registered_in_backend_registry():
@@ -376,11 +388,21 @@ def test_invoke_strips_the_whole_fuko_namespace_from_the_harness_env(monkeypatch
     spelling of the same bearer secret (`Settings` reads `auth_token` from the
     `FUKO_` prefix) and `FUKO_EMBED_API_KEY` is behind it, and neither is in the
     workflow's exports where one would go looking.
+
+    The VALUES are deliberately unroutable. This test has to put `FUKO_URL` back
+    into the environment -- it is one of the variables whose stripping is the
+    subject -- which locally defeats `conftest`'s `_no_ambient_sidecar`, and
+    `_invoke` stubs the harness but not the ledger, so `invoke()` runs the real
+    `carry_in`/`settle` through the real transport. A plausible-looking LAN
+    hostname here would have this suite issue live ledger calls, and `pytest`
+    runs on the same self-hosted fleet as the review workflow, where such a host
+    resolves. `127.0.0.1:1` refuses instantly instead. Raised by
+    `qwen-anthropic/qwen3.8-max` on #171.
     """
     secrets = {
-        "FUKO_URL": "http://sidecar.lan:8000",
+        "FUKO_URL": "http://127.0.0.1:1",
         "FUKO_TOKEN": "ledger-write-secret",
-        "FUKO_DATABASE_URL": "postgresql://fuko:secret@db/fuko",
+        "FUKO_DATABASE_URL": "postgresql://user:secret@127.0.0.1:1/never",
         "FUKO_AUTH_TOKEN": "the-same-secret-server-side",
         "FUKO_EMBED_API_KEY": "embed-secret",
         "FUKO_SOMETHING_NOBODY_HAS_ADDED_YET": "future-secret",
