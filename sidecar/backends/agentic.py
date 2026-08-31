@@ -45,7 +45,7 @@ import httpx
 
 from ..fukoconfig import ModelConfig, ReviewConfig
 from ..logfmt import flatten_for_log as _flatten_for_log
-from ..presets import ProviderPreset
+from ..presets import PRESETS, ProviderPreset
 from ..reviewer.checkout import (
     CheckoutError,
     checkout_pr_head,
@@ -349,6 +349,35 @@ _GITHUB_CRED_VARS = (
 _FUKO_ENV_PREFIX = "FUKO_"
 
 
+def _provider_key_vars() -> frozenset[str]:
+    """Every model-provider key env var the preset table names.
+
+    The fleet's runner exports one secret per configured provider into the step
+    this process runs in -- ``ZAI_KEY``, ``OPENROUTER_KEY``, ``OLLAMA_API_KEY``,
+    ``ANTHROPIC_KEY``, ``QWEN_TOKEN_PLAN_KEY`` -- because the PARENT builds every
+    seat's environment and needs all of them. The harness needs none: the seat's
+    own credential is injected deliberately, as ``ANTHROPIC_API_KEY`` in api-key
+    mode, from the entry's own config (:meth:`AgenticBackend.build_env`), which
+    reads it in THIS process. So what an unfiltered inheritance carries into the
+    agent is the undisplaced originals -- a seat on the QwenCloud key holding
+    four other providers' live keys, with no use for any of them. That is the
+    same pure-blast-radius shape :data:`_GITHUB_CRED_VARS` exists for, reachable
+    the same way (``/proc/self/environ``, a denial :data:`sidecar.reviewer.
+    harness.SENSITIVE_SYSTEM_DIRS` calls reasoned rather than measured) and
+    egressing the same way (findings are published verbatim to a PR author). It
+    is worse in one respect than the ``FUKO_`` case: a leaked provider key is
+    billable to the operator immediately and is scoped to no repository.
+
+    DERIVED from :data:`sidecar.presets.PRESETS` rather than listed, for the
+    reason the ``FUKO_`` fix ended up a namespace: a hardcoded tuple silently
+    stops covering the fleet the day someone adds a preset, and adding a preset
+    is meant to be data rather than code. Read live rather than snapshotted at
+    import so a late table registration cannot outrun the strip -- the table is
+    a handful of entries, so the cost is nothing next to a review run.
+    """
+    return frozenset(p.key_env for p in PRESETS.values() if p.key_env)
+
+
 #: How many completed-but-unclaimed reviews to retain. Generous next to any real
 #: fleet (a PR runs one branch per active model), small enough that a leak stays
 #: a bounded one.
@@ -581,10 +610,13 @@ class AgenticBackend:
         """Check out the PR head, run the agent, and stash the parsed findings.
 
         The harness subprocess gets the ambient environment MINUS every GitHub
-        credential and MINUS everything that decides who pays or where the
-        traffic goes (see :data:`_ANTHROPIC_INHERITED_VARS`), plus exactly what
-        its auth mode means to use. **Config decides, never the ambient
-        environment**: api-key mode re-injects ``ANTHROPIC_BASE_URL`` only from
+        credential, MINUS every model-provider key the preset table names (see
+        :func:`_provider_key_vars` -- the seat's own key is re-injected below
+        from config, so the raw workflow spellings are only other seats' keys),
+        and MINUS everything that decides who pays or where the traffic goes
+        (see :data:`_ANTHROPIC_INHERITED_VARS`), plus exactly what its auth mode
+        means to use. **Config decides, never the ambient environment**:
+        api-key mode re-injects ``ANTHROPIC_BASE_URL`` only from
         ``model.base_url or preset.base_url``, so a gateway user sets
         ``base_url`` on the model entry rather than exporting it, and
         subscription mode never gets a base URL at all -- an inherited one
@@ -659,12 +691,14 @@ class AgenticBackend:
             )
         auth = env.get(_ENV_AUTH, _AUTH_SUBSCRIPTION)
 
+        provider_key_vars = _provider_key_vars()
         harness_env = {
             k: v
             for k, v in os.environ.items()
             if k not in _GITHUB_CRED_VARS
             and not k.startswith(_FUKO_ENV_PREFIX)
             and k not in _ANTHROPIC_INHERITED_VARS
+            and k not in provider_key_vars
         }
         # Auth-mode-independent: the entry's context window rides along
         # whenever build_env derived one (from `max_context`). The ambient
