@@ -656,10 +656,13 @@ _EXAMINED_REQUIRED_FIELDS = ("checked", "conclusion", "evidence")
 # exists for. Every model-controlled span in the message is therefore clipped so
 # the total is bounded by construction rather than by hope; the ceiling is
 # pinned adversarially by `test_hollow_examined_runbook_survives_the_receipt`.
-# 180 + the 255-character fixed prose + a wide finding count stays under 460
-# whatever the model wrote, so the actionable clause is never the part cut.
-_LOCATOR_BUDGET = 180
+# The arithmetic: 273 characters of fixed prose + 165 of locator + 12 of finding
+# count = 450 <= 460, whatever the model wrote, so the actionable clause is
+# never the part cut. The count is clipped for the same reason as the rest -- it
+# is `len(payload["findings"])`, which the model also chooses.
+_LOCATOR_BUDGET = 165
 _REGION_BUDGET = 60
+_COUNT_BUDGET = 12
 
 
 def _clip(value: object, limit: int) -> str:
@@ -679,11 +682,19 @@ def _hollow_examined_runbook(exc: ValidationError, payload: object) -> str | Non
     *reviewer's* output rather than in their own change, which is the difference
     between merging and hunting a phantom bug.
 
+    A required field supplied as ``null`` (or as any other non-string) is the
+    same hollow coverage claim as an omitted one and routes here too, but
+    pydantic reports it at the identical ``loc`` with a different ``type``, so
+    the two are named apart -- ``missing`` for an absent key, ``invalid`` for a
+    present but unusable value. Calling a present key missing would send the
+    reader looking for something the dumped payload beside it plainly contains
+    (CodeRabbit and `qwen-anthropic/qwen3.8-max`, #178).
+
     Returns ``None`` when no error names one of the three required
     ``ExaminedRegion`` fields, so every other structural failure keeps the
     generic message unchanged.
     """
-    hollow: dict[int, list[str]] = {}
+    hollow: dict[int, dict[str, bool]] = {}
     others = 0
     for err in exc.errors():
         loc = err.get("loc", ())
@@ -693,14 +704,22 @@ def _hollow_examined_runbook(exc: ValidationError, payload: object) -> str | Non
             and isinstance(loc[1], int)
             and loc[2] in _EXAMINED_REQUIRED_FIELDS
         ):
-            hollow.setdefault(loc[1], []).append(str(loc[2]))
+            hollow.setdefault(loc[1], {})[str(loc[2])] = err.get("type") == "missing"
         else:
             others += 1
     if not hollow:
         return None
 
     index = min(hollow)
-    missing = ", ".join(f for f in _EXAMINED_REQUIRED_FIELDS if f in hollow[index])
+    fields = hollow[index]
+    faults = "; ".join(
+        f"{verb} {', '.join(names)}"
+        for verb, names in (
+            ("missing", [f for f in _EXAMINED_REQUIRED_FIELDS if fields.get(f)]),
+            ("invalid", [f for f in _EXAMINED_REQUIRED_FIELDS if f in fields and not fields[f]]),
+        )
+        if names
+    )
     entries = payload.get("examined") if isinstance(payload, Mapping) else None
     entry = entries[index] if isinstance(entries, list) and index < len(entries) else None
     where = ""
@@ -717,12 +736,14 @@ def _hollow_examined_runbook(exc: ValidationError, payload: object) -> str | Non
         tails.append(f"+{others} other")
     extra = f" ({', '.join(tails)})" if tails else ""
     locator = _clip(
-        f"examined[{index}] ({where or 'no file recorded'}) missing {missing}{extra}",
+        f"examined[{index}] ({where or 'no file recorded'}) {faults}{extra}",
         _LOCATOR_BUDGET,
     )
     return (
-        f"reviewer output rejected: {locator}; round discarded, {lost} finding(s) "
-        "lost; fault is the reviewer model's output, not the PR diff; next: "
+        f"reviewer output rejected: {locator}; round discarded, "
+        f"{_clip(lost, _COUNT_BUDGET)} finding(s) "
+        "in the rejected output; fault is the reviewer model's output, not the "
+        "PR diff; next: "
         "re-run this seat; if the same model repeats it, swap the seat or "
         "promote its backup; if urgent, merge without this seat's coverage."
     )

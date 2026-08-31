@@ -1693,7 +1693,7 @@ def test_hollow_examined_runbook_survives_the_receipt(monkeypatch, capsys):
     for element in (
         "examined[0]",
         "missing checked, conclusion, evidence",
-        "25 finding(s) lost",
+        "25 finding(s) in the rejected output",
         "not the PR diff",
         "re-run this seat",
     ):

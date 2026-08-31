@@ -684,10 +684,32 @@ def test_hollow_examined_entry_raises_a_runbook_not_a_schema_complaint():
     assert "examined[1]" in message  # which entry, not "1 validation error"
     assert "sidecar/backends/agentic.py" in message and "L120-L240" in message
     assert "missing conclusion, evidence" in message  # and which fields
-    assert "5 finding(s) lost" in message  # what it cost, at scale
+    assert "5 finding(s) in the rejected output" in message  # what it cost, at scale
     assert "not the PR diff" in message  # where the fault is NOT
     assert "re-run this seat" in message and "promote its backup" in message
     assert "merge without this seat's coverage" in message
+
+
+def test_hollow_examined_runbook_separates_absent_fields_from_unusable_ones():
+    """A present-but-null required field is hollow too, and must not read as absent.
+
+    pydantic reports both at the same ``loc``, so a loc-only classification
+    calls a key the payload plainly contains "missing" -- the exact confusion
+    the runbook exists to remove (CodeRabbit and `qwen-anthropic/qwen3.8-max`,
+    #178). The entry still fails the round either way: a coverage claim whose
+    conclusion is ``null`` records no conclusion.
+    """
+    payload = {
+        "examined": [{"file": "a.py", "conclusion": None, "evidence": "e"}],
+    }
+    with pytest.raises(ReviewParseError) as excinfo:
+        parse_review(json.dumps(payload))
+    message = str(excinfo.value)
+
+    assert "missing checked" in message  # the omitted key
+    assert "invalid conclusion" in message  # the null one, named apart
+    assert "missing checked, conclusion" not in message
+    assert "0 finding(s) in the rejected output" in message
 
 
 def test_other_structural_failures_keep_the_generic_parse_message():
