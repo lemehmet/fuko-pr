@@ -188,7 +188,11 @@ def get_pool(*, timeout: float | None = None) -> ConnectionPool:
             best-effort one -- the wait that #170 is about happens on THIS
             connection, and a bound applied only afterwards would never be
             reached. It does not bound the migration statements themselves,
-            which run once the connection is in hand.
+            which run once the connection is in hand, nor the wait for
+            ``_pool_lock``, which is held across the whole creation -- so a
+            caller can still queue behind someone else's, and concurrent
+            first-time callers against a dead store each run their own attempt.
+            Both are residuals of the acquisition-only bound; tracked in #207.
     """
     global _pool
     if _pool is not None:
@@ -244,13 +248,30 @@ class StoreUnavailable(PoolTimeout):
     """
 
 
-def _reject_while_latched() -> None:
-    """Fail immediately if the store was found unreachable within the cooldown."""
-    if _unreachable_until and time.monotonic() < _unreachable_until:
-        raise StoreUnavailable(
-            f"postgres was unreachable within the last {BEST_EFFORT_COOLDOWN_S:.0f}s; "
-            "this best-effort call was skipped rather than waited out"
-        )
+def _enter_probe() -> int:
+    """Refuse a latched call, or return the generation to unlatch against later.
+
+    Both halves under one acquisition of :data:`_latch_lock`, because they are
+    one decision. Reading the generation *after* a separate rejection check
+    would leave a window in between: a concurrent failure latching there would
+    hand this call the NEW generation, and its own success would then clear a
+    failure it never tested -- the same mistake :func:`_unlatch` guards against,
+    one step earlier. Taking the lock once makes that interleaving
+    unrepresentable rather than merely unlikely.
+
+    Returns:
+        :data:`_latch_gen` as of the check, for :func:`_unlatch`.
+
+    Raises:
+        StoreUnavailable: The store was found unreachable within the cooldown.
+    """
+    with _latch_lock:
+        if _unreachable_until and time.monotonic() < _unreachable_until:
+            raise StoreUnavailable(
+                f"postgres was unreachable within the last {BEST_EFFORT_COOLDOWN_S:.0f}s; "
+                "this best-effort call was skipped rather than waited out"
+            )
+        return _latch_gen
 
 
 def _latch(exc: Exception) -> None:
@@ -371,8 +392,7 @@ def db_best_effort():
     Raises:
         StoreUnavailable: The latch is closed; nothing was attempted.
     """
-    _reject_while_latched()
-    gen = _latch_gen
+    gen = _enter_probe()
     try:
         with db(timeout=BEST_EFFORT_TIMEOUT_S) as conn:
             _unlatch(gen)

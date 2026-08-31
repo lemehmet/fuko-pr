@@ -189,6 +189,36 @@ def test_a_probe_does_not_clear_a_newer_failure(pool, monkeypatch):
     assert fake.attempts == 1
 
 
+def test_a_failure_during_the_probe_survives_that_probes_success(pool, monkeypatch):
+    """The other end of the same window: a latch landing while the probe runs.
+
+    The generation is captured with the rejection check, under one lock, so the
+    interleaving between those two no longer exists to be tested. What can still
+    happen is a concurrent failure *after* the check and before the acquisition
+    returns -- which this reproduces by latching from inside the ``db`` call
+    ``db_best_effort`` makes.
+    """
+    fake = pool()
+    acquire = db.db
+
+    @contextlib.contextmanager
+    def latch_during_acquisition(*, timeout=None):
+        db._latch(PoolTimeout("a concurrent call found it down"))
+        with acquire(timeout=timeout) as conn:
+            yield conn
+
+    monkeypatch.setattr(db, "db", latch_during_acquisition)
+
+    with db.db_best_effort():
+        pass
+
+    assert db._unreachable_until != 0.0
+    monkeypatch.setattr(db, "db", acquire)
+    with pytest.raises(db.StoreUnavailable), db.db_best_effort():
+        pass  # pragma: no cover
+    assert fake.attempts == 1
+
+
 def test_a_saturated_pool_does_not_latch(pool, monkeypatch, capsys):
     """Connections held and none free is a queue, not an outage."""
     fake = pool(PoolTimeout("couldn't get a connection after 2.00 sec"))
