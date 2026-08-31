@@ -243,6 +243,12 @@ def test_review_state_ledgers_roundtrip_on_a_live_server():
     be swallowed by ``_best_effort`` and read as "nothing to settle": findings
     would insert and read back while never transitioning, and the open ledger
     would grow without bound.
+
+    ``count(*) OVER ()`` is here for the same reason: a recording connection
+    replays whatever the fake decided the window column holds, so only a real
+    server can show that the count is evaluated after the ``WHERE`` and before
+    the ``LIMIT`` -- which is the whole basis for ``truncated`` being unable to
+    disagree with the rows it accompanies.
     """
     from sidecar import review_state as R
     from sidecar.reviewer.prompt import AgenticFinding, ExaminedRegion
@@ -262,12 +268,19 @@ def test_review_state_ledgers_roundtrip_on_a_live_server():
 
     assert R.record_findings(TEST_REPO, 1, "henry", 0, head, [_finding("a"), _finding("b")]) == 2
 
-    stored = R.open_findings(TEST_REPO, 1, "henry")
+    ledger = R.open_findings(TEST_REPO, 1, "henry")
+    stored = ledger.rows
     assert sorted(s.prior.title for s in stored) == ["a", "b"]
+    assert ledger.truncated == 0
+    # A window the cap cuts: two open rows, one asked for, so the count the
+    # server computes over the pre-LIMIT window must report the other one.
+    cut = R.open_findings(TEST_REPO, 1, "henry", limit=1)
+    assert len(cut.rows) == 1
+    assert cut.truncated == 1
     # Same-round rows share a transaction timestamp, so their relative order is
     # decided by the ``id`` tiebreaker: arbitrary, but the same on every read --
     # which is the stability the minted ``pN`` ids depend on.
-    assert [s.id for s in R.open_findings(TEST_REPO, 1, "henry")] == [s.id for s in stored]
+    assert [s.id for s in R.open_findings(TEST_REPO, 1, "henry").rows] == [s.id for s in stored]
 
     # str id against a uuid column, both shapes the store uses.
     assert R.touch_findings([s.id for s in stored]) == 2
@@ -275,7 +288,7 @@ def test_review_state_ledgers_roundtrip_on_a_live_server():
     assert R.transition(settled.id, "fixed", "rewritten in this head") is True
     assert R.transition(settled.id, "fixed", "replayed stale id") is False
 
-    assert [s.prior.title for s in R.open_findings(TEST_REPO, 1, "henry")] == ["b"]
+    assert [s.prior.title for s in R.open_findings(TEST_REPO, 1, "henry").rows] == ["b"]
 
     region = ExaminedRegion(
         file="src/app.py",
