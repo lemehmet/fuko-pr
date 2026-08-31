@@ -76,6 +76,28 @@ class ModelConfig(BaseModel):
             "reason the second seat exists."
         ),
     )
+    findings_ledger: bool = Field(
+        default=True,
+        description=(
+            "Carry this seat's own findings ledger: show a round the claims its "
+            "earlier rounds left open, apply the verdicts it returns on them, "
+            "and record what it published for the next round (#156). Read by "
+            "the agentic backend only. Default ON, which is the OPPOSITE "
+            "polarity to `coverage_ledger`, and deliberately so: Tier 1 shipped "
+            "unconditional, so an opt-in would silently strip carried state "
+            "from every fleet that merely bumps its pinned fuko revision. The "
+            "flag exists to make a genuinely STATELESS arm expressible for the "
+            "#159 A/B -- before it, `carry_in`/`settle` ran for every agentic "
+            "seat and both arms of a stateful-vs-stateless experiment were "
+            "stateful. Off means no read, no verdicts and no write, and the "
+            "prior-state section is absent from the prompt entirely; what "
+            "remains of the ledger era is the output contract, which is "
+            "unconditional and therefore identical in both arms. Turning it "
+            "back on self-heals -- the next flag-on round "
+            "retires rows whose files the head no longer carries against the "
+            "checkout it already has."
+        ),
+    )
     tool_timeout: int | None = Field(
         default=None,
         description=(

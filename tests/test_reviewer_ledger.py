@@ -1325,3 +1325,135 @@ def test_no_store_configured_carries_nothing_and_records_nothing(monkeypatch):
 def test_default_seat_is_a_seat_not_a_missing_key():
     """A solo config is one seat; it must still get a ledger of its own."""
     assert ledger.DEFAULT_SEAT and os.sep not in ledger.DEFAULT_SEAT
+
+
+def test_a_seat_with_the_findings_ledger_off_neither_reads_nor_writes_findings(monkeypatch, store):
+    """#159's stateless arm: no read, no retirement, no verdicts, no write.
+
+    The forbidden set is the whole Tier 1 surface, including ``settled_findings``
+    -- the reopen path is a read of the closed ledger and a stateless arm must
+    not take it either.
+    """
+    for name in ("open_findings", "record_findings", "touch_findings", "settled_findings"):
+        monkeypatch.setattr(review_state, name, _forbidden(name))
+
+    carried = carry_in(REPO, PR, SEAT, touched_files=["src/app.py"], findings_ledger=False)
+    outcome = settle(
+        carried,
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        findings=[_finding()],
+        findings_ledger=False,
+    )
+
+    assert carried.text == ""
+    assert carried.rows == {} and carried.truncated == 0
+    assert outcome.recorded == 0 and outcome.closed == 0 and outcome.reasserted == 0
+
+
+def test_a_flag_off_round_applies_no_verdict_even_holding_a_carried_state(monkeypatch, store):
+    """Off writes nothing on THIS call's arguments, not on how they were built.
+
+    The in-flow pairing (flag-off ``carry_in`` -> flag-off ``settle``) leaves the
+    verdict pass empty anyway, so this exercises the mismatched pair the public
+    signature permits: a carried state minted while the flag was on, settled by a
+    round that has it off. Nothing may close.
+    """
+    settle(
+        carry_in(REPO, PR, SEAT),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        findings=[_finding()],
+    )
+    carried = carry_in(REPO, PR, SEAT)
+    minted = next(iter(carried.state.ids))
+    for name in ("transition", "touch_findings", "record_findings"):
+        monkeypatch.setattr(review_state, name, _forbidden(name))
+
+    outcome = settle(
+        carried,
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head2",
+        prior_status=[PriorFindingStatus(id=minted, status="fixed", reason="gone")],
+        # Re-published too, so the matching pass would have a carried claim to
+        # hit: a suppressed WRITE alone still reports the dedup it did not make.
+        findings=[_finding()],
+        findings_ledger=False,
+    )
+
+    assert outcome == ledger.Settlement()
+    # The row is untouched, so a later flag-on round is still offered it.
+    assert _finding().title in carry_in(REPO, PR, SEAT).text
+
+
+def test_the_findings_gate_is_the_only_difference_between_the_two_arms(store):
+    """A round's own claim reaches the next round's prompt iff the flag is on."""
+    settle(
+        carry_in(REPO, PR, SEAT),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        findings=[_finding()],
+    )
+
+    assert _finding().title in carry_in(REPO, PR, SEAT).text
+    assert carry_in(REPO, PR, SEAT, findings_ledger=False).text == ""
+
+
+def test_turning_the_findings_ledger_off_loses_nothing_a_later_round_needs(store):
+    """Off is a gate on THIS round, not a wipe: the rows are still there after."""
+    settle(
+        carry_in(REPO, PR, SEAT),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        findings=[_finding()],
+    )
+    stateless = carry_in(REPO, PR, SEAT, findings_ledger=False)
+    settle(
+        stateless,
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head2",
+        findings=[_finding(title="a second claim")],
+        findings_ledger=False,
+    )
+
+    back_on = carry_in(REPO, PR, SEAT)
+    assert _finding().title in back_on.text
+    # The stateless round's OWN finding was never written, which is the point:
+    # rows recorded while switched off would return as claims a flag-on round
+    # could not have settled.
+    assert "a second claim" not in back_on.text
+
+
+def test_the_two_tiers_are_independent_switches(store):
+    """Tier 2 on with Tier 1 off still records coverage, and expiry still runs."""
+    outcome = settle(
+        carry_in(REPO, PR, SEAT, findings_ledger=False, coverage_ledger=True),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        findings=[_finding()],
+        examined=[_examined()],
+        findings_ledger=False,
+        coverage_ledger=True,
+    )
+
+    assert outcome.coverage == 1 and outcome.recorded == 0
+    # Expiry is unconditional, so the delta that touches the examined file kills
+    # the entry even on a round whose Tier 1 is off.
+    assert (
+        carry_in(REPO, PR, SEAT, touched_files=[_examined().file], findings_ledger=False).expired
+        == 1
+    )

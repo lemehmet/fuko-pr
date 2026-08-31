@@ -69,22 +69,35 @@ job_budget_minutes = 110
 # agentic-vs-diff trial held the model fixed and varied the harness. Both trial
 # seats are non-gating; henry keeps the gate.
 #
-# KNOWN GAP, and #159's first task: a truly stateless control is NOT expressible
-# in config today. `coverage_ledger` (Tier 2, #157) is per-entry, but Tier 1's
-# findings ledger is called UNCONDITIONALLY — `carry_in`/`settle` in
-# sidecar/backends/agentic.py run for every agentic seat. So as configured below
-# the experiment varies Tier 2 ONLY, and the control still carries findings
-# across rounds. #159 must add a per-entry gate for the findings ledger before
-# its receipts can answer the question the issue actually asks. Do not read the
-# seat names as if that gate already exists.
+# THE VARIABLE IS THE STATE BUNDLE, both tiers at once. `coverage_ledger`
+# (Tier 2, #157) was already per-entry; `findings_ledger` (Tier 1, #156) became
+# per-entry in #159, which is what makes a genuinely stateless control
+# expressible — before it, `carry_in`/`settle` ran for every agentic seat and
+# BOTH arms of a stateful-vs-stateless experiment carried findings across
+# rounds. The control turns both off, the treatment turns both on. That is a
+# bundle rather than one knob on purpose: #159 asks whether the STATEFUL
+# REVIEWER ships, and shipping it means both tiers; isolating which tier earns
+# its keep is a question for a follow-up A/B on the tier that survives.
+#
+# `findings_ledger` defaults ON (opposite polarity to `coverage_ledger`), so
+# `= true` on the treatment is redundant and written anyway: on a receipts
+# experiment the arm that carries state should say so in the file being read
+# next to the numbers.
 #
 # Tier 3 (repo-level digests, #158) is gated by the FUKO_DIGEST_RETRIEVAL env
 # var, which is global rather than per-entry and is OFF. It is not part of this
 # A/B; turning it on would change both arms at once.
 
-# henry — the GATING seat, and the control's twin: same provider, same model,
-# same harness. Kept gating so a round still has a reviewer that is not part of
-# the experiment.
+# henry — the GATING seat: same provider, same model, same harness as both trial
+# seats. Kept gating so a round still has a reviewer that is not part of the
+# experiment.
+#
+# NOT a twin of either arm, and the receipts must not be read as if it were:
+# henry takes the defaults, which is Tier 1 ON and Tier 2 OFF — a third state
+# configuration, and the one the fleet shipped with. It is the right thing for a
+# gating seat (defaults are what everyone else runs) and the wrong thing to
+# average into either arm's numbers, so `ab_metrics.py` keys arms on the seat's
+# own config, never on "the other agentic seat".
 #
 # auth is PINNED to api-key: `auto` on a runner with a logged-in Claude session
 # would resolve to subscription mode, which never injects a base URL — the seat
@@ -109,11 +122,12 @@ auth = "api-key"
 backend = "agentic"
 role = "trial"
 coverage_ledger = false
+findings_ledger = false
 token_env = "FUKO_GITHUB_TOKEN_DORIAN"
 
 # A/B treatment — stateful arm. The ONLY configured difference from the control
-# is `coverage_ledger`; keep it that way or the experiment stops having one
-# variable.
+# is the state bundle (`coverage_ledger` + `findings_ledger`); keep it that way
+# or the experiment stops having one variable.
 [[review.models]]
 provider = "qwen-anthropic"
 name = "qwen3.8-max"
@@ -122,6 +136,7 @@ auth = "api-key"
 backend = "agentic"
 role = "trial"
 coverage_ledger = true
+findings_ledger = true
 token_env = "FUKO_GITHUB_TOKEN_GRAY"
 
 # The only backup, and it is currently BROKEN — kept deliberately. z.ai answers
