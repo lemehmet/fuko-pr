@@ -1702,9 +1702,11 @@ def test_hollow_examined_runbook_survives_the_receipt(monkeypatch, capsys):
     assert detail.endswith("merge without this seat's coverage."), detail[-80:]
 
     # ...and the job log carries it too, prefixed so model-written text in the
-    # message cannot reach column 0 of a line of its own.
+    # message cannot reach column 0 of a line of its own, and carrying the model
+    # so concurrently failing seats stay assignable on one shared stderr — the
+    # same reason `_dump_harness_output` repeats it per line (fuko-henry, #178).
     log = [ln for ln in capsys.readouterr().err.splitlines() if "reviewer output rejected" in ln]
-    assert log and all(ln.startswith("fuko: ") for ln in log), log
+    assert log and all(ln.startswith("fuko: claude-x ") for ln in log), log
 
 
 def test_auth_failure_detail_is_flattened_and_verdict_led(monkeypatch):

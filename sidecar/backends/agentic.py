@@ -837,7 +837,13 @@ class AgenticBackend:
             # run joins eight of them into one string (#166). Prefixed and
             # flattened like every other author-influenced line here: the
             # message quotes model-written paths and the gates are ^-anchored.
-            print(f"fuko: {_flatten_for_log(str(e))}", file=sys.stderr)
+            # Carries the MODEL for the same reason `_dump_harness_output` puts
+            # it on every line: seats are threads on one stderr, so two branches
+            # failing in the same round -- a correlated bad payload, exactly the
+            # incident this runbook is written for -- would otherwise emit two
+            # indistinguishable lines and leave "re-run this seat" pointing at
+            # no seat (fuko-henry, #178).
+            print(f"fuko: {model_name} {_flatten_for_log(str(e))}", file=sys.stderr)
             # Lead with the verdict here too. This path returns
             # `failed:exit 1` on the channel, so a detail opening with parser
             # prose would break the contract the other failure paths keep
