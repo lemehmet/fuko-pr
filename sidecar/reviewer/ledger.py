@@ -18,7 +18,9 @@ the next round is asked about it again and settles it. A finding that closes
 when it should have stayed open is the 86% one-shot loss this ledger exists to
 stop, arriving by a new door -- silently, and permanently. So an unrecognised
 verdict, a missing reason, an unreadable path and an unreachable store all end
-in "the row keeps the state it had".
+in "the row keeps the state it had", and a verdict's closure is no longer the
+last word: a later round that independently publishes the same claim re-raises
+the row it closed (#177).
 
 Scope is Tier 1 only: the FINDINGS ledger. The coverage ledger (recording
 ``examined``, expiring it against the delta) is #157's, and nothing here writes
@@ -35,7 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import review_state
-from ..review_state import StoredFinding
+from ..review_state import SettledFinding, StoredFinding
 from .prompt import (
     AgenticFinding,
     PriorFindingStatus,
@@ -113,12 +115,21 @@ class Settlement:
     cannot reconstruct from the store afterwards: the row that survived carries
     the EARLIER body, so a silent count would leave "which claim did this round
     decide it already had?" unanswerable. The caller logs them.
+
+    ``reopened`` names the published findings that re-raised a row an earlier
+    round (or this one) had CLOSED by verdict -- #177's reversal. Named for the
+    same reason ``deduped`` is, and for one more: every entry is a round
+    contradicting a settled verdict, which is the anomaly signal the terminal
+    closure could never produce. A closure that keeps being contradicted is
+    either a seat settling claims it has not verified or a verdict that was never
+    the seat's own idea, and both want an operator's eyes rather than a counter.
     """
 
     closed: int = 0
     reasserted: int = 0
     recorded: int = 0
     deduped: tuple[str, ...] = ()
+    reopened: tuple[str, ...] = ()
 
 
 def _within_checkout(root: Path, rel: str) -> Path | None:
@@ -225,6 +236,39 @@ def _anchor(file: str, title: str) -> tuple[str, str]:
     close anything, so the usual asymmetry does not apply here.
     """
     return (file.strip(), title.strip().casefold())
+
+
+def _reopen_reason(row: SettledFinding, round_: int) -> str:
+    """The ``status_reason`` a re-raise leaves behind, carrying the closure it reverses.
+
+    :func:`sidecar.review_state.reopen` overwrites the column, so the sequence --
+    settled how, by which round, on what stated reason, contradicted when -- has
+    to be composed into the one string or it is lost. The old reason is model
+    text and is included as such; it is stored, never rendered into a prompt, and
+    the store clips it.
+    """
+    closure = f"{row.status} in round {row.round}"
+    if row.reason.strip():
+        closure = f"{closure} ({row.reason.strip()})"
+    return f"re-raised in round {round_}: an independent finding contradicts {closure}"
+
+
+def _reopen_candidates(repo: str, pr: int, seat: str) -> dict[tuple[str, str], SettledFinding]:
+    """This seat's closed rows keyed by claim, most recent closure winning.
+
+    The read is deliberately taken AFTER this round's verdicts are applied, so
+    the rows this round just closed are candidates too: a round that reports
+    ``fixed`` on a carried finding and then publishes the same claim has
+    contradicted itself, and the fail-safe reading of a contradiction is that the
+    finding is open. That is also the shape an injected verdict has -- text in
+    the checkout asserting everything is fixed, while the round's own reading of
+    the code still finds the problem -- so resolving it toward open is what makes
+    the reversal worth having rather than merely tidy.
+    """
+    candidates: dict[tuple[str, str], SettledFinding] = {}
+    for row in review_state.settled_findings(repo, pr, seat):
+        candidates.setdefault(_anchor(row.file, row.title), row)
+    return candidates
 
 
 def carry_in(
@@ -351,6 +395,31 @@ def settle(
     claim. Every suppression is named in :attr:`Settlement.deduped` and logged by
     the caller, so it is never the silent kind.
 
+    A published finding that matches no open row may still be one this seat has
+    seen: a round can name a claim an earlier round CLOSED by verdict. Such a
+    finding **re-raises the closed row** (:func:`sidecar.review_state.reopen`)
+    instead of minting a second one, which is #177's reversal -- a ``fixed`` or
+    ``rejected`` verdict is no longer the last word on a claim, because the seat's
+    own later reading of the code can answer it. Three properties make that a
+    control rather than a loophole:
+
+    * the trigger is a PUBLISHED finding -- a claim on the pull request that a
+      human can read -- not a line in the fenced verdict channel. Nothing the
+      reviewed content can say opens a row it could not already have opened by
+      being a real problem;
+    * a re-raised row is NOT the fenced channel's to close again for free: it
+      re-enters the carried ledger like any open row, and its ``reopened`` count
+      records that a round settled it and a later round disagreed;
+    * the reversal runs toward noise, like every other lean here. A reopen that
+      does not happen (store unreachable, row outside the settled read's window)
+      records the claim as a fresh row, so the claim survives either way -- what
+      is lost is the LINK between the closure and its contradiction, which is
+      exactly the thing an operator, not a round, needs.
+
+    ``stale`` rows are not re-raised: that closure is fuko's own (see
+    :func:`sidecar.review_state.REOPENABLE_STATUSES`), and softening it is a
+    separate question (#177 direction 3, #175).
+
     ``findings`` must be the findings the round actually PUBLISHED, not
     everything the model returned. The 86% loss this ledger repairs is about
     claims a developer saw and did not act on; carrying a low-confidence finding
@@ -383,14 +452,27 @@ def settle(
     }
     fresh: list[AgenticFinding] = []
     deduped: list[str] = []
+    reopened: list[str] = []
+    # Only read the closed ledger when there is something that could re-raise it.
+    candidates = _reopen_candidates(repo, pr, seat) if findings else {}
     for finding in findings:
-        row_id = still_open.get(_anchor(finding.file, finding.title))
-        if row_id is None:
-            fresh.append(finding)
+        anchor = _anchor(finding.file, finding.title)
+        row_id = still_open.get(anchor)
+        if row_id is not None:
+            deduped.append(f"{finding.file}: {finding.title}")
+            if row_id not in touch:
+                touch.append(row_id)
             continue
-        deduped.append(f"{finding.file}: {finding.title}")
-        if row_id not in touch:
-            touch.append(row_id)
+        # `pop`, so two published findings on one claim re-raise ONE row: a
+        # second reopen would leave two open rows for one claim, which is the
+        # compounding the dedup above exists to stop, arriving by the new door.
+        closed_row = candidates.pop(anchor, None)
+        if closed_row is not None and review_state.reopen(
+            closed_row.id, _reopen_reason(closed_row, carried.round)
+        ):
+            reopened.append(f"{finding.file}: {finding.title}")
+            continue
+        fresh.append(finding)
     review_state.touch_findings(touch)
     recorded = review_state.record_findings(repo, pr, seat, carried.round, head_sha, fresh)
     return Settlement(
@@ -398,4 +480,5 @@ def settle(
         reasserted=len(touch),
         recorded=recorded,
         deduped=tuple(deduped),
+        reopened=tuple(reopened),
     )

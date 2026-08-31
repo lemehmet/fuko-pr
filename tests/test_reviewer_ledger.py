@@ -54,6 +54,7 @@ class _Store:
                 "finding": f,
                 "status": "open",
                 "reason": "",
+                "reopened": 0,
             }
         return len(findings)
 
@@ -96,12 +97,45 @@ class _Store:
         self.touched.extend(finding_ids)
         return len(finding_ids)
 
+    def settled_findings(self, repo, pr, seat, limit=review_state.MAX_SETTLED_FINDINGS):
+        rows = [
+            review_state.SettledFinding(
+                id=row_id,
+                file=row["finding"].file,
+                title=row["finding"].title,
+                status=row["status"],
+                round=row["round"],
+                reason=row["reason"],
+            )
+            for row_id, row in self.rows.items()
+            if row["key"] == (repo, pr, seat) and row["status"] in review_state.REOPENABLE_STATUSES
+        ]
+        # Most recently closed first, like the real read's `updated_at DESC`:
+        # insertion order stands in for closure order in this fake.
+        return tuple(reversed(rows))[:limit]
+
+    def reopen(self, finding_id, reason):
+        row = self.rows.get(finding_id)
+        if row is None or row["status"] not in review_state.REOPENABLE_STATUSES:
+            return False
+        row["status"], row["reason"] = "open", reason
+        row["reopened"] += 1
+        return True
+
 
 @pytest.fixture
 def store(monkeypatch):
     """Replace the review-state primitives the ledger calls with a live fake."""
     fake = _Store()
-    for name in ("record_findings", "open_findings", "next_round", "transition", "touch_findings"):
+    for name in (
+        "record_findings",
+        "open_findings",
+        "next_round",
+        "transition",
+        "touch_findings",
+        "settled_findings",
+        "reopen",
+    ):
         monkeypatch.setattr(review_state, name, getattr(fake, name))
     return fake
 
@@ -204,8 +238,12 @@ def test_re_reporting_a_carried_finding_touches_it_instead_of_duplicating_it(sto
     assert store.touched == [carried.rows["p1"]]
 
 
-def test_a_settled_row_does_not_suppress_the_same_claim_recorded_again(store):
-    """Dedup keys on rows this round LEFT OPEN, so a closed one cannot swallow a write."""
+def test_a_round_that_closes_and_republishes_a_claim_leaves_it_open(store):
+    """A round contradicting its own verdict resolves toward open (#177).
+
+    The injected-verdict shape: the fenced channel says `fixed`, the round's own
+    reading of the code publishes the claim anyway. One row, still open, and the
+    contradiction named rather than left as two rows or as a false closure."""
     settle(
         carry_in(REPO, PR, SEAT),
         repo=REPO,
@@ -215,6 +253,7 @@ def test_a_settled_row_does_not_suppress_the_same_claim_recorded_again(store):
         findings=[_finding(file="src/a.py", title="leaks the handle")],
     )
     carried = carry_in(REPO, PR, SEAT)
+    row_id = carried.rows["p1"]
 
     outcome = settle(
         carried,
@@ -226,8 +265,182 @@ def test_a_settled_row_does_not_suppress_the_same_claim_recorded_again(store):
         findings=[_finding(file="src/a.py", title="leaks the handle")],
     )
 
-    assert outcome == ledger.Settlement(closed=1, recorded=1)
+    assert outcome == ledger.Settlement(
+        closed=1, recorded=0, reopened=("src/a.py: leaks the handle",)
+    )
+    assert list(store.rows) == [row_id]
+    assert store.rows[row_id]["status"] == "open" and store.rows[row_id]["reopened"] == 1
     assert [f.prior.title for f in store.open_findings(REPO, PR, SEAT).rows] == ["leaks the handle"]
+
+
+def test_a_closed_finding_is_re_raised_by_a_later_round_that_finds_it_again(store):
+    """#177's acceptance criterion, end to end.
+
+    Round 1 reports, round 2 closes it by verdict, round 3 independently finds it
+    again -- and round 4 is offered the SAME row, not a second one, carrying the
+    count that says a verdict on it was contradicted."""
+    settle(
+        carry_in(REPO, PR, SEAT),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        findings=[_finding(file="src/a.py", title="leaks the handle")],
+    )
+    carried = carry_in(REPO, PR, SEAT)
+    row_id = carried.rows["p1"]
+    settle(
+        carried,
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head2",
+        prior_status=[PriorFindingStatus(id="p1", status="fixed", reason="rewritten in 9f2a1c")],
+    )
+    assert store.rows[row_id]["status"] == "fixed"
+    assert carry_in(REPO, PR, SEAT).rows == {}
+
+    outcome = settle(
+        carry_in(REPO, PR, SEAT),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head3",
+        findings=[_finding(file="src/a.py", title="leaks the handle")],
+    )
+
+    assert outcome == ledger.Settlement(recorded=0, reopened=("src/a.py: leaks the handle",))
+    assert list(store.rows) == [row_id]
+    assert store.rows[row_id]["reopened"] == 1
+    # The reason a reader lands on carries the closure it reverses, not just the
+    # reversal: the column holds one explanation and this is now the whole story.
+    reason = store.rows[row_id]["reason"]
+    # Round 2 closed a row and recorded none, so `next_round` -- max(round) + 1
+    # over the rows this seat has WRITTEN -- labels the re-raising round 2.
+    assert "re-raised in round 2" in reason and "fixed in round 1" in reason
+    assert "rewritten in 9f2a1c" in reason
+    assert list(carry_in(REPO, PR, SEAT).rows.values()) == [row_id]
+
+
+def test_a_stale_row_is_not_re_raised(store):
+    """`stale` is fuko's own retirement, not a verdict -- softening it is #175's."""
+    settle(
+        carry_in(REPO, PR, SEAT),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        findings=[_finding(file="src/a.py", title="leaks the handle")],
+    )
+    carried = carry_in(REPO, PR, SEAT)
+    row_id = carried.rows["p1"]
+    review_state.transition(row_id, "stale", "file absent from the tree at head2")
+
+    outcome = settle(
+        carry_in(REPO, PR, SEAT),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head3",
+        findings=[_finding(file="src/a.py", title="leaks the handle")],
+    )
+
+    assert outcome == ledger.Settlement(recorded=1)
+    assert store.rows[row_id]["status"] == "stale" and store.rows[row_id]["reopened"] == 0
+
+
+def test_two_published_findings_on_one_claim_re_raise_one_row(store):
+    """A second reopen would leave two open rows for one claim -- the compounding
+    the dedup path exists to stop, arriving through the new door."""
+    settle(
+        carry_in(REPO, PR, SEAT),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        findings=[
+            _finding(file="src/a.py", title="leaks the handle"),
+            _finding(file="src/a.py", title="leaks the handle"),
+        ],
+    )
+    carried = carry_in(REPO, PR, SEAT)
+    settle(
+        carried,
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head2",
+        prior_status=[
+            PriorFindingStatus(id="p1", status="fixed", reason="one"),
+            PriorFindingStatus(id="p2", status="fixed", reason="two"),
+        ],
+    )
+
+    outcome = settle(
+        carry_in(REPO, PR, SEAT),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head3",
+        findings=[
+            _finding(file="src/a.py", title="leaks the handle"),
+            _finding(file="src/a.py", title="Leaks The Handle"),
+        ],
+    )
+
+    assert outcome.reopened == ("src/a.py: leaks the handle",)
+    assert outcome.recorded == 1
+    assert [row["status"] for row in store.rows.values()].count("open") == 2
+
+
+def test_a_reopen_the_store_refuses_records_the_claim_instead(store, monkeypatch):
+    """Best-effort throughout: a failed re-raise loses the LINK, never the claim."""
+    settle(
+        carry_in(REPO, PR, SEAT),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        findings=[_finding(file="src/a.py", title="leaks the handle")],
+    )
+    carried = carry_in(REPO, PR, SEAT)
+    row_id = carried.rows["p1"]
+    settle(
+        carried,
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head2",
+        prior_status=[PriorFindingStatus(id="p1", status="fixed", reason="rewritten")],
+    )
+    monkeypatch.setattr(review_state, "reopen", lambda *a, **kw: False)
+
+    outcome = settle(
+        carry_in(REPO, PR, SEAT),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head3",
+        findings=[_finding(file="src/a.py", title="leaks the handle")],
+    )
+
+    assert outcome == ledger.Settlement(recorded=1)
+    assert store.rows[row_id]["status"] == "fixed"
+    assert [f.prior.title for f in store.open_findings(REPO, PR, SEAT).rows] == ["leaks the handle"]
+
+
+def test_a_round_with_no_findings_never_reads_the_closed_ledger(store, monkeypatch):
+    """Nothing can be re-raised without a published claim, so nothing is read."""
+    monkeypatch.setattr(review_state, "settled_findings", _forbidden("settled_findings"))
+
+    settle(
+        carry_in(REPO, PR, SEAT),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        prior_status=[PriorFindingStatus(id="p1", status="fixed", reason="nothing carried")],
+    )
 
 
 def test_rejected_without_a_reason_does_not_close_a_row(store):

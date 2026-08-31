@@ -10,7 +10,9 @@ import sidecar.db
 from sidecar import review_state
 from sidecar.reviewer.prompt import AgenticFinding, ExaminedRegion, PriorCoverage, PriorFinding
 
-_MIGRATION = Path(__file__).resolve().parent.parent / "migrations" / "009_review_state.sql"
+_MIGRATIONS = Path(__file__).resolve().parent.parent / "migrations"
+_MIGRATION = _MIGRATIONS / "009_review_state.sql"
+_MIGRATION_REOPEN = _MIGRATIONS / "010_review_finding_reopen.sql"
 
 _UUID = "0f9d1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b"
 
@@ -112,6 +114,19 @@ def test_migration_009_pins_the_status_vocabulary_but_not_the_models_words():
     assert "CHECK (severity" not in findings and "CHECK (category" not in findings
 
 
+def test_migration_010_adds_the_reopen_counter_idempotently():
+    """A re-applied ALTER must not fail the pool: every migration re-runs on each
+    pool creation, so the column add is IF NOT EXISTS like everything else."""
+    stmts = _statements(_MIGRATION_REOPEN)
+
+    assert len(stmts) == 1
+    assert stmts[0].startswith("ALTER TABLE review_findings")
+    assert "ADD COLUMN IF NOT EXISTS reopened INTEGER NOT NULL DEFAULT 0" in stmts[0]
+    # A reversal is only defined for the two statuses a model VERDICT produces.
+    assert set(review_state.REOPENABLE_STATUSES) == {"fixed", "rejected"}
+    assert review_state.REOPENABLE_STATUSES < review_state.FINDING_STATUSES
+
+
 def test_review_state_no_ops_without_a_database(monkeypatch):
     """The whole acceptance criterion: no store configured, review unaffected."""
     monkeypatch.setattr(review_state.settings, "database_url", "")
@@ -119,6 +134,8 @@ def test_review_state_no_ops_without_a_database(monkeypatch):
     assert review_state.record_findings("o/r", 7, "henry", 1, "sha", [_finding()]) == 0
     assert review_state.open_findings("o/r", 7, "henry") == review_state.OpenLedger()
     assert review_state.transition(_UUID, "fixed", "rewritten") is False
+    assert review_state.settled_findings("o/r", 7, "henry") == ()
+    assert review_state.reopen(_UUID, "re-found") is False
     assert review_state.touch_findings([_UUID]) == 0
     assert review_state.record_coverage("o/r", 7, "henry", 1, "sha", [_region()]) == 0
     assert review_state.live_coverage("o/r", 7, "henry") == []
@@ -138,6 +155,8 @@ def test_a_store_failure_never_reaches_the_review(pg, monkeypatch, capsys):
     assert review_state.record_findings("o/r", 7, "henry", 1, "sha", [_finding()]) == 0
     assert review_state.open_findings("o/r", 7, "henry") == review_state.OpenLedger()
     assert review_state.transition(_UUID, "fixed") is False
+    assert review_state.settled_findings("o/r", 7, "henry") == ()
+    assert review_state.reopen(_UUID, "re-found") is False
     assert review_state.live_coverage("o/r", 7, "henry") == []
     assert "connection refused" in capsys.readouterr().err
 
@@ -341,6 +360,67 @@ def test_transition_reports_no_change_when_the_row_was_already_settled(pg):
     conn = pg(rowcount=0)
 
     assert review_state.transition(_UUID, "stale", "file deleted") is False
+    assert len(conn.statements) == 1
+
+
+def test_settled_findings_reads_this_seats_model_closed_rows_only(pg):
+    """Scope is the control (#177): a wider read would let one seat re-raise -- and
+    so overrule -- a closure another seat made, which no verdict of its own could."""
+    conn = pg(rows=[("id-1", "src/app.py", "leaks the handle", "fixed", 2, "rewritten")])
+
+    rows = review_state.settled_findings("o/r", 7, "henry")
+
+    assert rows == (
+        review_state.SettledFinding(
+            id="id-1",
+            file="src/app.py",
+            title="leaks the handle",
+            status="fixed",
+            round=2,
+            reason="rewritten",
+        ),
+    )
+    sql, params = conn.statements[0]
+    assert "WHERE repo = %s AND pr = %s AND seat = %s AND status = ANY(%s)" in sql
+    # Ordered by closure time so a cut keeps the rows a round is likeliest to
+    # contradict, and windowed on the same column `transition` refreshes.
+    assert "updated_at > now() - make_interval(days => %s)" in sql
+    assert sql.endswith("ORDER BY updated_at DESC, id DESC LIMIT %s")
+    assert params == ("o/r", 7, "henry", ["fixed", "rejected"], review_state.RETENTION_DAYS, 200)
+
+
+def test_settled_findings_clamps_a_caller_supplied_limit(pg):
+    conn = pg()
+
+    review_state.settled_findings("o/r", 7, "henry", limit=10_000)
+    review_state.settled_findings("o/r", 7, "henry", limit=0)
+
+    assert [s[1][-1] for s in conn.statements] == [review_state.MAX_SETTLED_FINDINGS, 1]
+
+
+def test_reopen_returns_a_model_closed_row_to_open(pg):
+    conn = pg(rowcount=1)
+
+    assert review_state.reopen(_UUID, "re-raised in round 4: contradicts fixed in round 2") is True
+    sql, params = conn.statements[0]
+    assert "SET status = 'open'" in sql and "reopened = reopened + 1" in sql
+    assert "updated_at = now()" in sql
+    assert sql.endswith("WHERE id = %s AND status = ANY(%s)")
+    assert params == (
+        "re-raised in round 4: contradicts fixed in round 2",
+        _UUID,
+        ["fixed", "rejected"],
+    )
+
+
+def test_reopen_refuses_a_malformed_id_and_reports_an_unmatched_row(pg):
+    """`stale` and `open` rows are outside the matched statuses, so the UPDATE
+    matches nothing and the caller records the claim as a fresh row instead."""
+    conn = pg(rowcount=0)
+
+    assert review_state.reopen("p1", "re-found") is False
+    assert conn.statements == []
+    assert review_state.reopen(_UUID, "re-found") is False
     assert len(conn.statements) == 1
 
 

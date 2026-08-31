@@ -57,6 +57,22 @@ gone. The agent's ``still_open`` is deliberately absent -- re-asserting a findin
 is not a state change, it refreshes ``updated_at`` on a row that stays ``open``.
 """
 
+REOPENABLE_STATUSES = frozenset({"fixed", "rejected"})
+"""The closures a later round may reverse (:func:`reopen`), and only those.
+
+Exactly the two a MODEL VERDICT produces. #177's subject is that such a verdict
+closes a row terminally while the text that drove it can originate in the
+reviewed checkout, so a closure made from model output must be answerable by a
+later round that independently re-finds the claim.
+
+``stale`` is excluded because it is not a verdict: it is fuko's own retirement
+of a finding whose file the head no longer carries, made on evidence fuko read
+itself. Whether that path should soften -- annotate the row rather than close it
+-- is a separate question the epic tracks (#177 direction 3, interacting with
+#175), and answering it here by making the retirement quietly reversible would
+pre-empt it.
+"""
+
 RETENTION_DAYS = 90
 """How far back a read may reach, in days.
 
@@ -81,6 +97,22 @@ seat has 200 unsettled findings has a problem no ledger will fix -- but past
 this bound the ledger at least NAMES that problem rather than absorbing it:
 the read reports what it cut (:class:`OpenLedger`), because a row that is never
 offered to a round is a row no round can settle (#173).
+"""
+
+MAX_SETTLED_FINDINGS = 200
+"""Hard bound on one read of the settled (reopenable) ledger.
+
+Nothing here reaches a prompt -- the settled read exists so
+:func:`sidecar.reviewer.ledger.settle` can tell "a claim this seat already
+closed" from "a claim nobody has seen", so its cost is one query and a dict, not
+prompt budget. It is bounded anyway, and at the same number as the open read,
+because a seat's settled rows only ever grow over a long-lived branch.
+
+Overflow degrades to the pre-#177 behaviour and no further: a re-found claim
+whose closed row fell outside the window is simply recorded as a new open row,
+so it is still carried into the next round. That is loss of the LINK back to the
+closure, not of the claim -- which is why the cut needs no reporting path of its
+own the way the open read's does (#173).
 """
 
 MAX_LIVE_COVERAGE = 500
@@ -182,6 +214,27 @@ class StoredFinding:
 
     id: str
     prior: PriorFinding
+
+
+@dataclass(frozen=True)
+class SettledFinding:
+    """One closed ledger row, as much of it as a re-raise decision needs.
+
+    Not a :class:`StoredFinding`: nothing here is rendered into a prompt, so the
+    row is projected down to what :func:`sidecar.reviewer.ledger.settle` matches
+    on (``file``, ``title``) and what it writes into the reopen's own reason
+    (``status``, ``round``, ``reason``). Keeping the body and the evidence out of
+    the projection is deliberate -- a reopened row keeps the text it already has,
+    and a reader of this dataclass should not be able to mistake it for the
+    channel that would refresh it.
+    """
+
+    id: str
+    file: str
+    title: str
+    status: str
+    round: int = 0
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -392,6 +445,98 @@ def transition(finding_id: str, status: str, reason: str = "") -> bool:
             "UPDATE review_findings SET status = %s, status_reason = %s, updated_at = now() "
             "WHERE id = %s AND status = 'open'",
             (status, _clip(reason), finding_id),
+        )
+        return bool(cur.rowcount)
+
+
+@_best_effort(tuple)
+def settled_findings(
+    repo: str, pr: int, seat: str, limit: int = MAX_SETTLED_FINDINGS
+) -> tuple[SettledFinding, ...]:
+    """Return this seat's model-closed findings, most recently closed first.
+
+    The read a re-raise needs and nothing more (#177): rows a verdict closed
+    (:data:`REOPENABLE_STATUSES`), inside the retention window, for exactly this
+    ``(repo, pr, seat)``. The scope is load-bearing rather than incidental --
+    a wider read would let one seat reopen a row another seat closed, which is
+    the cross-seat coupling the per-seat ledger exists to avoid (#160), and it
+    would do so through a path no verdict of that seat's own could reverse.
+
+    ``updated_at`` is the closure time (:func:`transition` sets it), so ordering
+    on it descending means a ``limit`` cut keeps the most recently settled rows
+    -- the ones a round on the current head is most likely to contradict -- and
+    the retention window is measured against the same column the open read uses.
+
+    Returns an empty tuple when persistence is disabled or the read fails, which
+    reads as "no closure to re-raise": the caller then records the re-found claim
+    as a new open row, which is what it did before this read existed.
+    """
+    from .db import db
+
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT id, file, title, status, round, status_reason "
+            "FROM review_findings "
+            "WHERE repo = %s AND pr = %s AND seat = %s AND status = ANY(%s) "
+            "AND updated_at > now() - make_interval(days => %s) "
+            "ORDER BY updated_at DESC, id DESC LIMIT %s",
+            (
+                repo,
+                pr,
+                seat,
+                sorted(REOPENABLE_STATUSES),
+                RETENTION_DAYS,
+                min(max(1, limit), MAX_SETTLED_FINDINGS),
+            ),
+        ).fetchall()
+    return tuple(
+        SettledFinding(
+            id=str(row_id),
+            file=file,
+            title=title,
+            status=status,
+            round=round_,
+            reason=reason,
+        )
+        for row_id, file, title, status, round_, reason in rows
+    )
+
+
+@_best_effort(lambda: False)
+def reopen(finding_id: str, reason: str) -> bool:
+    """Return one model-closed finding to ``open``; return whether a row changed.
+
+    The inverse of :func:`transition`, and deliberately the narrower of the two:
+
+    * only :data:`REOPENABLE_STATUSES` are matched, so fuko's own ``stale``
+      retirement is not reversed here and an already-``open`` row is not
+      disturbed (its ``reopened`` count would otherwise inflate on every round
+      that re-reported it);
+    * a ``finding_id`` that is not a UUID changes nothing and costs no
+      round-trip, as in :func:`transition`;
+    * ``reopened`` is incremented rather than set, so the row carries how many
+      times a round settled it and a later round contradicted that -- the audit
+      trail a terminal closure could not leave (#177).
+
+    ``reason`` is composed by the caller and is expected to carry the closure it
+    reverses, because this UPDATE overwrites ``status_reason``: the column holds
+    one explanation, and after a reopen the explanation a reader needs is the
+    whole sequence, not just its last step.
+
+    The direction is the module's usual one. A reopen that does not happen
+    leaves a claim recorded as a fresh row (noise); a closure that could not be
+    answered is the silent loss the ledger exists to stop.
+    """
+    if not _is_uuid(finding_id):
+        return False
+    from .db import db
+
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE review_findings SET status = 'open', status_reason = %s, "
+            "reopened = reopened + 1, updated_at = now() "
+            "WHERE id = %s AND status = ANY(%s)",
+            (_clip(reason), finding_id, sorted(REOPENABLE_STATUSES)),
         )
         return bool(cur.rowcount)
 
