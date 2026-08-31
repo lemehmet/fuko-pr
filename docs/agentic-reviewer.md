@@ -110,6 +110,24 @@ The rules that matter:
   open and still in the next prompt.
   Every suppression is logged by name (`re-asserted, not re-recorded: …`), so
   the trade is visible in the round's output rather than silent.
+- **A verdict's closure is not the last word.** A round that publishes a claim
+  matching a row an earlier round (or the same round) closed as `fixed` or
+  `rejected` **re-raises that row** instead of opening a second one, and the row
+  counts how often that has happened (#177,
+  `migrations/010_review_finding_reopen.sql`). This matters because closure is
+  the one irreversible write the ledger makes from model text produced while
+  reading a checkout the contributor controls: an injected "everything here was
+  fixed" — or an honest mistake — used to retire a finding permanently. It
+  cannot any more; the seat's own later reading of the code answers it.
+
+  The trigger is a **published** finding, never a line in the fenced verdict
+  channel, so this adds no way for the reviewed content to reach the ledger that
+  a genuine problem did not already have. `stale` is excluded: that retirement is
+  fuko's own, made on evidence fuko read itself, and softening it is a separate
+  question (#175). Each re-raise is logged by name
+  (`re-raised a closed finding: …`) — a closure that keeps being contradicted is
+  a seat settling claims it has not verified, or a verdict that was never its
+  own idea.
 
 Storage is Postgres-only (`FUKO_DATABASE_URL`, `migrations/009_review_state.sql`)
 and entirely best-effort: with no store, an unreachable one, or a sqlite-vec

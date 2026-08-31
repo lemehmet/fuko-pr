@@ -887,14 +887,25 @@ class AgenticBackend:
             prior_status=review.prior_status,
             findings=kept,
         )
-        if carried.rows or settlement.recorded:
+        if carried.rows or settlement.recorded or settlement.reopened:
             print(
                 f"fuko: review-state seat {seat} round {carried.round}: carried "
                 f"{len(carried.rows)}, closed {settlement.closed}, re-asserted "
                 f"{settlement.reasserted}, recorded {settlement.recorded}, "
-                f"deduped {len(settlement.deduped)}",
+                f"deduped {len(settlement.deduped)}, "
+                f"reopened {len(settlement.reopened)}",
                 file=sys.stderr,
             )
+            # A re-raise is the one settle outcome that says a PREVIOUS round was
+            # wrong -- it closed a claim this round found anyway (#177) -- so it
+            # is named on its own line under its own prefix, greppable across a
+            # fleet's logs. Flattened for the same reason `deduped` is.
+            for claim in settlement.reopened:
+                print(
+                    f"fuko: review-state seat {seat} re-raised a closed finding: "
+                    f"{_flatten_for_log(claim)}",
+                    file=sys.stderr,
+                )
             # Named, not just counted: a suppressed write is the one settle
             # outcome the store cannot show afterwards, since the surviving row
             # keeps the earlier body. FLATTENED like every other
