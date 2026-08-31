@@ -265,6 +265,17 @@ def backup_served_rounds(
     "INCLUDED in every metric" would be false. That is not hypothetical here:
     an exhausted pool is the shape a dead backup key produces on every branch.
 
+    An empty ``head_sha`` is skipped for the same reason. It is a designed
+    degradation, not a bug -- :func:`sidecar.runner._head_for_receipts` returns
+    ``""`` when HEAD cannot be resolved, so the receipt still records that the
+    instance ran, on an unknown commit -- and its own contract is that "a
+    consumer treats an empty ``head_sha`` as not covering the current HEAD".
+    This is such a consumer. Keying one anyway yields ``<pr>@``, which joins to
+    no round: the claims and review receipts are keyed by the review's
+    ``commit_id``, so the round itself sits under ``<pr>@<sha>`` and a reader
+    subtracting the printed key would subtract nothing while being told the
+    round is included.
+
     The arm comes from the comment's own author. The receipt's ``app`` is a
     fallback only for a payload read WITHOUT its envelope -- no author field at
     all. An author that is present but names no arm is skipped rather than
@@ -277,7 +288,7 @@ def backup_served_rounds(
         login = (comment.get("user") or {}).get("login") or ""
         for receipt in extract_run_receipts(comment.get("body") or ""):
             arm = login_to_arm.get(login) if login else login_to_arm.get(receipt.app)
-            if arm is None or receipt.state != "done":
+            if arm is None or receipt.state != "done" or not receipt.head_sha:
                 continue
             if not receipt.model or receipt.model == receipt.label:
                 continue

@@ -349,6 +349,13 @@ def test_an_unknown_author_cannot_mint_a_round_from_the_receipt_body():
     assert backup_served_rounds([quoted], ARMS, 7) == set()
 
 
+def test_an_unanchored_receipt_names_no_round():
+    """`_head_for_receipts` degrades to "": an unknown commit joins to no round."""
+    headers = [_header("fuko-gray[bot]", "qwen/qwen3.8-max", "zai/glm-5.3", head="")]
+
+    assert backup_served_rounds(headers, ARMS, 7) == set()
+
+
 def test_a_receipt_read_without_its_envelope_still_names_its_arm():
     """The `app` fallback the docstring promises: no author field at all."""
     payload = _header("fuko-gray[bot]", "qwen/qwen3.8-max", "zai/glm-5.3", head="head2")

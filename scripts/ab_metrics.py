@@ -222,8 +222,8 @@ def _report_backup_rounds(rescued: set[tuple[str, str]]) -> None:
         return
     print(
         f"\nnote: {len(rescued)} round(s) were answered by a FAILOVER backup, not the "
-        "arm's own model. They are INCLUDED in every metric above -- the arm and the "
-        "ledger configuration are the seat's -- but the model is a confound:"
+        "arm's own model. They are INCLUDED in every metric in this report -- the arm "
+        "and the ledger configuration are the seat's -- but the model is a confound:"
     )
     for arm, round_key in sorted(rescued):
         print(f"    {arm}: {round_key}")
