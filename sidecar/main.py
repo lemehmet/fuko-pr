@@ -313,10 +313,18 @@ def rh_observe_endpoint(req: models.ObserveHealthRequest) -> dict:
 # sees; ``_one_line``/``_indented`` bound what a stored row may do to a later
 # prompt and belong at render time for the same reason. A caller holding
 # ``FUKO_TOKEN`` can therefore write a ledger row that no round would have
-# produced -- but that caller is the runner, model output never holds the token,
-# and the same token already authorizes ``/forget`` with ``all=true``. The
-# transport widens what a LEAKED token reaches, not what a reviewed pull request
-# can reach.
+# produced -- but that caller is the runner, and the same token already
+# authorizes ``/forget`` with ``all=true``. The transport widens what a LEAKED
+# token reaches, not what a reviewed pull request can reach.
+#
+# "The model never holds the token" is the load-bearing half of that, and it is
+# now ENFORCED rather than assumed: ``FUKO_URL``, ``FUKO_TOKEN`` and
+# ``FUKO_DATABASE_URL`` are stripped from the agent's environment alongside the
+# GitHub credentials (:data:`sidecar.backends.agentic._SIDECAR_CRED_VARS`).
+# Before that they were inherited straight into the harness subprocess by the
+# review workflow's own exports, so the acceptance above rested on the agent
+# having no tool that reads its own environ -- which is a denylist, and the
+# denylist's own docstring says it closes the instance, not the class.
 
 
 @app.post("/rs/findings", response_model=rs.LedgerCountResponse, dependencies=[Depends(_auth)])

@@ -316,6 +316,35 @@ _GITHUB_CRED_VARS = (
     "GITHUB_ENTERPRISE_TOKEN",
 )
 
+# The sidecar's own credentials, stripped for the same reason and by the same
+# rule. Since #171 ``FUKO_TOKEN`` authorizes ledger WRITES -- including the
+# irreversible ``stale`` closure, on any ``(repo, pr, seat)`` lane, and rows
+# whose text is rendered into a later round's prompt -- and the boundary note in
+# :mod:`sidecar.main` accepts that widening on the grounds that model output
+# never holds the token. Inherited into the harness environment, that premise was
+# false: the review workflow exports both into the step this process runs in, and
+# `/proc/self/environ` is the reason :data:`sidecar.reviewer.harness.
+# SENSITIVE_SYSTEM_DIRS` exists at all -- a denial its own docstring calls
+# reasoned rather than measured. Stripping them makes the claim true instead of
+# leaving it resting on a denylist.
+#
+# Nothing below this boundary reads them: the harness runs with
+# ``--strict-mcp-config`` and read-only tools, every ledger and knowledge call
+# happens in THIS process before and after ``run_review``, and the knowledge the
+# agent sees arrives as prompt text via ``FUKO_AGENTIC_KNOWLEDGE``, not as a
+# fetch it performs. If knowledge retrieval ever moves harness-side, this tuple
+# is where that decision has to be revisited.
+#
+# ``FUKO_DATABASE_URL`` is here although the workflow does not export it: on a
+# sidecar-hosted runner or a laptop run it is ambient, and it is the heavier
+# credential of the two -- a raw Postgres connection string rather than a bearer
+# token scoped to one API. Raised by ``qwen-anthropic/qwen3.8-max`` on #171.
+_SIDECAR_CRED_VARS = (
+    "FUKO_URL",
+    "FUKO_TOKEN",
+    "FUKO_DATABASE_URL",
+)
+
 
 #: How many completed-but-unclaimed reviews to retain. Generous next to any real
 #: fleet (a PR runs one branch per active model), small enough that a leak stays
@@ -631,6 +660,7 @@ class AgenticBackend:
             k: v
             for k, v in os.environ.items()
             if k not in _GITHUB_CRED_VARS
+            and k not in _SIDECAR_CRED_VARS
             and not k.startswith("FUKO_GITHUB_")
             and k not in _ANTHROPIC_INHERITED_VARS
         }

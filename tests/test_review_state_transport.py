@@ -286,6 +286,30 @@ def test_the_writes_round_trip_their_payloads_and_their_lane(wire, store):
     assert calls[5][1][3:] == (["src/app.py"],)
 
 
+@pytest.mark.parametrize(
+    "seat",
+    ["openrouter/upstage/solar-pro4", "openrouter/model#1", "qwen-anthropic/qwen3.8-max"],
+    ids=["provider-slash-name", "label-hash-index", "vendor-slash-model"],
+)
+def test_the_seat_spellings_production_actually_uses_survive_the_query_string(wire, store, seat):
+    """``runner._branch_seats`` mints seats as ``provider/name`` or ``label#index``,
+    and all four ledger READS carry the seat as a QUERY PARAMETER.
+
+    ``#`` is the fragment delimiter, so ``label#1`` truncates to ``label`` under
+    any hand-rolled URL building -- and a truncated seat is a read of a DIFFERENT
+    LANE, which is the one property this seam exists to protect (#160). It works
+    today because httpx percent-encodes and starlette unquotes, but nothing
+    pinned that until now: every other wire test uses the bare ``henry``. Raised
+    by ``qwen-anthropic/qwen3.8-max`` on #171.
+    """
+    _spy, calls = store
+    _spy("next_round", 4)
+
+    assert rsc.next_round(REPO, PR, seat) == 4
+    # The seat the STORE was handed, not merely the one the client sent.
+    assert calls == [("next_round", (REPO, PR, seat), {})]
+
+
 def test_an_empty_write_never_leaves_the_runner(wire, store):
     """`record_findings([])` and `record_coverage([])` are already no-ops in the
     store; spending a round-trip to be told so is pure latency on the review's

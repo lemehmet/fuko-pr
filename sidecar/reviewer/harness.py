@@ -172,6 +172,14 @@ SENSITIVE_HOME_FILES = (
 #: differs. No legitimate code review reads ``/proc``, ``/sys`` or ``/dev``, so
 #: this costs a real reviewer nothing.
 #:
+#: What that environment no longer holds is the SIDECAR's credentials: since
+#: #171 gave ``FUKO_TOKEN`` ledger-write authority, it is stripped before the
+#: spawn along with ``FUKO_URL`` and ``FUKO_DATABASE_URL``
+#: (:data:`sidecar.backends.agentic._SIDECAR_CRED_VARS`). The model credential
+#: below cannot be removed the same way -- the harness needs it to run at all --
+#: which is exactly why the two are handled differently and why this denial
+#: still matters.
+#:
 #: NOT empirically verified: this was developed on darwin, which has no
 #: ``/proc``. The rules use the ``Read(//abs/**)`` spelling that WAS verified
 #: (see the matrix above), and path rules were measured to cover ``Grep`` too,

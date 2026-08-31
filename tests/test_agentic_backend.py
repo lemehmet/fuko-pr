@@ -365,6 +365,25 @@ def test_invoke_strips_github_tokens_from_harness_env(monkeypatch):
     assert captured["env"]["ANTHROPIC_API_KEY"] == "sk"
 
 
+def test_invoke_strips_the_sidecar_credentials(monkeypatch):
+    """Since #171 `FUKO_TOKEN` authorizes ledger writes, and the review workflow
+    exports it into the step this process runs in -- so it was inherited by the
+    agent, whose findings are the same egress channel the `/proc` denial exists
+    for. `FUKO_DATABASE_URL` rides along: not exported by the workflow, but
+    ambient on a sidecar-hosted runner and the heavier credential of the two."""
+    monkeypatch.setenv("FUKO_URL", "http://sidecar.lan:8000")
+    monkeypatch.setenv("FUKO_TOKEN", "ledger-write-secret")
+    monkeypatch.setenv("FUKO_DATABASE_URL", "postgresql://fuko:secret@db/fuko")
+    backend = AgenticBackend()
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert "FUKO_URL" not in captured["env"]
+    assert "FUKO_TOKEN" not in captured["env"]
+    assert "FUKO_DATABASE_URL" not in captured["env"]
+    # The knowledge the agent is meant to see travels as PROMPT TEXT, not as a
+    # fetch it makes, so stripping the endpoint costs it nothing.
+    assert "FUKO_AGENTIC_KNOWLEDGE" not in agentic_mod._SIDECAR_CRED_VARS
+
+
 def test_invoke_strips_gh_cli_credentials(monkeypatch):
     """`gh`'s own spellings are exported by many runner images and are just as live."""
     monkeypatch.setenv("GH_TOKEN", "gh-cli-secret")
