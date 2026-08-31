@@ -392,6 +392,14 @@ def next_round(repo: str, pr: int, seat: str) -> int:
     re-issuing its number would put two different rounds behind one label in a
     prompt a human is expected to audit.
 
+    Both ledgers are counted, which is not a refinement of that rule but the only
+    way to keep it once a round can write coverage without writing a finding
+    (#157). A round that found nothing and recorded what it examined is exactly
+    that shape, and it is a common one -- reading ``review_findings`` alone would
+    hand every such round the number ``1`` for as long as the streak lasted, and
+    the prompt would then present N rounds of coverage under one label, each
+    claiming to be the oldest (CodeRabbit, #157).
+
     Returns 1 when persistence is disabled or the read fails, which is also the
     value for a seat's first round -- both mean "nothing recorded before this".
 
@@ -411,9 +419,12 @@ def next_round(repo: str, pr: int, seat: str) -> int:
 
     with db() as conn:
         row = conn.execute(
-            "SELECT coalesce(max(round), 0) + 1 FROM review_findings "
-            "WHERE repo = %s AND pr = %s AND seat = %s",
-            (repo, pr, seat),
+            "SELECT coalesce(max(round), 0) + 1 FROM ("
+            "SELECT round FROM review_findings WHERE repo = %s AND pr = %s AND seat = %s "
+            "UNION ALL "
+            "SELECT round FROM review_coverage WHERE repo = %s AND pr = %s AND seat = %s"
+            ") AS rounds",
+            (repo, pr, seat, repo, pr, seat),
         ).fetchall()
     return int(row[0][0]) if row and row[0] and row[0][0] is not None else 1
 

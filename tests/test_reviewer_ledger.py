@@ -103,7 +103,11 @@ class _Store:
         )
 
     def next_round(self, repo, pr, seat):
+        # Both ledgers, like the real read: a round that recorded only coverage
+        # still happened, and re-issuing its number would put two rounds behind
+        # one label.
         rounds = [r["round"] for r in self.rows.values() if r["key"] == (repo, pr, seat)]
+        rounds += [c["round"] for c in self.coverage if c["key"] == (repo, pr, seat)]
         return max(rounds, default=0) + 1
 
     def transition(self, finding_id, status, reason=""):
@@ -1129,6 +1133,93 @@ def test_the_receipt_counts_the_coverage_shown_not_the_rows_the_read_returned(st
 
     assert second.coverage == MAX_PRIOR_COVERAGE
     assert f"{over - MAX_PRIOR_COVERAGE} older coverage entries were dropped" in second.text
+
+
+def test_coverage_of_a_file_the_head_deleted_is_retired_against_the_tree(store, tmp_path):
+    """The two shapes that differ MAXIMALLY from base are the two the delta omits.
+
+    A deletion emits `+++ /dev/null` and a rename leaves nothing at the old path,
+    so neither reaches `parse_diff`'s file set -- their coverage would otherwise
+    survive every round to retention (`qwen-anthropic/qwen3.8-max` and
+    `openrouter/upstage/solar-pro4`).
+    """
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "kept.py").write_text("x = 1\n")
+    settle(
+        carry_in(REPO, PR, SEAT, coverage_ledger=True),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        examined=[
+            _examined(file="src/kept.py", evidence="src/kept.py:1-9"),
+            _examined(file="src/deleted.py", evidence="src/deleted.py:1-9"),
+        ],
+        coverage_ledger=True,
+    )
+
+    second = carry_in(REPO, PR, SEAT, str(tmp_path), "head2", coverage_ledger=True)
+
+    assert second.coverage == 1 and second.expired == 1
+    assert "src/kept.py" in second.text and "src/deleted.py" not in second.text
+    # Expired in the STORE, not merely skipped: the row is dead for every future
+    # round, so the tree is not re-asked about it.
+    assert [c["region"].file for c in store.coverage if not c["expired"]] == ["src/kept.py"]
+    # And a round whose surviving coverage is all still in the tree writes
+    # nothing: the pass costs a stat per entry, never an expiry.
+    third = carry_in(REPO, PR, SEAT, str(tmp_path), "head3", coverage_ledger=True)
+    assert third.coverage == 1 and third.expired == 0
+
+
+@pytest.mark.parametrize("root", ["", "/definitely/not/a/checkout"])
+def test_an_unusable_checkout_root_expires_no_coverage(store, root):
+    """Under a root that does not exist every path is 'missing' -- expire none.
+
+    The same fail-safe the findings half applies, and it matters more here: an
+    expiry is a store write, so one bad argument would empty the ledger.
+    """
+    settle(
+        carry_in(REPO, PR, SEAT, coverage_ledger=True),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        examined=[_examined()],
+        coverage_ledger=True,
+    )
+
+    second = carry_in(REPO, PR, SEAT, root, "head2", coverage_ledger=True)
+
+    assert second.coverage == 1 and second.expired == 0
+    assert all(not c["expired"] for c in store.coverage)
+
+
+def test_consecutive_found_nothing_rounds_still_get_distinct_round_labels(store):
+    """A round that recorded only coverage still happened (CodeRabbit).
+
+    It is the shape a clean re-round takes -- nothing found, what was read
+    recorded -- so a round number derived from the findings ledger alone would
+    label a whole streak of them `1` and present each as the oldest.
+    """
+    for n in range(3):
+        settle(
+            carry_in(REPO, PR, SEAT, coverage_ledger=True),
+            repo=REPO,
+            pr=PR,
+            seat=SEAT,
+            head_sha=f"head{n}",
+            examined=[_examined(file=f"src/m{n}.py", evidence=f"src/m{n}.py:1-20")],
+            coverage_ledger=True,
+        )
+
+    carried = carry_in(REPO, PR, SEAT, coverage_ledger=True)
+
+    assert carried.round == 4
+    assert [line for line in carried.text.splitlines() if line.startswith("- src/m")] == [
+        "- src/m2.py open_source -- round 3",
+        "- src/m1.py open_source -- round 2",
+        "- src/m0.py open_source -- round 1",
+    ]
 
 
 def test_two_seats_on_one_pr_never_read_each_others_coverage(store):

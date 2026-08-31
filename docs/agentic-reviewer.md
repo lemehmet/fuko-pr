@@ -188,14 +188,20 @@ rather than stylistic:
   whole change.
 
   The delta used is the current base→head diff, which over-expires and is the
-  safe error: coverage of a file that differs from base never survives a round,
-  so what carries is coverage of the *unchanged* surface a round reads to verify
-  the diff — the callers, callees and invariants that were being re-read 182
-  times. Expiry runs on every seat, flag or no flag, because it can only ever
+  safe error: coverage of a file that appears in that diff never survives a
+  round, so what carries is coverage of the *unchanged* surface a round reads to
+  verify the diff — the callers, callees and invariants that were being re-read
+  182 times. Expiry runs on every seat, flag or no flag, because it can only ever
   remove a stale assurance and gating it would let a seat toggled off and back on
-  carry entries no round in between could expire. The residual gap is a file
-  modified, examined, then reverted to its base content: it leaves the diff, so
-  its entry survives. What makes that survivable is the next rule.
+  carry entries no round in between could expire.
+
+  A deleted or renamed-away file is *not* in that diff — a deletion emits
+  `+++ /dev/null` and a rename leaves nothing at the old path — even though both
+  differ maximally from base, so the read path retires those against the
+  checkout, the same way the findings ledger retires a finding whose file is
+  gone. The residual gap left is a file modified, examined, then reverted to its
+  base content: it leaves the diff and is still in the tree, so neither pass
+  expires its entry. What makes that survivable is the next rule.
 - **Advisory, never binding.** The block is introduced by fixed prose
   (`COVERAGE_ADVISORY`) that says *deprioritise* and names three conditions for
   going back to a region anyway — this round's changes touch it, it is on the

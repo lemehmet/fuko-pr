@@ -231,6 +231,25 @@ def _is_gone(root: Path, real_root: str, rel: str) -> bool:
     return False
 
 
+def _tree_root(checkout_root: str) -> tuple[Path, str] | None:
+    """The checkout root and its resolved form, or ``None`` when it cannot be judged.
+
+    Both ledgers ask the tree the same question -- is this path still there? --
+    and both must answer "keep it" when the tree itself is unusable: under a root
+    that does not exist every path is "missing", which would close the whole
+    findings ledger and expire the whole coverage ledger on one bad argument. The
+    resolution happens once, here, so every per-path containment check compares
+    like with like on a host whose temp or work dir is itself a link.
+    """
+    root = Path(checkout_root) if checkout_root else None
+    if root is None or not root.is_dir():
+        return None
+    try:
+        return root, os.path.realpath(root)
+    except (OSError, ValueError):
+        return None
+
+
 def _retire_missing(
     stored: Sequence[StoredFinding], checkout_root: str, head_sha: str
 ) -> list[StoredFinding]:
@@ -251,13 +270,10 @@ def _retire_missing(
     containment check compares like with like: on a host whose temp or work dir
     is itself a link, a real parent under a lexical root would never match.
     """
-    root = Path(checkout_root) if checkout_root else None
-    if root is None or not root.is_dir():
+    resolved = _tree_root(checkout_root)
+    if resolved is None:
         return list(stored)
-    try:
-        real_root = os.path.realpath(root)
-    except (OSError, ValueError):
-        return list(stored)
+    root, real_root = resolved
     live: list[StoredFinding] = []
     for row in stored:
         if _is_gone(root, real_root, row.prior.file):
@@ -324,7 +340,9 @@ def _keyed(examined: Sequence[ExaminedRegion]) -> Sequence[ExaminedRegion]:
     ]
 
 
-def _carried_coverage(repo: str, pr: int, seat: str) -> tuple[list[PriorCoverage], int]:
+def _carried_coverage(
+    repo: str, pr: int, seat: str, checkout_root: str = ""
+) -> tuple[list[PriorCoverage], int, int]:
     """This seat's live coverage minus the entries too hollow to carry, and the count dropped.
 
     The filter is the first of #157's four mitigations, and it is applied on the
@@ -346,6 +364,24 @@ def _carried_coverage(repo: str, pr: int, seat: str) -> tuple[list[PriorCoverage
     advisory line in one prompt;
     carrying it spends budget on a claim no later round can check, which is the
     one direction this tier must not fail in.
+
+    The tree answers the second question, and it is the one the DELTA cannot
+    (`qwen-anthropic/qwen3.8-max` and `openrouter/upstage/solar-pro4`, #157). A
+    deleted file emits ``+++ /dev/null`` and a renamed-away one emits nothing at
+    the old path, so neither reaches ``parse_diff``'s file set -- the two shapes
+    that differ MAXIMALLY from base are exactly the two the delta never names,
+    and their coverage would otherwise survive every round to retention. So the
+    entries are checked against the checkout with the same ``_is_gone`` the
+    findings ledger uses, and one whose file the head no longer carries is
+    expired in the store rather than merely skipped: the row is dead for every
+    future round too, and leaving it live would re-pay this check each time.
+
+    That pass is on the READ path, so unlike delta-expiry it does not run for a
+    seat with the ledger off. It does not need to: a flag-off seat carries
+    nothing, so the entry cannot reach a prompt while the flag is off, and the
+    first round with it back on retires the row before rendering anything. What
+    delta-expiry has to survive -- a toggle window in which entries silently
+    stop being invalidated -- has no equivalent here.
     """
     rows = review_state.live_coverage(repo, pr, seat)
     kept = [
@@ -353,7 +389,20 @@ def _carried_coverage(repo: str, pr: int, seat: str) -> tuple[list[PriorCoverage
         for row in rows
         if all(str(getattr(row, name, "")).strip() for name in EXAMINED_REQUIRED_FIELDS)
     ]
-    return kept, len(rows) - len(kept)
+    hollow = len(rows) - len(kept)
+    resolved = _tree_root(checkout_root)
+    if resolved is None:
+        return kept, hollow, 0
+    root, real_root = resolved
+    gone = sorted({row.file for row in kept if _is_gone(root, real_root, row.file)})
+    if not gone:
+        return kept, hollow, 0
+    retired = review_state.expire_coverage(repo, pr, seat, gone)
+    dead = set(gone)
+    # The rows leave this round's prompt whatever the store said: an entry about
+    # a file the head does not carry must not be rendered even if the write that
+    # was meant to retire it was the call that degraded.
+    return [row for row in kept if row.file not in dead], hollow, retired
 
 
 def _anchor(file: str, title: str) -> tuple[str, str]:
@@ -464,12 +513,20 @@ def carry_in(
       surface the epic measured being re-read (one 428KB file read 182 times
       across 24 runs) and the surface this tier exists to spread across rounds.
 
+    The delta does not name every changed file, which is why it is not the only
+    invalidation: a DELETED file emits ``+++ /dev/null`` and a renamed-away one
+    emits nothing at its old path, so neither reaches ``parse_diff``'s file set
+    even though both differ maximally from base. Those are retired against the
+    checkout instead, in :func:`_carried_coverage`
+    (``qwen-anthropic/qwen3.8-max`` and ``openrouter/upstage/solar-pro4``).
+
     The residual gap runs the other way and is bounded rather than closed: a file
-    modified, examined, then reverted to its base content leaves the diff, so its
-    entry is not expired even though the head it described is gone. What keeps
-    that survivable is the third mitigation rather than this one -- the entry is
-    rendered as advisory (:data:`sidecar.reviewer.prompt.COVERAGE_ADVISORY`), so
-    at worst it deprioritises a region a round remains free to re-open.
+    modified, examined, then reverted to its base content leaves the diff and is
+    still present in the tree, so neither pass expires its entry even though the
+    head it described is gone. What keeps that survivable is the third mitigation
+    rather than this one -- the entry is rendered as advisory
+    (:data:`sidecar.reviewer.prompt.COVERAGE_ADVISORY`), so at worst it
+    deprioritises a region a round remains free to re-open.
 
     Returns an empty :class:`CarriedState` when there is nothing to carry -- and
     also when the store is unconfigured or unreachable, since every
@@ -504,7 +561,10 @@ def carry_in(
     expired = review_state.expire_coverage(repo, pr, seat, _expiry_targets(touched_files))
     opened = review_state.open_findings(repo, pr, seat)
     live = _retire_missing(opened.rows, checkout_root, head_sha)
-    coverage, hollow = _carried_coverage(repo, pr, seat) if coverage_ledger else ([], 0)
+    coverage, hollow, retired = (
+        _carried_coverage(repo, pr, seat, checkout_root) if coverage_ledger else ([], 0, 0)
+    )
+    expired += retired
     state = render_prior_state([row.prior for row in live], coverage)
     # zip over the renderer's OWN minted keys rather than re-deriving `p{n}`
     # here: the id scheme is the renderer's to choose, and pairing its output

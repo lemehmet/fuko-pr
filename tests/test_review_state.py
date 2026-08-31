@@ -319,7 +319,20 @@ def test_next_round_counts_settled_rounds_too(pg):
     assert review_state.next_round("o/r", 7, "henry") == 4
     sql, params = conn.statements[0]
     assert "coalesce(max(round), 0) + 1" in sql and "status" not in sql
-    assert params == ("o/r", 7, "henry")
+    assert params == ("o/r", 7, "henry", "o/r", 7, "henry")
+
+
+def test_next_round_counts_coverage_rounds_as_well_as_finding_rounds(pg):
+    """A round that recorded only coverage still happened (#157).
+
+    Reading `review_findings` alone would re-issue `1` for every round in a
+    found-nothing streak, and the prompt would then show N rounds of coverage
+    under one label."""
+    conn = pg(rows=[(4,)])
+
+    assert review_state.next_round("o/r", 7, "henry") == 4
+    sql, _ = conn.statements[0]
+    assert "review_findings" in sql and "review_coverage" in sql and "UNION ALL" in sql
 
 
 def test_next_round_is_one_for_a_seats_first_round(pg):
