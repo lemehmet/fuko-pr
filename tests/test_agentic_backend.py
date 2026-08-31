@@ -620,7 +620,11 @@ def test_invoke_reports_no_accounting_when_the_harness_reported_none(monkeypatch
 def _ledger(monkeypatch, open_rows=()):
     """Patch the review-state primitives the ledger reaches for, recording writes."""
     written: dict = {"recorded": [], "transitions": [], "touched": []}
-    monkeypatch.setattr(review_state, "open_findings", lambda *a, **k: list(open_rows))
+    monkeypatch.setattr(
+        review_state,
+        "open_findings",
+        lambda *a, **k: review_state.OpenLedger(rows=tuple(open_rows)),
+    )
     monkeypatch.setattr(review_state, "next_round", lambda *a, **k: 4)
     monkeypatch.setattr(
         review_state,

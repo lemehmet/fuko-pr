@@ -117,7 +117,7 @@ def test_review_state_no_ops_without_a_database(monkeypatch):
     monkeypatch.setattr(review_state.settings, "database_url", "")
 
     assert review_state.record_findings("o/r", 7, "henry", 1, "sha", [_finding()]) == 0
-    assert review_state.open_findings("o/r", 7, "henry") == []
+    assert review_state.open_findings("o/r", 7, "henry") == review_state.OpenLedger()
     assert review_state.transition(_UUID, "fixed", "rewritten") is False
     assert review_state.touch_findings([_UUID]) == 0
     assert review_state.record_coverage("o/r", 7, "henry", 1, "sha", [_region()]) == 0
@@ -136,7 +136,7 @@ def test_a_store_failure_never_reaches_the_review(pg, monkeypatch, capsys):
     monkeypatch.setattr(sidecar.db, "db", exploding_db)
 
     assert review_state.record_findings("o/r", 7, "henry", 1, "sha", [_finding()]) == 0
-    assert review_state.open_findings("o/r", 7, "henry") == []
+    assert review_state.open_findings("o/r", 7, "henry") == review_state.OpenLedger()
     assert review_state.transition(_UUID, "fixed") is False
     assert review_state.live_coverage("o/r", 7, "henry") == []
     assert "connection refused" in capsys.readouterr().err
@@ -169,12 +169,14 @@ def test_stored_text_is_bounded_because_the_ledger_is_replayed_every_round(pg):
 def test_open_findings_returns_rows_paired_with_their_prior_finding(pg):
     conn = pg(
         rows=[
-            (_UUID, "src/app.py", 42, "high", "bug", "unchecked None", "body text", 2),
+            (_UUID, "src/app.py", 42, "high", "bug", "unchecked None", "body text", 2, 1),
         ]
     )
-    stored = review_state.open_findings("o/r", 7, "henry")
+    ledger = review_state.open_findings("o/r", 7, "henry")
+    stored = ledger.rows
 
     assert len(stored) == 1
+    assert ledger.truncated == 0
     assert stored[0].id == _UUID
     assert stored[0].prior == PriorFinding(
         file="src/app.py",
@@ -218,6 +220,46 @@ def test_open_findings_clamps_a_caller_supplied_limit(pg):
     review_state.open_findings("o/r", 7, "henry", limit=10_000)
 
     assert conn.statements[0][1][4] == review_state.MAX_OPEN_FINDINGS
+
+
+def _open_row(n: int, total: int) -> tuple:
+    return (_UUID, "src/app.py", n, "high", "bug", f"finding {n}", "body", 1, total)
+
+
+def test_open_findings_reports_how_many_rows_the_cap_cut(pg):
+    """The cut rows are the NEWEST, and a row no round is offered is a row no
+    round can settle (#173) -- so the read has to say it happened."""
+    conn = pg(rows=[_open_row(n, 512) for n in range(3)])
+    ledger = review_state.open_findings("o/r", 7, "henry")
+
+    assert len(ledger.rows) == 3
+    assert ledger.truncated == 509
+    # From the same read that did the cutting: a second COUNT query could see a
+    # different window than the one these rows came from.
+    assert "count(*) OVER ()" in conn.statements[0][0]
+    assert len(conn.statements) == 1
+
+
+def test_open_findings_reports_no_truncation_when_the_window_fits(pg):
+    conn = pg(rows=[_open_row(n, 2) for n in range(2)])
+
+    assert review_state.open_findings("o/r", 7, "henry").truncated == 0
+    assert len(conn.statements) == 1
+
+
+def test_open_findings_reports_no_truncation_on_an_empty_ledger(pg):
+    """No rows means no window column to read: the count must not be guessed."""
+    pg()
+
+    assert review_state.open_findings("o/r", 7, "henry") == review_state.OpenLedger()
+
+
+def test_open_findings_never_reports_a_negative_truncation(pg):
+    """A total below the rows in hand is a contradiction; report none, not less
+    than none -- a negative would read as a cut in the caller's log line."""
+    pg(rows=[_open_row(n, 1) for n in range(3)])
+
+    assert review_state.open_findings("o/r", 7, "henry").truncated == 0
 
 
 def test_next_round_counts_settled_rounds_too(pg):

@@ -57,8 +57,8 @@ class _Store:
             }
         return len(findings)
 
-    def open_findings(self, repo, pr, seat, limit=200):
-        return [
+    def open_findings(self, repo, pr, seat, limit=review_state.MAX_OPEN_FINDINGS):
+        rows = [
             review_state.StoredFinding(
                 id=row_id,
                 prior=PriorFinding(
@@ -74,6 +74,11 @@ class _Store:
             for row_id, row in self.rows.items()
             if row["key"] == (repo, pr, seat) and row["status"] == "open"
         ]
+        # Cut the way the real read cuts: insertion order is oldest-first, so
+        # the rows past the cap are the NEWEST -- the case #173 is about.
+        return review_state.OpenLedger(
+            rows=tuple(rows[:limit]), truncated=max(0, len(rows) - limit)
+        )
 
     def next_round(self, repo, pr, seat):
         rounds = [r["round"] for r in self.rows.values() if r["key"] == (repo, pr, seat)]
@@ -145,7 +150,7 @@ def test_settling_closes_only_what_the_round_settled(store):
     )
 
     assert outcome == ledger.Settlement(closed=1, reasserted=1, recorded=0)
-    assert [f.prior.title for f in store.open_findings(REPO, PR, SEAT)] == ["two", "three"]
+    assert [f.prior.title for f in store.open_findings(REPO, PR, SEAT).rows] == ["two", "three"]
     assert store.touched == [carried.rows["p2"]]
 
 
@@ -154,7 +159,8 @@ def test_re_reporting_a_carried_finding_touches_it_instead_of_duplicating_it(sto
 
     Two open rows for one claim compound per round, and past the read cap the
     rows cut are the NEWEST -- never rendered, never minted an id, never touched,
-    so they age out unseen. That is this module's own loss arriving by volume.
+    so they age out unsettled (reported by `carry_in`, but no more reachable).
+    That is this module's own loss arriving by volume.
     """
     settle(
         carry_in(REPO, PR, SEAT),
@@ -185,7 +191,7 @@ def test_re_reporting_a_carried_finding_touches_it_instead_of_duplicating_it(sto
     assert outcome == ledger.Settlement(
         reasserted=1, recorded=1, deduped=("src/a.py: Leaks The Handle",)
     )
-    assert sorted(f.prior.title for f in store.open_findings(REPO, PR, SEAT)) == [
+    assert sorted(f.prior.title for f in store.open_findings(REPO, PR, SEAT).rows) == [
         "drops the error",
         "leaks the handle",
     ]
@@ -216,7 +222,7 @@ def test_a_settled_row_does_not_suppress_the_same_claim_recorded_again(store):
     )
 
     assert outcome == ledger.Settlement(closed=1, recorded=1)
-    assert [f.prior.title for f in store.open_findings(REPO, PR, SEAT)] == ["leaks the handle"]
+    assert [f.prior.title for f in store.open_findings(REPO, PR, SEAT).rows] == ["leaks the handle"]
 
 
 def test_rejected_without_a_reason_does_not_close_a_row(store):
@@ -244,7 +250,7 @@ def test_rejected_without_a_reason_does_not_close_a_row(store):
     )
 
     assert outcome == ledger.Settlement(closed=1, reasserted=1, recorded=0)
-    assert [f.prior.title for f in store.open_findings(REPO, PR, SEAT)] == ["one"]
+    assert [f.prior.title for f in store.open_findings(REPO, PR, SEAT).rows] == ["one"]
     assert store.rows[carried.rows["p2"]]["status"] == "rejected"
 
 
@@ -272,7 +278,7 @@ def test_a_verdict_on_an_unminted_id_transitions_nothing(store):
         ],
     )
 
-    assert [f.prior.title for f in store.open_findings(REPO, PR, SEAT)] == ["one"]
+    assert [f.prior.title for f in store.open_findings(REPO, PR, SEAT).rows] == ["one"]
     assert store.touched == []
 
 
@@ -313,7 +319,7 @@ def test_a_minted_id_without_a_row_is_skipped_by_the_dedup_pass_too(store):
     )
 
     assert outcome == ledger.Settlement(recorded=1)
-    assert [f.prior.title for f in store.open_findings(REPO, PR, SEAT)] == ["t"]
+    assert [f.prior.title for f in store.open_findings(REPO, PR, SEAT).rows] == ["t"]
 
 
 def test_ids_map_to_rows_in_the_renderers_own_minting_order(store):
@@ -348,7 +354,7 @@ def test_a_finding_whose_file_is_gone_is_retired_not_re_offered(store, tmp_path)
     carried = carry_in(REPO, PR, SEAT, str(tmp_path), "head2")
 
     assert "gone" not in carried.text
-    assert [f.prior.file for f in store.open_findings(REPO, PR, SEAT)] == ["src/kept.py"]
+    assert [f.prior.file for f in store.open_findings(REPO, PR, SEAT).rows] == ["src/kept.py"]
     retired = [r for r in store.rows.values() if r["status"] == "stale"]
     assert len(retired) == 1 and "head2" in retired[0]["reason"]
 
@@ -510,6 +516,55 @@ def test_a_parent_that_will_not_resolve_keeps_its_finding(store, tmp_path, monke
 
     assert list(carried.rows) == ["p1"]
     assert all(r["status"] == "open" for r in store.rows.values())
+
+
+def _fill_ledger(store, count):
+    """Record ``count`` distinct open findings for this seat, oldest first."""
+    settle(
+        carry_in(REPO, PR, SEAT),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        findings=[_finding(file=f"src/f{n}.py", title=f"finding {n}") for n in range(count)],
+    )
+
+
+def test_a_seat_over_the_read_cap_is_reported_not_silently_cut(store, capsys):
+    """#173's acceptance, end to end through `carry_in`.
+
+    Past the cap the rows dropped are the NEWEST, and a row no round is offered
+    is a row no round can settle -- it can only leave `open` by ageing out of the
+    retention window. That must never be silent.
+    """
+    over = review_state.MAX_OPEN_FINDINGS + 3
+    _fill_ledger(store, over)
+    capsys.readouterr()
+
+    carried = carry_in(REPO, PR, SEAT)
+
+    assert len(carried.rows) == review_state.MAX_OPEN_FINDINGS
+    assert carried.truncated == 3
+    # The newest are the ones missing: the prompt carries `finding 0`, not the tail.
+    assert "finding 0" in carried.text
+    assert f"finding {over - 1}" not in carried.text
+    logged = [line for line in capsys.readouterr().err.splitlines() if "review-state" in line]
+    assert len(logged) == 1
+    # The total leads, because the count IS the finding: a seat holding this many
+    # open claims on one PR is a seat whose rounds are settling nothing.
+    assert f"{over} open findings" in logged[0]
+    assert "3 NEWEST" in logged[0] and f"seat {SEAT}" in logged[0]
+
+
+def test_a_ledger_inside_the_read_cap_logs_nothing(store, capsys):
+    """The warning is an exception report, not a per-round line."""
+    _fill_ledger(store, 3)
+    capsys.readouterr()
+
+    carried = carry_in(REPO, PR, SEAT)
+
+    assert carried.truncated == 0
+    assert "review-state" not in capsys.readouterr().err
 
 
 def _forbidden(name):

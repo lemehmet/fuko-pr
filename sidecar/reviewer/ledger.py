@@ -29,6 +29,7 @@ ledger that records assurances nothing ever expires is worse than none.
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -77,11 +78,18 @@ class CarriedState:
     the prompt are fuko's own, so a verdict from the fenced channel can only ever
     address a row this round actually offered -- and this mapping is where that
     indirection is undone, on the fuko side of the fence.
+
+    ``truncated`` is the other half the renderer knows nothing about: how many
+    open rows the store held beyond its read cap and therefore did NOT offer this
+    round. It is carried rather than dropped because it is the one ledger fact a
+    later reader cannot recover -- the cut rows look identical to live ones in
+    the table, and nothing in this round's output mentions them (#173).
     """
 
     state: PriorState = field(default_factory=PriorState)
     rows: Mapping[str, str] = field(default_factory=dict)
     round: int = 1
+    truncated: int = 0
 
     @property
     def text(self) -> str:
@@ -234,15 +242,49 @@ def carry_in(
     state renders no ``prior-review-state`` section at all, so a round with no
     predecessor (or no store) gets byte-for-byte the prompt it got before this
     ledger existed.
+
+    A read the store had to cut is announced here and nowhere else (#173). Two
+    choices in that, both deliberate:
+
+    * it is reported at CARRY time, not folded into the settle summary the
+      caller prints when the round completes. The cut is a fact about the read,
+      and a round that crashes, times out or is throttled never reaches settle --
+      exactly the rounds whose seat is most likely to be the one drowning in
+      unsettled rows;
+    * the line leads with the TOTAL, because the count is the finding. Past this
+      cap a seat is not merely losing its newest rows, it is holding hundreds of
+      open claims on one pull request, which says its rounds are settling
+      nothing. Every value in the line is fuko's own (seat, repo, pr, integers) --
+      no model text reaches it, so it needs none of the flattening the settle
+      log applies to a claim's title.
+
+    That total is the size of the window the READ saw, and the line says so:
+    :func:`_retire_missing` runs between the read and the print, so on a head
+    that deleted files the table already holds fewer open rows by the time the
+    line appears. Reporting the read's window is the accurate choice rather than
+    the tidy one -- the cap acted on that window, and the rows it cut were never
+    checked against the checkout at all, so netting off only the retirements
+    among the rows in hand would produce a number describing neither state.
     """
-    live = _retire_missing(review_state.open_findings(repo, pr, seat), checkout_root, head_sha)
+    opened = review_state.open_findings(repo, pr, seat)
+    live = _retire_missing(opened.rows, checkout_root, head_sha)
     state = render_prior_state([row.prior for row in live])
     # zip over the renderer's OWN minted keys rather than re-deriving `p{n}`
     # here: the id scheme is the renderer's to choose, and pairing its output
     # with the list it was given cannot drift out of step with it the way a
     # second copy of the enumeration could.
     rows = {minted: row.id for minted, row in zip(state.ids, live)}
-    return CarriedState(state=state, rows=rows, round=review_state.next_round(repo, pr, seat))
+    round_ = review_state.next_round(repo, pr, seat)
+    if opened.truncated:
+        print(
+            f"fuko: review-state seat {seat} round {round_}: {repo}#{pr} held "
+            f"{len(opened.rows) + opened.truncated} open findings for this seat at read time, "
+            f"over the {review_state.MAX_OPEN_FINDINGS}-row read cap -- "
+            f"the {opened.truncated} NEWEST "
+            "are not in this round's prompt and cannot be settled until earlier rows close",
+            file=sys.stderr,
+        )
+    return CarriedState(state=state, rows=rows, round=round_, truncated=opened.truncated)
 
 
 def settle(
@@ -285,9 +327,11 @@ def settle(
     round, and the compounding has an end: past :data:`review_state.
     MAX_OPEN_FINDINGS` the read keeps the oldest rows, so the ones cut are the
     newest -- never rendered, never minted an id, never touched, and so ageing
-    out of the retention window unseen. That is this module's own loss arriving
-    by volume, so a published finding whose ``(file, title)`` matches a carried
-    row this round left open is treated as a re-assertion of that row: the row
+    out of the retention window unsettled -- announced on stderr by
+    :func:`carry_in` when it happens (#173), which makes the end state visible to
+    an operator but no more reachable by a round. That is this module's own loss
+    arriving by volume, so a published finding whose ``(file, title)`` matches a
+    carried row this round left open is treated as a re-assertion of that row: the row
     is touched (a round did look at it against this head) and the finding is not
     recorded again.
 
