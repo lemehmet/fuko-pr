@@ -300,8 +300,9 @@ def rh_observe_endpoint(req: models.ObserveHealthRequest) -> dict:
 #
 # WHAT THIS BOUNDARY DOES AND DOES NOT CHECK. The store-side guards travel with
 # the primitives and so hold for both transports: the ``FINDING_STATUSES``
-# vocabulary, ``REOPENABLE_STATUSES`` (``stale`` is fuko's own closure and no
-# request can reverse it), the UUID check, ``_clip``'s text bound, the read caps
+# vocabulary, ``REOPENABLE_STATUSES`` (no request can REVERSE a ``stale`` -- but
+# see :func:`rs_transition_endpoint`, because a request can now create one), the
+# UUID check, ``_clip``'s text bound, the read caps
 # and the retention window -- plus the ``(repo, pr, seat)`` scope now matched in
 # SQL, which is what keeps one seat from settling another's row (#160).
 #
@@ -353,7 +354,29 @@ def rs_settled_findings_endpoint(repo: str, pr: int, seat: str) -> dict:
     dependencies=[Depends(_auth)],
 )
 def rs_transition_endpoint(req: rs.TransitionRequest) -> dict:
-    """Apply one verdict to one of a seat's open findings."""
+    """Apply one verdict to one of a seat's open findings.
+
+    ``stale`` is accepted here, deliberately, and it is the asymmetric one: a
+    ``stale`` row is reversible by nothing, since :func:`review_state.reopen`
+    matches only ``REOPENABLE_STATUSES`` and :func:`review_state.transition`
+    matches only ``status = 'open'``, so it is out of every later prompt until
+    the retention window drops it. In-process it is minted in one place --
+    ``ledger._retire_missing``, after ``_is_gone`` has proved the file absent
+    from the tree -- and that filesystem fact cannot travel the wire, so this
+    endpoint cannot tell fuko's own retirement from any other caller's claim.
+
+    It is accepted anyway because rejecting it would break the feature rather
+    than protect it: on the remote branch ``_retire_missing`` reaches the store
+    THROUGH this endpoint, so a filter here would silently disable retirement on
+    exactly the deployment #171 exists to serve. The residual risk is the one the
+    boundary note above already states and accepts -- a ``FUKO_TOKEN`` holder can
+    write a ledger row no round would have produced -- and it is strictly smaller
+    than what the same token already authorizes: ``/forget`` with ``all=true``
+    discards the whole knowledge base, where this marks findings in one seat's
+    lane unreadable for the retention window. Raised by
+    ``qwen-anthropic/qwen3.8-max`` on #171, which asked for either an explicit
+    acceptance or an alert hook; this is the acceptance.
+    """
     return {
         "changed": review_state.transition(
             req.repo, req.pr, req.seat, req.finding_id, req.status, req.reason

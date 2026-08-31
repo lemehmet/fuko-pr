@@ -387,6 +387,38 @@ def test_the_degradation_line_cannot_be_split_by_what_it_reports(monkeypatch, br
     ]
 
 
+def test_the_latch_announcement_cannot_be_split_either(monkeypatch, capsys):
+    """Same stream, same rule. No reachable ``TransportError`` carries a raw line
+    break today -- httpx writes those messages -- but that is a fact about a
+    third-party library's formatting, not an invariant this module holds."""
+    monkeypatch.setenv("FUKO_URL", _URL)
+
+    def _boom(*a, **k):
+        raise httpx.ConnectError("refused\nfuko: forged gate line")
+
+    monkeypatch.setattr(rsc.httpx, "get", _boom)
+
+    assert rsc.next_round(REPO, PR, SEAT) == 1
+    assert len(capsys.readouterr().err.splitlines()) == 1
+
+
+def test_the_transition_endpoint_accepts_stale_deliberately(wire, store):
+    """``stale`` is irreversible and unfilterable here, and both are on purpose.
+
+    On the remote branch ``ledger._retire_missing`` reaches the store through
+    this endpoint, so a server-side filter would disable retirement on exactly
+    the deployment #171 exists to serve. Pinned so the acceptance is a decision a
+    later reader finds, rather than an omission they close by "hardening" it.
+    """
+    _spy, calls = store
+    _spy("transition", True)
+
+    assert rsc.transition(REPO, PR, SEAT, _UUID, "stale", "file absent from the tree") is True
+    assert calls == [
+        ("transition", (REPO, PR, SEAT, _UUID, "stale", "file absent from the tree"), {})
+    ]
+
+
 def test_an_erroring_endpoint_degrades_without_latching(monkeypatch, store, wire, capsys):
     """A 500 answers as fast as a 200, so latching on it would turn one broken
     handler into a lost ledger for every remaining call. The latch bounds TIME."""

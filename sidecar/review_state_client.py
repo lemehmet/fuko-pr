@@ -219,6 +219,16 @@ def _mark_down(url: str, exc: Exception) -> None:
     every ledger call, in every round, to save nothing measurable in the one
     round where the sidecar is already dead.
 
+    The exception text is flattened here as it is on the guarded arm, which two
+    reviewers read differently: ``qwen-anthropic/qwen3.8-max`` argued this print
+    is safe unflattened because a ``TransportError``'s message is httpx's own,
+    and ``openrouter/upstage/solar-pro4`` argued it is the same #147 forgery
+    surface. The first is right about today -- no reachable ``TransportError``
+    carries a raw line break -- but that is a property of a third-party library's
+    message formatting, and "everything foreign on this stream is flattened" is a
+    cheaper invariant to hold than "this one call is exempt, for a reason you
+    must go and re-derive from httpx". One function call, no argument left.
+
     Process-wide and never reset, which is the right lifetime: a runner process
     is one review run, and an A/B run's branches are threads of it that share the
     one sidecar. The worst case is the degradation the epic already accepts --
@@ -230,8 +240,8 @@ def _mark_down(url: str, exc: Exception) -> None:
             return
         _transport_down = True
     print(
-        f"fuko: review-state sidecar at {url} did not answer ({exc}); "
-        "this run continues without the ledger",
+        f"fuko: review-state sidecar at {url} did not answer "
+        f"({flatten_for_log(str(exc))}); this run continues without the ledger",
         file=sys.stderr,
     )
 
