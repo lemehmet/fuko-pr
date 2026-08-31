@@ -248,7 +248,11 @@ def backup_served_rounds(
     model too. The discriminator needs no new plumbing -- the branch header's
     ``fuko-run:v1`` receipt already records ``label`` (the branch's configured
     primary) beside ``model`` (the entry that actually answered), and they differ
-    exactly when a backup was promoted mid-pool.
+    when a backup answered under a different ``provider/name``. That is a
+    sufficient test, not a biconditional: two entries may legally share a
+    ``provider/name`` and differ only by ``token_env``/endpoint, and a rescue
+    between those is invisible here. The error direction is under-reporting a
+    confound, never inventing one.
 
     Reported, never subtracted. Dropping such a round would change the
     denominator of a metric whose charter is repeatability, and #204's runner fix
@@ -277,8 +281,8 @@ def backup_served_rounds(
     round is included.
 
     The arm comes from the comment's own author. The receipt's ``app`` is a
-    fallback only for a payload read WITHOUT its envelope -- no author field at
-    all. An author that is present but names no arm is skipped rather than
+    fallback only for a payload read WITHOUT its envelope -- no usable author
+    login. An author that is present and names no arm is skipped rather than
     re-attributed from the body, so a receipt quoted or copied by a third party
     cannot mint a round for the seat it happens to name.
     """

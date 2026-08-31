@@ -2279,6 +2279,57 @@ def test_run_pool_carries_the_branchs_ledger_flags_into_a_failover(monkeypatch):
         assert rescued.get("FUKO_AGENTIC_COVERAGE_LEDGER") == coverage
 
 
+def test_order_pool_demoting_the_branch_does_not_move_ledger_ownership(monkeypatch):
+    """Ownership is `pool[0]`, not `ordered[0]` -- reordering changes trial ORDER only.
+
+    The branch is ranked last here (its `max_context` cannot hold `required`), so
+    the BACKUP is tried first and the whole design rests on the owner having been
+    captured before `order_pool`. Deriving it from the ordered list instead --
+    the mistake `_run_pool`'s docstring warns against -- passes every other
+    ledger test in this file, because they all leave the pool in config order.
+    """
+    from sidecar.backends.agentic import AgenticBackend
+
+    monkeypatch.setenv("ANTHROPIC_KEY", "antkey")
+    monkeypatch.setattr(runner, "_normalize", lambda *a, **k: 0)
+    monkeypatch.setattr(runner, "_record_run", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_cb_trip", lambda *a, **k: None)
+    seen: list[dict] = []
+    backend = _ledger_failover_backend(AgenticBackend(_review_config_for_receipts()), seen)
+
+    backup = ReviewModel(
+        provider="anthropic", name="backup-model", key_env="ANTHROPIC_KEY", role="backup"
+    )
+    branch = ReviewModel(
+        provider="anthropic",
+        name="control-model",
+        key_env="ANTHROPIC_KEY",
+        findings_ledger=False,
+        coverage_ledger=False,
+        max_context=100,
+    )
+
+    runner._run_pool(
+        backend,
+        PRRef("o/r", 8, "u"),
+        "",
+        {},
+        _review_config_for_receipts(),
+        [branch, backup],
+        set(),
+        1000,
+        tools=["review"],
+        seat="dorian",
+    )
+
+    # The backup really was tried first -- otherwise this test proves nothing.
+    assert seen[0]["FUKO_AGENTIC_MODEL"] == "backup-model"
+    # ...and it still ran the demoted branch's flags, not its own defaults.
+    assert seen[0].get("FUKO_AGENTIC_FINDINGS_LEDGER") == "0"
+    assert seen[0].get("FUKO_AGENTIC_COVERAGE_LEDGER") is None
+    assert seen[0]["FUKO_SEAT"] == "dorian"
+
+
 def test_a_pool_of_bare_backups_keeps_every_entrys_own_ledger_flags(monkeypatch):
     """No branch entry means no lane to inherit from, so nothing is overridden.
 

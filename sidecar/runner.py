@@ -822,9 +822,13 @@ _BRANCH_LEDGER_FIELDS = ("findings_ledger", "coverage_ledger")
 def _ledger_owner(pool: list[ModelConfig]) -> ModelConfig | None:
     """The pool's branch entry -- the seat whose ledger configuration the pool runs.
 
-    ``pool[0]`` by contract: every ``_run_pool`` call site composes the pool as
-    ``[entry, *_compatible_backups(entry, ...)]``, and that same ``entry`` is
-    where the caller read ``slot``/``seat``/``role`` from.
+    ``pool[0]`` whenever the pool HAS a branch: every ``_run_pool`` call site
+    composes the pool as ``[entry, *_compatible_backups(entry, ...)]``, and that
+    same ``entry`` is where the caller read ``slot``/``seat``/``role`` from. The
+    solo call site is the exception that makes the ``role == "backup"`` check
+    below load-bearing rather than defensive: it composes
+    ``[*reviewers, *(backups if reviewers is empty ...)]``, so with no reviewer
+    configured the pool is backups only and has no branch at all.
 
     ``None`` when the pool has no branch to own it -- an empty pool, or the
     degenerate solo path where no reviewer is configured at all and the pool is
@@ -915,9 +919,11 @@ def _run_pool(
     App installation tokens, whose ``GET /user`` probe 403s (#66). When unset
     normalization falls back to the process token.
 
-    ``pool[0]`` is the BRANCH entry by contract -- every call site composes the
-    pool as ``[entry, *_compatible_backups(entry, ...)]`` -- and it is the same
-    entry the caller derived ``slot``/``seat``/``role`` from. ``order_pool`` may
+    ``pool[0]`` is the BRANCH entry whenever the pool has one -- a call site
+    composes the pool as ``[entry, *_compatible_backups(entry, ...)]``, and it is
+    the same entry the caller derived ``slot``/``seat``/``role`` from. A pool of
+    bare backups has no branch and every entry keeps its own flags; see
+    :func:`_ledger_owner`. ``order_pool`` may
     demote it behind a backup for context-fit or cooldown reasons, which changes
     the trial ORDER, never which entry owns the branch. The ledger flags follow
     that ownership: see :func:`_with_branch_ledger`.

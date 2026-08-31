@@ -210,23 +210,40 @@ def _report_pair(claims: list[Claim], arms: dict[str, str], receipts: set[tuple[
         )
 
 
-def _report_backup_rounds(rescued: set[tuple[str, str]]) -> None:
+def _report_backup_rounds(rescued: set[tuple[str, str]], receipts: set[tuple[str, str]]) -> None:
     """Name the rounds a failover backup answered, so the model confound is visible.
 
     Printed rather than subtracted (#204): these rounds are attributed to the
     right arm and run the right ledger configuration, but a different model
     produced them, and a reader comparing two arms is entitled to know which
     rounds are not a clean single-variable comparison.
+
+    Split against ``receipts`` -- the reviewed-round set every metric is built
+    from -- so the inclusion claim is true by construction rather than by
+    assertion. A rescued round whose key is absent from that set is disclosed
+    separately instead: its receipt names the head the run STARTED on, while a
+    round is keyed by the commit GitHub stamps at submission, so a push landing
+    mid-run leaves a key that identifies no reviewed round (#210).
     """
-    if not rescued:
-        return
-    print(
-        f"\nnote: {len(rescued)} round(s) were answered by a FAILOVER backup, not the "
-        "arm's own model. They are INCLUDED in every metric in this report -- the arm "
-        "and the ledger configuration are the seat's -- but the model is a confound:"
-    )
-    for arm, round_key in sorted(rescued):
-        print(f"    {arm}: {round_key}")
+    named = rescued & receipts
+    unanchored = rescued - receipts
+    if named:
+        print(
+            f"\nnote: {len(named)} round(s) were answered by a FAILOVER backup, not the "
+            "arm's own model. They are INCLUDED in every metric in this report -- the arm "
+            "is the seat's, and so is the ledger configuration for any round run on a "
+            "runner carrying #204 -- but the model is a confound:"
+        )
+        for arm, round_key in sorted(named):
+            print(f"    {arm}: {round_key}")
+    if unanchored:
+        print(
+            f"\nnote: {len(unanchored)} further round(s) were answered by a FAILOVER "
+            "backup but match no reviewed round, so they are in NO metric here. The "
+            "receipt's head is the run's start, not its submission (#210):"
+        )
+        for arm, round_key in sorted(unanchored):
+            print(f"    {arm}: {round_key}")
 
 
 def _report_cost(repo: str, slots: dict[str, str], days: int) -> None:
@@ -303,7 +320,7 @@ def main() -> None:
             "rehydrates them"
         )
     _report_arms(claims, arms, receipts)
-    _report_backup_rounds(rescued)
+    _report_backup_rounds(rescued, receipts)
     _report_pair(claims, arms, receipts)
     _report_cost(args.repo, _pairs(args.slot, "--slot"), args.days)
     print("\npublished baselines (different rule -- orientation only):")
