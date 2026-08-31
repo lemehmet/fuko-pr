@@ -341,7 +341,8 @@ def settle(
     title it distinctly. That definition has a cost, and it is the only one in
     this module that runs toward loss rather than noise -- a genuinely new claim
     sharing a file and a case-folded title with a carried row is not written, and
-    the row that survives carries the EARLIER body. It is accepted because the
+    the row that survives carries the EARLIER body and the EARLIER evidence. It
+    is accepted because the
     alternative is worse in kind, not in degree: keying on the body as well would
     miss every reworded re-report, which is most of them, and restore the
     unbounded growth above, whose end state is rows cut, unreachable and aged out

@@ -69,6 +69,7 @@ class _Store:
                     severity=row["finding"].severity,
                     category=row["finding"].category,
                     round=row["round"],
+                    evidence=row["finding"].evidence,
                 ),
             )
             for row_id, row in self.rows.items()
@@ -123,6 +124,10 @@ def test_an_unaddressed_finding_is_in_the_next_rounds_prompt(store):
     assert second.round == 2
     assert "leaks the handle" in second.text and "drops the error" in second.text
     assert list(second.rows) == ["p1", "p2"]
+    # The claim AND its grounding make the trip (#174). Asserted here, on the
+    # store round trip, because the render-unit tests build PriorFinding by hand
+    # and so cannot see a read that drops the column again.
+    assert "evidence: src/app.py:118-166" in second.text
 
 
 def test_settling_closes_only_what_the_round_settled(store):

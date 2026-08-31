@@ -271,6 +271,9 @@ def test_review_state_ledgers_roundtrip_on_a_live_server():
     ledger = R.open_findings(TEST_REPO, 1, "henry")
     stored = ledger.rows
     assert sorted(s.prior.title for s in stored) == ["a", "b"]
+    # #174: the evidence a finding was published with survives the round trip,
+    # so the round asked to re-verify it is not handed the claim ungrounded.
+    assert {s.prior.evidence for s in stored} == {"src/app.py:40-44"}
     assert ledger.truncated == 0
     # A window the cap cuts: two open rows, one asked for, so the count the
     # server computes over the pre-LIMIT window must report the other one.
