@@ -1,16 +1,17 @@
-"""The open-findings ledger as a review round sees it: carry in, then settle.
+"""The review ledgers as a round sees them: carry in, then settle.
 
-Tier 1 of the stateful-review epic (#156, epic #160). :mod:`sidecar.review_state`
-owns the rows and deliberately owns no semantics; this module owns the policy
-that turns those rows into one round's behaviour, so the two questions the epic
-actually argues about live in exactly one place each:
+Tiers 1 and 2 of the stateful-review epic (#156, #157, epic #160).
+:mod:`sidecar.review_state` owns the rows and deliberately owns no semantics;
+this module owns the policy that turns those rows into one round's behaviour, so
+the two questions the epic actually argues about live in exactly one place each:
 
 * **what a round is told** -- :func:`carry_in` reads this seat's still-open
-  findings, retires the ones whose file the current head no longer has, and
-  renders the rest through :func:`sidecar.reviewer.prompt.render_prior_state`;
+  findings, retires the ones whose file the current head no longer has, expires
+  the coverage this round's delta invalidates, and renders what is left through
+  :func:`sidecar.reviewer.prompt.render_prior_state`;
 * **what a round is allowed to conclude** -- :func:`settle` applies the verdicts
-  the agent returned, then records what this round found as the next round's
-  open ledger.
+  the agent returned, then records what this round found -- and, when the
+  coverage ledger is on, what it examined -- as the next round's state.
 
 Every decision here leans the same way, because the two failure directions are
 not symmetric. A finding that stays open when it should have closed is *noise*:
@@ -22,10 +23,23 @@ in "the row keeps the state it had", and a verdict's closure is no longer the
 last word: a later round that independently publishes the same claim re-raises
 the row it closed (#177).
 
-Scope is Tier 1 only: the FINDINGS ledger. The coverage ledger (recording
-``examined``, expiring it against the delta) is #157's, and nothing here writes
-or reads :func:`sidecar.review_state.record_coverage` -- a half-wired coverage
-ledger that records assurances nothing ever expires is worse than none.
+The two ledgers are deliberately NOT symmetric, and the asymmetry is the epic's
+central rule rather than an implementation detail. A finding is a CLAIM and
+survives: it stays open until a round settles it with a reason. A coverage entry
+is an ASSURANCE and expires: the moment the delta touches its file, the tree it
+described is gone and the entry dies unread. Nothing here ever carries a clean
+verdict forward -- "module X is sound" is the one artifact that would turn a
+round-1 mistake into a permanent blind spot -- so coverage records what was
+LOOKED AT, is introduced to the round as advisory
+(:data:`sidecar.reviewer.prompt.COVERAGE_ADVISORY`), and is dropped outright when
+the entry is too hollow to be retraced.
+
+Both ledgers are keyed per ``(repo, pr, seat)`` and never wider. A shared
+cross-seat ledger would raise fleet coverage at the cost of the independent
+second opinion that is the entire reason for running two seats (#160), and it
+would do so most seductively here: the seats overlap on 45 files, so sharing
+coverage looks like free coverage and is in fact the manufacture of exactly the
+correlation the second seat exists to break.
 """
 
 from __future__ import annotations
@@ -39,7 +53,11 @@ from pathlib import Path
 from .. import review_state
 from ..review_state import SettledFinding, StoredFinding
 from .prompt import (
+    EXAMINED_REQUIRED_FIELDS,
+    MAX_PRIOR_COVERAGE,
     AgenticFinding,
+    ExaminedRegion,
+    PriorCoverage,
     PriorFindingStatus,
     PriorState,
     render_prior_state,
@@ -86,12 +104,30 @@ class CarriedState:
     round. It is carried rather than dropped because it is the one ledger fact a
     later reader cannot recover -- the cut rows look identical to live ones in
     the table, and nothing in this round's output mentions them (#173).
+
+    ``coverage`` and ``expired`` are the coverage ledger's two counts, kept for
+    the caller's one-line round summary: how many entries this round was actually
+    SHOWN, and how many the delta invalidated on the way in. They are counts and
+    not entries because, unlike a suppressed finding, both are fully recoverable
+    from the store afterwards -- ``expired_at`` records exactly which rows died
+    and when.
+
+    ``coverage`` counts the RENDERED entries, not the live ones the read
+    returned: the renderer caps the block at
+    :data:`sidecar.reviewer.prompt.MAX_PRIOR_COVERAGE` and announces the cut only
+    in-band inside the prompt, so a seat holding more live entries than that
+    would otherwise have its receipt claim a number the round never saw. #157's
+    rollout is scored on exactly these receipts, which is what makes the
+    difference matter rather than merely being imprecise
+    (``qwen-anthropic/qwen3.8-max``, #157).
     """
 
     state: PriorState = field(default_factory=PriorState)
     rows: Mapping[str, str] = field(default_factory=dict)
     round: int = 1
     truncated: int = 0
+    coverage: int = 0
+    expired: int = 0
 
     @property
     def text(self) -> str:
@@ -123,6 +159,9 @@ class Settlement:
     closure could never produce. A closure that keeps being contradicted is
     either a seat settling claims it has not verified or a verdict that was never
     the seat's own idea, and both want an operator's eyes rather than a counter.
+
+    ``coverage`` is how many examined regions this round recorded, and is zero
+    on every seat whose entry has not turned the coverage ledger on.
     """
 
     closed: int = 0
@@ -130,6 +169,7 @@ class Settlement:
     recorded: int = 0
     deduped: tuple[str, ...] = ()
     reopened: tuple[str, ...] = ()
+    coverage: int = 0
 
 
 def _within_checkout(root: Path, rel: str) -> Path | None:
@@ -191,6 +231,25 @@ def _is_gone(root: Path, real_root: str, rel: str) -> bool:
     return False
 
 
+def _tree_root(checkout_root: str) -> tuple[Path, str] | None:
+    """The checkout root and its resolved form, or ``None`` when it cannot be judged.
+
+    Both ledgers ask the tree the same question -- is this path still there? --
+    and both must answer "keep it" when the tree itself is unusable: under a root
+    that does not exist every path is "missing", which would close the whole
+    findings ledger and expire the whole coverage ledger on one bad argument. The
+    resolution happens once, here, so every per-path containment check compares
+    like with like on a host whose temp or work dir is itself a link.
+    """
+    root = Path(checkout_root) if checkout_root else None
+    if root is None or not root.is_dir():
+        return None
+    try:
+        return root, os.path.realpath(root)
+    except (OSError, ValueError):
+        return None
+
+
 def _retire_missing(
     stored: Sequence[StoredFinding], checkout_root: str, head_sha: str
 ) -> list[StoredFinding]:
@@ -211,13 +270,10 @@ def _retire_missing(
     containment check compares like with like: on a host whose temp or work dir
     is itself a link, a real parent under a lexical root would never match.
     """
-    root = Path(checkout_root) if checkout_root else None
-    if root is None or not root.is_dir():
+    resolved = _tree_root(checkout_root)
+    if resolved is None:
         return list(stored)
-    try:
-        real_root = os.path.realpath(root)
-    except (OSError, ValueError):
-        return list(stored)
+    root, real_root = resolved
     live: list[StoredFinding] = []
     for row in stored:
         if _is_gone(root, real_root, row.prior.file):
@@ -225,6 +281,128 @@ def _retire_missing(
         else:
             live.append(row)
     return live
+
+
+def _expiry_targets(files: Sequence[str]) -> Sequence[str]:
+    """The file list to expire coverage for: de-duplicated and ordered.
+
+    Sorted so the store's parameter -- and therefore the query plan, the test and
+    any log of it -- is a function of the delta rather than of a set's iteration
+    order, and de-duplicated because the delta arrives as a set of paths and a
+    repeated path expires nothing twice.
+
+    A bare ``str`` is passed through UNTOUCHED rather than normalised, which is
+    the one case worth stating: ``sorted(set("src/app.py"))`` is a list of
+    CHARACTERS, so normalising here would defeat
+    :func:`sidecar.review_state._not_a_bare_string` -- the guard whose whole
+    purpose is that such a call must not quietly expire nothing while reporting
+    the same ``0`` as "there was no coverage for that file". Handing the string
+    on lets that guard fire, and :func:`sidecar.review_state._best_effort` turns
+    it into a stderr line rather than a failed review.
+    """
+    if isinstance(files, str):
+        return files
+    return sorted(set(files))
+
+
+def _keyed(examined: Sequence[ExaminedRegion]) -> Sequence[ExaminedRegion]:
+    """This round's examined regions with the one NON-free-text field normalised.
+
+    Every other field on an :class:`sidecar.reviewer.prompt.ExaminedRegion` is
+    read by a model and nothing else, so what a round wrote is what should be
+    stored. ``file`` is the exception and the docstring on
+    :func:`sidecar.review_state.expire_coverage` says why: it is a MATCHING KEY.
+    The delta arrives already stripped from the diff parser, the store's
+    ``_clip`` truncates and does not strip, and the comparison is exact -- so a
+    path the model padded with a space is recorded, rendered into later prompts,
+    and matched by no delta that ever touches that file again. That is the
+    stale-assurance direction this tier must not fail in, reached through the key
+    rather than through the documented revert gap (CodeRabbit and
+    ``qwen-anthropic/qwen3.8-max``, #157).
+
+    Stripping is the whole normalisation on purpose. It is the same treatment
+    :func:`_anchor` already gives the findings ledger's matching key, and it
+    cannot change which file an entry names. Anything richer -- resolving
+    ``./``, symlinks, case -- would be guessing at a path the round chose, and
+    guessing wrong would expire the coverage of a DIFFERENT file, which is the
+    one error direction stripping cannot produce.
+
+    A blank ``file`` is deliberately NOT dropped here: the table records what the
+    round said, and the judgement is applied on the way back out, where
+    :data:`sidecar.reviewer.prompt.EXAMINED_REQUIRED_FIELDS` now includes
+    ``file`` and :func:`_carried_coverage` drops and logs it.
+    """
+    return [
+        entry.model_copy(update={"file": entry.file.strip()})
+        if entry.file != entry.file.strip()
+        else entry
+        for entry in examined
+    ]
+
+
+def _carried_coverage(
+    repo: str, pr: int, seat: str, checkout_root: str = ""
+) -> tuple[list[PriorCoverage], int, int]:
+    """This seat's live coverage minus the entries too hollow to carry, and the count dropped.
+
+    The filter is the first of #157's four mitigations, and it is applied on the
+    way OUT of the store rather than on the way in: the table records what a
+    round actually said, and what must never reach a later prompt is a coverage
+    row that cannot be retraced. The schema alone cannot enforce this -- ``""``
+    satisfies a required ``str``, so an entry can pass
+    :class:`sidecar.reviewer.prompt.ExaminedRegion` while recording nothing --
+    and the difference matters most for exactly the shape the epic prohibits: an
+    entry with a conclusion, no ``checked`` and no ``evidence`` is a bare clean
+    bill of health, unfalsifiable and permanent, rendered as though a round had
+    established it.
+
+    Every one of :data:`sidecar.reviewer.prompt.EXAMINED_REQUIRED_FIELDS` is
+    required to be non-blank, the same set #166 fails a whole round for omitting.
+    ``file`` is in that set for a second reason on top of retraceability: it is
+    the key expiry matches the delta against, so an entry with a blank one is an
+    assurance no future change can ever retire. Dropping such an entry costs one
+    advisory line in one prompt;
+    carrying it spends budget on a claim no later round can check, which is the
+    one direction this tier must not fail in.
+
+    The tree answers the second question, and it is the one the DELTA cannot
+    (`qwen-anthropic/qwen3.8-max` and `openrouter/upstage/solar-pro4`, #157). A
+    deleted file emits ``+++ /dev/null`` and a renamed-away one emits nothing at
+    the old path, so neither reaches ``parse_diff``'s file set -- the two shapes
+    that differ MAXIMALLY from base are exactly the two the delta never names,
+    and their coverage would otherwise survive every round to retention. So the
+    entries are checked against the checkout with the same ``_is_gone`` the
+    findings ledger uses, and one whose file the head no longer carries is
+    expired in the store rather than merely skipped: the row is dead for every
+    future round too, and leaving it live would re-pay this check each time.
+
+    That pass is on the READ path, so unlike delta-expiry it does not run for a
+    seat with the ledger off. It does not need to: a flag-off seat carries
+    nothing, so the entry cannot reach a prompt while the flag is off, and the
+    first round with it back on retires the row before rendering anything. What
+    delta-expiry has to survive -- a toggle window in which entries silently
+    stop being invalidated -- has no equivalent here.
+    """
+    rows = review_state.live_coverage(repo, pr, seat)
+    kept = [
+        row
+        for row in rows
+        if all(str(getattr(row, name, "")).strip() for name in EXAMINED_REQUIRED_FIELDS)
+    ]
+    hollow = len(rows) - len(kept)
+    resolved = _tree_root(checkout_root)
+    if resolved is None:
+        return kept, hollow, 0
+    root, real_root = resolved
+    gone = sorted({row.file for row in kept if _is_gone(root, real_root, row.file)})
+    if not gone:
+        return kept, hollow, 0
+    retired = review_state.expire_coverage(repo, pr, seat, gone)
+    dead = set(gone)
+    # The rows leave this round's prompt whatever the store said: an entry about
+    # a file the head does not carry must not be rendered even if the write that
+    # was meant to retire it was the call that degraded.
+    return [row for row in kept if row.file not in dead], hollow, retired
 
 
 def _anchor(file: str, title: str) -> tuple[str, str]:
@@ -292,13 +470,63 @@ def _reopen_candidates(repo: str, pr: int, seat: str) -> dict[tuple[str, str], S
 
 
 def carry_in(
-    repo: str, pr: int, seat: str, checkout_root: str = "", head_sha: str = ""
+    repo: str,
+    pr: int,
+    seat: str,
+    checkout_root: str = "",
+    head_sha: str = "",
+    *,
+    touched_files: Sequence[str] = (),
+    coverage_ledger: bool = False,
 ) -> CarriedState:
-    """Load this seat's open findings and render the section the round carries.
+    """Load this seat's state and render the section the round carries.
 
     The read is per ``(repo, pr, seat)`` and never wider: a shared cross-seat
     ledger would raise fleet coverage at the cost of the independent
     second-opinion property that is the whole reason two seats exist (#160).
+
+    ``touched_files`` is this round's delta, and it is used for ONE thing --
+    expiring the coverage it invalidates. This is the single place in the epic
+    where the delta is consulted at all, and the direction is deliberate: it
+    INVALIDATES state, it never scopes the review. A round still reads the whole
+    change; what it stops being told is that somebody already looked at a file
+    the change has since moved under.
+
+    Expiry runs BEFORE the coverage read (an entry the delta killed must not be
+    rendered by the same call that killed it) and runs whether or not
+    ``coverage_ledger`` is on. Gating it would make a flag that only ever ADDS
+    behaviour able to preserve a stale assurance: a seat that ran the ledger,
+    was switched off for some rounds and was switched back on would carry
+    entries describing heads that no round in between had a chance to expire.
+    Expiry can only ever remove an assurance, so it is safe to run unconditionally
+    and unsafe to skip.
+
+    ``touched_files`` is the CURRENT diff (base -> head), not the delta since the
+    head each entry was recorded at, which over-expires and is the safe error:
+
+    * a file whose content differs from the base is in the diff every round, so
+      its coverage never survives one -- including on a re-round of the same head
+      that changed nothing. That costs re-examination of a file the round has to
+      read anyway, which is the cheapest thing the ledger can lose;
+    * what survives is coverage of files the head does NOT change -- the callers,
+      callees and invariants a round reads to VERIFY the diff. That is the
+      surface the epic measured being re-read (one 428KB file read 182 times
+      across 24 runs) and the surface this tier exists to spread across rounds.
+
+    The delta does not name every changed file, which is why it is not the only
+    invalidation: a DELETED file emits ``+++ /dev/null`` and a renamed-away one
+    emits nothing at its old path, so neither reaches ``parse_diff``'s file set
+    even though both differ maximally from base. Those are retired against the
+    checkout instead, in :func:`_carried_coverage`
+    (``qwen-anthropic/qwen3.8-max`` and ``openrouter/upstage/solar-pro4``).
+
+    The residual gap runs the other way and is bounded rather than closed: a file
+    modified, examined, then reverted to its base content leaves the diff and is
+    still present in the tree, so neither pass expires its entry even though the
+    head it described is gone. What keeps that survivable is the third mitigation
+    rather than this one -- the entry is rendered as advisory
+    (:data:`sidecar.reviewer.prompt.COVERAGE_ADVISORY`), so at worst it
+    deprioritises a region a round remains free to re-open.
 
     Returns an empty :class:`CarriedState` when there is nothing to carry -- and
     also when the store is unconfigured or unreachable, since every
@@ -330,9 +558,14 @@ def carry_in(
     checked against the checkout at all, so netting off only the retirements
     among the rows in hand would produce a number describing neither state.
     """
+    expired = review_state.expire_coverage(repo, pr, seat, _expiry_targets(touched_files))
     opened = review_state.open_findings(repo, pr, seat)
     live = _retire_missing(opened.rows, checkout_root, head_sha)
-    state = render_prior_state([row.prior for row in live])
+    coverage, hollow, retired = (
+        _carried_coverage(repo, pr, seat, checkout_root) if coverage_ledger else ([], 0, 0)
+    )
+    expired += retired
+    state = render_prior_state([row.prior for row in live], coverage)
     # zip over the renderer's OWN minted keys rather than re-deriving `p{n}`
     # here: the id scheme is the renderer's to choose, and pairing its output
     # with the list it was given cannot drift out of step with it the way a
@@ -348,7 +581,28 @@ def carry_in(
             "are not in this round's prompt and cannot be settled until earlier rows close",
             file=sys.stderr,
         )
-    return CarriedState(state=state, rows=rows, round=round_, truncated=opened.truncated)
+    if hollow:
+        # An exception report, not a per-round line: every entry here was written
+        # by this seat's own earlier round, so a seat that keeps producing them is
+        # spending budget recording coverage that can never be carried -- a
+        # failure that is otherwise perfectly silent, since the round it damages
+        # is a LATER one and the store looks healthy from either end.
+        print(
+            f"fuko: review-state seat {seat} round {round_}: dropped {hollow} coverage "
+            f"entr{'y' if hollow == 1 else 'ies'} with a blank "
+            f"{'/'.join(EXAMINED_REQUIRED_FIELDS)} -- an entry nothing can retrace "
+            "is the unfalsifiable record this ledger must not carry",
+            file=sys.stderr,
+        )
+    return CarriedState(
+        state=state,
+        rows=rows,
+        round=round_,
+        truncated=opened.truncated,
+        # The renderer's cap, not the read's: see `CarriedState.coverage`.
+        coverage=min(len(coverage), MAX_PRIOR_COVERAGE),
+        expired=expired,
+    )
 
 
 def settle(
@@ -360,6 +614,8 @@ def settle(
     head_sha: str,
     prior_status: Sequence[PriorFindingStatus] = (),
     findings: Sequence[AgenticFinding] = (),
+    examined: Sequence[ExaminedRegion] = (),
+    coverage_ledger: bool = False,
 ) -> Settlement:
     """Apply this round's verdicts on carried findings, then record its own.
 
@@ -448,6 +704,24 @@ def settle(
     recording at review time rather than post time is that a review whose post
     fails leaves rows behind -- they are re-offered next round, which is noise,
     and noise is the direction this module accepts.
+
+    ``examined`` is the other half, and it is treated in the opposite way to
+    ``findings`` on purpose. It is written UNFILTERED and unjudged: every entry
+    the round returned is recorded as this seat's coverage, because the table's
+    job is to record what a round actually said and re-deciding that here would
+    make the ledger disagree with the round it describes. Nothing about a
+    coverage row is published, so there is no valve to route around -- the
+    judgement that matters is applied where the damage would happen, on the way
+    back INTO a prompt (:func:`_carried_coverage`).
+
+    ``coverage_ledger`` gates the write as well as the read (#157's staged
+    rollout: default off, scored on receipts before it reaches a gating seat). It
+    gates the WRITE too, rather than recording quietly for a later flip, because
+    an entry written now can only be expired by a delta that touches its file
+    later; a seat that accumulated coverage while switched off would, on being
+    switched on, be handed entries about heads no round in between could expire.
+    A seat with the flag off therefore behaves exactly as it did before this
+    tier: no read, no write, byte-identical prompt.
     """
     touch: list[str] = []
     closed = 0
@@ -499,10 +773,16 @@ def settle(
         fresh.append(finding)
     review_state.touch_findings(touch)
     recorded = review_state.record_findings(repo, pr, seat, carried.round, head_sha, fresh)
+    coverage = (
+        review_state.record_coverage(repo, pr, seat, carried.round, head_sha, _keyed(examined))
+        if coverage_ledger
+        else 0
+    )
     return Settlement(
         closed=closed,
         reasserted=len(touch),
         recorded=recorded,
         deduped=tuple(deduped),
         reopened=tuple(reopened),
+        coverage=coverage,
     )

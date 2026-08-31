@@ -61,6 +61,21 @@ class ModelConfig(BaseModel):
             "applies its OWN instructions (if any), not the rescued branch's."
         ),
     )
+    coverage_ledger: bool = Field(
+        default=False,
+        description=(
+            "Carry this seat's own coverage ledger: record the regions each "
+            "round examined and show a later round what has already been "
+            "covered, so its budget goes to surface nobody has looked at "
+            "(#157). Read by the agentic backend only. Default OFF and staged "
+            "per entry on purpose -- coverage state changes WHAT the reviewer "
+            "looks at, so it is scored on a non-gating trial seat's receipts "
+            "before it reaches a gating one. Per-entry and never shared: two "
+            "seats on one PR keep disjoint ledgers, because merging them would "
+            "buy fleet coverage with the independent second opinion that is the "
+            "reason the second seat exists."
+        ),
+    )
     tool_timeout: int | None = Field(
         default=None,
         description=(

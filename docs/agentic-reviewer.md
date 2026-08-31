@@ -23,7 +23,7 @@ sidecar/reviewer/            the reviewer (harness-agnostic core)
   checkout.py                PR head checkout + API diff fetch
   prompt.py                  review strategy + JSON output contract   <- the value
   harness.py                 agent runtimes (headless Claude Code today)
-  ledger.py                  per-seat open-findings policy (carry in / settle)
+  ledger.py                  per-seat findings + coverage policy (carry in / settle)
 sidecar/backends/agentic.py  the fuko driver (ReviewBackend protocol)
 ```
 
@@ -136,8 +136,91 @@ it built before the ledger existed. Note that today this needs the store
 reachable **from the runner**, which the homelab deployment (runner → sidecar
 over `FUKO_URL`) does not yet provide.
 
-The coverage half of the ledger — recording what a round *examined* so the next
-one can aim at unexplored surface — is a separate tier and is not wired here.
+## Rounds aim: the coverage ledger
+
+Measured on mepro, the fleet behaves like a **sampler**, not a reviewer: two
+seats on the same head agree on 4.7% of findings, estimated pool coverage is
+**~26%**, 64% of all file-touches land on three paths, and one 428KB file was
+read **182 times** across 24 seat-runs. Every round re-reads the same few huge
+files and draws a different sample. The coverage ledger (#157) is the lever on
+that number: each round records the regions it examined, and a later round of the
+**same seat** is shown them so its budget goes to surface nobody has covered.
+
+It is off by default and enabled per entry:
+
+```toml
+[[review.models]]
+provider = "qwen-anthropic"
+name = "qwen3.8-max"
+backend = "agentic"
+coverage_ledger = true    # default false
+```
+
+Staged deliberately: coverage state changes *what the reviewer looks at*, so it
+is scored on a non-gating (`role = "trial"`) seat's receipts before it reaches a
+gating one. A seat with the flag off neither reads nor records coverage and
+builds exactly the prompt it built before. It does still *expire* coverage its
+delta invalidates — expiry is the one half that runs on every seat, for the
+reason given under "Coverage expires; findings survive" below — so a flag-off
+seat writes `review_coverage.expired_at` and nothing else.
+
+Coverage is the ledger with the real carry-forward hazard — a wrong recorded
+conclusion does not merely mislead the next round, it *suppresses the
+re-examination that would have corrected it* — so four rules are load-bearing
+rather than stylistic:
+
+- **What was looked at, never what was found to be fine.** A coverage entry
+  records the question a round asked of the code (`checked`) and what reading it
+  established (`conclusion`), and the strategy forbids a clean bill of health
+  outright. The schema can only require the *keys* — `""` satisfies a required
+  string — so an entry whose `file`, `checked`, `conclusion` or `evidence` is
+  blank is **dropped on the way back out** and logged, rather than rendered as
+  though a round had established it. `file` is in that set because it is the key
+  expiry matches on: an entry naming no file is one no delta can ever
+  invalidate. That shape (a conclusion, no question, no citation)
+  is precisely the unfalsifiable clean bill the epic prohibits.
+- **Coverage expires; findings survive.** A finding is a *claim* and stays open
+  until a round settles it with a reason. A coverage entry is an *assurance*: the
+  moment a round's delta touches its file, the tree it described is gone and the
+  entry is expired (`review_coverage.expired_at`) before it can reach another
+  prompt. This is the one place in the epic that consults the delta at all, and
+  it consults it to **invalidate**, never to scope — the round still reviews the
+  whole change.
+
+  The delta used is the current base→head diff, which over-expires and is the
+  safe error: coverage of a file that appears in that diff never survives a
+  round, so what carries is coverage of the *unchanged* surface a round reads to
+  verify the diff — the callers, callees and invariants that were being re-read
+  182 times. Expiry runs on every seat, flag or no flag, because it can only ever
+  remove a stale assurance and gating it would let a seat toggled off and back on
+  carry entries no round in between could expire.
+
+  A deleted or renamed-away file never reaches the *parsed file set* expiry
+  matches against — `parse_diff` collects a path only from a `+++ b/` header, and
+  a deletion emits `+++ /dev/null` while a rename leaves nothing at the old path
+  — even though both differ maximally from base. (The raw diff still describes
+  both; it is the set derived from it that does not.) So the read path retires
+  those against the checkout, the same way the findings ledger retires a finding
+  whose file is gone. The residual gap left is a file modified, examined, then reverted to its
+  base content: it leaves the diff and is still in the tree, so neither pass
+  expires its entry. What makes that survivable is the next rule.
+- **Advisory, never binding.** The block is introduced by fixed prose
+  (`COVERAGE_ADVISORY`) that says *deprioritise* and names three conditions for
+  going back to a region anyway — this round's changes touch it, it is on the
+  path of something being verified, or there is concrete reason to doubt what is
+  recorded — and states that a recorded conclusion is an earlier round's
+  inference, not established fact. There is deliberately no instruction to pass a
+  region over: an imperative to that effect is what would convert one round's
+  mistake into a permanent blind spot.
+- **Per seat, never shared.** Two seats on one PR keep disjoint coverage. Sharing
+  would raise fleet coverage — the seats overlap on 45 files — by manufacturing
+  exactly the correlation across *different* models that the second seat exists
+  to break.
+
+Evidence on a carried row is bounded per row (`MAX_PRIOR_EVIDENCE`) on both
+ledgers, and the coverage list is capped newest-round-first at
+`MAX_PRIOR_COVERAGE` with the cut stated in-band — including that absence from
+the list is not evidence a region is unexamined.
 
 ## Security model
 

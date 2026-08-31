@@ -307,6 +307,11 @@ _ENV_INSTRUCTIONS = "FUKO_AGENTIC_INSTRUCTIONS"
 # `sidecar.reviewer.prompt.build_prompt`).
 _ENV_KNOWLEDGE = "FUKO_AGENTIC_KNOWLEDGE"
 _ENV_AUTH = "FUKO_AGENTIC_AUTH"
+# Per-entry opt-in to the coverage ledger (#157). Present-and-"1" is the only
+# enabled form: an unset variable is the default-off seat, and every other value
+# reads as off rather than being guessed at, so a config typo cannot switch on a
+# feature that changes what the reviewer looks at.
+_ENV_COVERAGE_LEDGER = "FUKO_AGENTIC_COVERAGE_LEDGER"
 # Runner-merged GitHub credential names (PR-Agent dunder shape until #99 moves
 # them behind the driver contract); the process fallbacks keep laptop runs working.
 _ENV_GH_TOKEN = "GITHUB__USER_TOKEN"
@@ -469,6 +474,10 @@ class AgenticBackend:
         operator wrote the first, the reviewed repository produced the second.
         ``tools`` is accepted for protocol parity; anything besides ``review``
         is ignored (one tool here).
+
+        The entry's ``coverage_ledger`` opt-in travels the same way, in its own
+        variable: it is a per-seat rollout switch (#157), so it must not be
+        derivable from anything ambient.
         """
         if preset.litellm_prefix != "anthropic/":
             raise ValueError(
@@ -508,6 +517,13 @@ class AgenticBackend:
         # source of truth for both consumers.
         if model.max_context:
             env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(model.max_context)
+        # Entry-keyed like `extra_instructions`, and for the sharper version of
+        # the same reason: a promoted backup rescues a branch but is its own
+        # model, and whether a seat's coverage state is trustworthy is a claim
+        # about the model that produced it. Only entries that opt in emit the
+        # variable at all, so an unconfigured fleet's environment is unchanged.
+        if model.coverage_ledger:
+            env[_ENV_COVERAGE_LEDGER] = "1"
         if model.extra_instructions:
             env[_ENV_INSTRUCTIONS] = model.extra_instructions
         if knowledge:
@@ -589,9 +605,14 @@ class AgenticBackend:
         this seat's still-open findings from earlier rounds are rendered into the
         prompt behind their own fence, the verdicts the agent returns on them are
         applied, and this round's published findings become the next round's open
-        ledger. All of it is best-effort -- with no store, or an unreachable one,
-        every ledger call degrades to a no-op and the prompt is byte-for-byte the
-        one this backend built before the ledger existed.
+        ledger. An entry that opts into ``coverage_ledger`` additionally carries
+        the COVERAGE half (#157): the regions this seat's earlier rounds recorded
+        as examined are rendered as advisory context, the coverage this round's
+        delta invalidates is expired before that read, and what this round
+        examined is recorded for the next one. All of it is best-effort -- with
+        no store, or an unreachable one, every ledger call degrades to a no-op
+        and the prompt is byte-for-byte the one this backend built before the
+        ledger existed.
 
         Every path that reached the harness also carries what the run spent --
         tokens, dollars, turns (#152) -- lifted from the CLI's terminal event by
@@ -686,6 +707,7 @@ class AgenticBackend:
         # keyed by (#156). Absent for a solo config or a laptop run, which is one
         # seat rather than none -- see `DEFAULT_SEAT`.
         seat = env.get(ENV_SEAT, "").strip() or DEFAULT_SEAT
+        coverage_ledger = env.get(_ENV_COVERAGE_LEDGER, "") == "1"
         # Bound before the try so the settle pass below can read it on every path
         # that gets that far; an empty state is exactly what a first round (or an
         # unreachable ledger) carries.
@@ -754,7 +776,22 @@ class AgenticBackend:
             # Read the ledger with the checkout in hand: retiring a finding whose
             # file this head no longer carries needs the tree, and it is the one
             # closure fuko makes without the agent's verdict.
-            carried = carry_in(pr.repo, pr.number, seat, str(checkout), ctx.head_sha)
+            #
+            # `diff_files` is the round's delta, and `carry_in` uses it for
+            # exactly one thing: expiring the coverage it invalidates (#157).
+            # Sorted rather than passed as the frozenset it is, so the store sees
+            # a Sequence and the expiry is a deterministic function of the delta.
+            # It never scopes the review -- the prompt still carries the whole
+            # diff. Invalidation is the only use the epic makes of the delta.
+            carried = carry_in(
+                pr.repo,
+                pr.number,
+                seat,
+                str(checkout),
+                ctx.head_sha,
+                touched_files=sorted(ctx.diff_files),
+                coverage_ledger=coverage_ledger,
+            )
             prompt = build_prompt(
                 ctx,
                 env.get(_ENV_INSTRUCTIONS, ""),
@@ -886,14 +923,39 @@ class AgenticBackend:
             head_sha=ctx.head_sha,
             prior_status=review.prior_status,
             findings=kept,
+            examined=review.examined,
+            coverage_ledger=coverage_ledger,
         )
-        if carried.rows or settlement.recorded or settlement.reopened:
+        if (
+            carried.rows
+            or settlement.recorded
+            or settlement.reopened
+            or settlement.coverage
+            # Being SHOWN coverage is ledger activity too, and it is the number
+            # the rollout is scored on: a flag-on seat that carries K entries,
+            # publishes nothing and returns an empty `examined` (which the
+            # contract allows) would otherwise print no line at all, and
+            # `coverage carried` exists nowhere else
+            # (`qwen-anthropic/qwen3.8-max`, #157).
+            or carried.coverage
+            # `expired` earns its place in the gate rather than riding along:
+            # expiry runs on EVERY seat, flag or no flag, so a flag-off seat
+            # whose delta retired a flag-on seat's entries writes to the ledger
+            # and is otherwise silent on stderr -- a store write with no receipt
+            # at all (`qwen-anthropic/qwen3.8-max`, #157).
+            or carried.expired
+        ):
             print(
                 f"fuko: review-state seat {seat} round {carried.round}: carried "
                 f"{len(carried.rows)}, closed {settlement.closed}, re-asserted "
                 f"{settlement.reasserted}, recorded {settlement.recorded}, "
                 f"deduped {len(settlement.deduped)}, "
-                f"reopened {len(settlement.reopened)}",
+                f"reopened {len(settlement.reopened)}, "
+                # The coverage ledger's whole round on one line: what it showed
+                # this round, what the delta killed on the way in, and what this
+                # round added. All three are fuko's own integers.
+                f"coverage carried {carried.coverage}, expired {carried.expired}, "
+                f"recorded {settlement.coverage}",
                 file=sys.stderr,
             )
             # A re-raise is the one settle outcome that says a PREVIOUS round was

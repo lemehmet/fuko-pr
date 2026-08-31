@@ -55,7 +55,14 @@ and dropping one re-creates the 86% one-shot loss the ledger exists to fix.
 """
 
 MAX_PRIOR_EVIDENCE = 400
-"""How much of a carried finding's evidence one prompt row may spend, in characters.
+"""How much of a carried row's evidence one prompt row may spend, in characters.
+
+Applies to both ledgers. The number was chosen for findings (below); coverage
+inherits it rather than getting one of its own because the field is the same
+shape on both -- a list of paths and symbols -- and because coverage's own count
+cap (:data:`MAX_PRIOR_COVERAGE`) is far too loose to bound it: 40 rows at the
+store's 4000-character text cap is 160k characters of citation alone, in the
+section that exists to make a round CHEAPER to aim (#157).
 
 Evidence is the longest field carrying a finding forward ADDS to its row --
 stored bounded only by :data:`sidecar.review_state.MAX_TEXT` (4000) -- and open
@@ -81,6 +88,33 @@ round is most likely to REJECT, which is the one verdict that closes a
 predecessor's finding by assertion and therefore the one that most needs the
 predecessor's evidence in front of it. A truncated row keeps its first and most
 specific citations; a gated row keeps none.
+"""
+
+COVERAGE_ADVISORY = (
+    "Regions earlier rounds recorded as examined, newest round first. This list "
+    "is ADVISORY and describes what was LOOKED AT, never what was found to be "
+    "sound. Deprioritise these regions so this round's budget goes to surface "
+    "nobody has covered -- and go back to one whenever this round's changes "
+    "touch it, it lies on the path of something you are verifying, or you have "
+    "concrete reason to doubt what is recorded. A recorded conclusion is an "
+    "earlier round's inference, not established fact; overturning one with "
+    "evidence is a valuable result."
+)
+"""The advisory framing rendered above the carried coverage entries (#157).
+
+Load-bearing prose, not decoration, which is why it is a named constant with a
+test on it. The epic's stated hazard for this tier is that a wrong recorded
+conclusion does not merely mislead the next round -- it SUPPRESSES the
+re-examination that would have corrected it. What decides between those two
+outcomes is the single sentence that frames the list, so the framing travels
+INSIDE the rendered block rather than only in :data:`_STRATEGY`: the block is
+what a store hands a round, and a round whose strategy text ever drifts from its
+data must still read the data correctly.
+
+It says *deprioritise* and names three concrete re-entry conditions. It
+deliberately does not contain the instruction to pass a region over -- an
+imperative to that effect converts one round's mistake into a permanent blind
+spot, which is precisely what this tier must not buy with its coverage gain.
 """
 
 PRIOR_STATUS_VOCABULARY = frozenset({"fixed", "still_open", "rejected"})
@@ -153,7 +187,14 @@ class ExaminedRegion(BaseModel):
     and the fact that the fault is the reviewer's rather than the diff's (#166).
     """
 
-    file: str
+    file: str = Field(
+        description=(
+            "Repo-relative path, spelled exactly as the diff spells it. Unlike "
+            "the other fields this one is not free text: it is the key a later "
+            "round's delta is matched against to expire this entry, so a path "
+            "that does not match the diff's is an assurance nothing can retire."
+        ),
+    )
     region: str = Field(
         default="",
         description=(
@@ -374,7 +415,7 @@ _EVIDENCE_TRUNCATED = "(... evidence truncated to fit this round's budget)"
 
 
 def _bounded_evidence(text: str, budget: int) -> str:
-    """Clip one carried finding's evidence to ``budget``, announcing any cut.
+    """Clip one carried row's evidence to ``budget``, announcing any cut.
 
     Bounded at RENDER time rather than on the way into the store, for the same
     reason the row's shape is: the table records what a round actually said, and
@@ -431,16 +472,24 @@ def render_prior_state(
     * every open finding is rendered -- they are small, and dropping one is the
       one-shot finding loss this ledger exists to prevent;
     * coverage is capped at ``max_coverage``, newest round first, with the cut
-      stated in-band the way a truncated diff is;
-    * a finding's evidence is capped PER ROW at ``max_evidence``
-      (:data:`MAX_PRIOR_EVIDENCE`), because it is the longest field carrying a
-      finding forward adds to a row and the rows themselves are uncapped in
-      count. It bounds evidence's share only -- ``title`` and ``body`` carry the
-      same store-side cap and are still rendered whole (#187). Carrying evidence
-      at all is #174: the round that published a finding cited what it read, and the round
-      asked to re-verify that finding against a new head was being handed the
-      claim with that citation stripped -- which is precisely the work the
-      citation supports.
+      stated in-band the way a truncated diff is, and introduced by
+      :data:`COVERAGE_ADVISORY` -- the framing that makes the list a hint rather
+      than a fence (#157);
+    * evidence is capped PER ROW at ``max_evidence``
+      (:data:`MAX_PRIOR_EVIDENCE`) on BOTH ledgers, because it is the longest
+      field carrying a row forward adds and neither ledger's rows are bounded in
+      count by anything this cap would reach: findings are uncapped outright,
+      and coverage is capped at a count large enough that 40 unbounded citation
+      lists would dominate the section they were added to shrink. It bounds
+      evidence's share only -- ``title``, ``body``, ``checked`` and
+      ``conclusion`` carry the same store-side cap and are still rendered whole
+      (#187). Carrying a finding's evidence at all is #174: the round that
+      published a finding cited what it read, and the round asked to re-verify
+      that finding against a new head was being handed the claim with that
+      citation stripped -- which is precisely the work the citation supports. On
+      a coverage row the citation is what makes the entry retraceable at all,
+      which is why the contract requires it there and the carry path drops a row
+      that has none (:func:`sidecar.reviewer.ledger.carry_in`).
 
     Every row's structure is owned here, not trusted to the store that supplies
     the values: header lines go through :func:`_one_line` and free text through
@@ -479,14 +528,16 @@ def render_prior_state(
     if kept:
         if lines:
             lines.append("")
-        lines.append("Regions earlier rounds examined, newest round first:")
+        lines.append(COVERAGE_ADVISORY)
         for entry in kept:
             where = f"{entry.file} {entry.region}".strip()
             lines.append(_one_line(f"- {where} -- round {entry.round}"))
             lines.append(_indented(f"checked: {entry.checked}"))
             lines.append(_indented(f"established: {entry.conclusion}"))
             if entry.evidence:
-                lines.append(_indented(f"evidence: {entry.evidence}"))
+                bounded = _bounded_evidence(entry.evidence, max_evidence)
+                if bounded:
+                    lines.append(_indented(f"evidence: {bounded}"))
     dropped = len(ordered) - len(kept)
     if dropped:
         if lines:
@@ -745,7 +796,26 @@ def build_prompt(
     return "\n".join(parts)
 
 
-_EXAMINED_REQUIRED_FIELDS = ("checked", "conclusion", "evidence")
+EXAMINED_REQUIRED_FIELDS = ("file", "checked", "conclusion", "evidence")
+"""The fields that make a coverage entry retraceable and invalidatable, not a verdict.
+
+Public because the same set is load-bearing at two ends of the ledger and must
+not drift apart: :func:`_hollow_examined_runbook` fails a ROUND whose entry omits
+one (#166), and :func:`sidecar.reviewer.ledger.carry_in` drops an ENTRY whose
+stored value is blank before it can reach a later prompt (#157). The schema can
+only require the keys -- ``""`` satisfies a required ``str`` -- so the emptiness
+half of the same rule is enforced on the way out of the store.
+
+``file`` belongs here for a reason the other three do not share, and it is the
+one that makes a blank value dangerous rather than merely useless: it is the key
+:func:`sidecar.review_state.expire_coverage` MATCHES a round's delta against. An
+entry naming no file is not just unretraceable, it is an assurance no future
+delta can ever invalidate -- a permanent one, which is the single outcome this
+tier exists to prevent (CodeRabbit and ``qwen-anthropic/qwen3.8-max``, #157). The
+matching-key half of the same rule is enforced at record time, where
+:func:`sidecar.reviewer.ledger.settle` strips the path so a value the model
+padded still matches the diff's own spelling of it.
+"""
 
 # `_failure_result` caps a receipt detail at 460 characters and truncates from
 # the END, which would eat the "what to do next" clause -- the half the runbook
@@ -810,7 +880,7 @@ def _hollow_examined_runbook(exc: ValidationError, payload: object) -> str | Non
     for err in exc.errors():
         loc = err.get("loc", ())
         entry_loc = len(loc) >= 2 and loc[0] == "examined" and isinstance(loc[1], int)
-        if entry_loc and len(loc) >= 3 and loc[2] in _EXAMINED_REQUIRED_FIELDS:
+        if entry_loc and len(loc) >= 3 and loc[2] in EXAMINED_REQUIRED_FIELDS:
             hollow.setdefault(loc[1], {})[str(loc[2])] = err.get("type") == "missing"
         elif entry_loc and len(loc) == 2:
             # The entry is not an object at all (`"examined": [null]`), which
@@ -818,7 +888,7 @@ def _hollow_examined_runbook(exc: ValidationError, payload: object) -> str | Non
             # That is the most hollow shape there is -- it records nothing --
             # so it gets the runbook rather than the generic complaint the
             # short loc would otherwise drop it into (fuko-henry, #178).
-            hollow.setdefault(loc[1], {}).update(dict.fromkeys(_EXAMINED_REQUIRED_FIELDS, False))
+            hollow.setdefault(loc[1], {}).update(dict.fromkeys(EXAMINED_REQUIRED_FIELDS, False))
         else:
             others += 1
     if not hollow:
@@ -829,8 +899,8 @@ def _hollow_examined_runbook(exc: ValidationError, payload: object) -> str | Non
     faults = "; ".join(
         f"{verb} {', '.join(names)}"
         for verb, names in (
-            ("missing", [f for f in _EXAMINED_REQUIRED_FIELDS if fields.get(f)]),
-            ("invalid", [f for f in _EXAMINED_REQUIRED_FIELDS if f in fields and not fields[f]]),
+            ("missing", [f for f in EXAMINED_REQUIRED_FIELDS if fields.get(f)]),
+            ("invalid", [f for f in EXAMINED_REQUIRED_FIELDS if f in fields and not fields[f]]),
         )
         if names
     )
