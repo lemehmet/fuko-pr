@@ -15,7 +15,7 @@ from sidecar.backends import get_backend
 from sidecar.backends.agentic import AgenticBackend
 from sidecar.backends.base import PRRef
 from sidecar.fukoconfig import ModelConfig, ReviewConfig
-from sidecar.presets import get_preset
+from sidecar.presets import PRESETS, ProviderPreset, get_preset
 from sidecar.reviewer.checkout import PRContext
 from sidecar.reviewer.harness import HarnessResult
 from sidecar.signals import extract_markers
@@ -414,6 +414,64 @@ def test_invoke_strips_the_whole_fuko_namespace_from_the_harness_env(monkeypatch
 
     assert [k for k in captured["env"] if k.startswith("FUKO_")] == []
     assert not set(secrets) & set(captured["env"])
+
+
+def test_invoke_strips_every_provider_key_but_keeps_the_seats_own(monkeypatch):
+    """The five keys the review workflow exports are other seats' credentials here.
+
+    The parent step legitimately holds all of them -- it builds every seat's
+    environment -- but a seat running on the QwenCloud key has no use for z.ai's,
+    OpenRouter's, Ollama Cloud's or Anthropic's. What the harness needs arrives
+    deliberately as `ANTHROPIC_API_KEY`, from the entry's own config, which is
+    why the strip is inert: that re-injection is asserted here alongside the
+    absences, so a regression that broke the seat's own auth would fail loudly
+    rather than look like a tighter environment.
+    """
+    workflow_secrets = {
+        "ZAI_KEY": "zai-secret",
+        "OPENROUTER_KEY": "openrouter-secret",
+        "OLLAMA_API_KEY": "ollama-secret",
+        "ANTHROPIC_KEY": "anthropic-secret",
+        "QWEN_TOKEN_PLAN_KEY": "sk-sp-secret",
+    }
+    for k, v in workflow_secrets.items():
+        monkeypatch.setenv(k, v)
+    backend = AgenticBackend()
+    _, captured = _invoke(
+        monkeypatch,
+        backend,
+        HarnessResult(0, REVIEW_JSON),
+        env={
+            "FUKO_AGENTIC_MODEL": "qwen3.8-max",
+            "FUKO_AGENTIC_AUTH": "api-key",
+            "ANTHROPIC_API_KEY": "sk-sp-secret",
+        },
+    )
+    assert not set(workflow_secrets) & set(captured["env"])
+    # The seat's own key survives only under the name config injected it as; any
+    # other spelling carrying one of these values would be a missed original.
+    leaked = {k for k, v in captured["env"].items() if v in set(workflow_secrets.values())}
+    assert leaked == {"ANTHROPIC_API_KEY"}
+    assert captured["env"]["ANTHROPIC_API_KEY"] == "sk-sp-secret"
+
+
+def test_invoke_strips_a_newly_registered_presets_key(monkeypatch):
+    """Derivation, not a list: the next preset someone adds is covered on arrival.
+
+    A hardcoded tuple is how this reopens one variable at a time -- the same
+    failure mode that turned the `FUKO_` fix into a namespace. Registering a
+    preset is meant to be data rather than code, so a key env var that reaches
+    the table by any route must reach the strip too, without a second edit here.
+    """
+    monkeypatch.setitem(
+        PRESETS,
+        "future-provider",
+        ProviderPreset(litellm_prefix="openai/", key_env="FUTURE_PROVIDER_KEY"),
+    )
+    monkeypatch.setenv("FUTURE_PROVIDER_KEY", "future-secret")
+    backend = AgenticBackend()
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert "FUTURE_PROVIDER_KEY" not in captured["env"]
 
 
 def test_invoke_strips_gh_cli_credentials(monkeypatch):
