@@ -31,9 +31,9 @@ def observe(repo: str, reviewer: str, state: str, pr: int | None = None, detail:
     """
     if not _enabled():
         return
-    from .db import db
+    from .db import db_best_effort
 
-    with db() as conn:
+    with db_best_effort() as conn:
         conn.execute(
             "INSERT INTO reviewer_health (repo, reviewer, state, observed_at, pr, detail) "
             "VALUES (%s, %s, %s, now(), %s, %s) "
@@ -54,9 +54,9 @@ def all_states() -> list[dict]:
     """
     if not _enabled():
         return []
-    from .db import db
+    from .db import db_best_effort
 
-    with db() as conn:
+    with db_best_effort() as conn:
         rows = conn.execute(
             "SELECT repo, reviewer, state, observed_at, pr, detail "
             "FROM reviewer_health ORDER BY repo, reviewer LIMIT 500"
@@ -83,9 +83,9 @@ def states(repo: str) -> list[dict]:
     """
     if not _enabled():
         return []
-    from .db import db
+    from .db import db_best_effort
 
-    with db() as conn:
+    with db_best_effort() as conn:
         rows = conn.execute(
             "SELECT reviewer, state, observed_at, pr, detail FROM reviewer_health WHERE repo = %s",
             (repo,),

@@ -135,9 +135,9 @@ def record(
     """
     if not _enabled():
         return
-    from .db import db
+    from .db import db_best_effort
 
-    with db() as conn:
+    with db_best_effort() as conn:
         conn.execute(
             "INSERT INTO review_runs "
             "(repo, pr, provider, model, slot, duration_s, attempts, outcome, findings, "
@@ -178,7 +178,7 @@ def slot_summary(repo: str | None = None, days: int = 30) -> list[dict]:
     """
     if not _enabled():
         return []
-    from .db import db
+    from .db import db_best_effort
 
     where = "WHERE slot IS NOT NULL AND started_at > now() - make_interval(days => %s)"
     params: list = [min(max(1, days), 3650)]
@@ -186,7 +186,7 @@ def slot_summary(repo: str | None = None, days: int = 30) -> list[dict]:
         where += " AND repo = %s"
         params.append(repo)
 
-    with db() as conn:
+    with db_best_effort() as conn:
         rows = conn.execute(
             "SELECT slot, count(*), "
             "count(*) FILTER (WHERE outcome = 'ok'), "
@@ -219,7 +219,7 @@ def recent_runs(repo: str | None = None, limit: int = 50) -> list[dict]:
     """
     if not _enabled():
         return []
-    from .db import db
+    from .db import db_best_effort
 
     where = ""
     params: list = []
@@ -228,7 +228,7 @@ def recent_runs(repo: str | None = None, limit: int = 50) -> list[dict]:
         params.append(repo)
     params.append(min(max(1, limit), 200))
 
-    with db() as conn:
+    with db_best_effort() as conn:
         rows = conn.execute(
             "SELECT repo, pr, provider, model, slot, started_at, duration_s, "
             "attempts, outcome, findings, backend "
@@ -275,7 +275,7 @@ def summary(repo: str | None = None, days: int = 30) -> list[dict]:
     """
     if not _enabled():
         return []
-    from .db import db
+    from .db import db_best_effort
 
     where = "WHERE started_at > now() - make_interval(days => %s)"
     params: list = [min(max(1, days), 3650)]
@@ -283,7 +283,7 @@ def summary(repo: str | None = None, days: int = 30) -> list[dict]:
         where += " AND repo = %s"
         params.append(repo)
 
-    with db() as conn:
+    with db_best_effort() as conn:
         rows = conn.execute(
             "SELECT provider, model, count(*), "
             "count(*) FILTER (WHERE outcome = 'ok'), "
