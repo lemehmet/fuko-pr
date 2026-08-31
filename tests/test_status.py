@@ -380,6 +380,49 @@ def test_coderabbit_summary_quoting_notice_prose_is_not_a_notice():
     assert s["reviewed_head_with_content"] is True
 
 
+@pytest.mark.parametrize(
+    "phrase", ["Review limit reached", "Rate limit exceeded", "Reviews paused"]
+)
+@pytest.mark.parametrize("prose", ["- {p}", "* {p}", '> "{p}"', "1. {p}", "`{p}`"])
+def test_coderabbit_notice_wording_in_a_list_or_quote_is_not_a_notice(phrase, prose):
+    """Prose ABOUT the notice must not read as the notice (CodeRabbit, round 2).
+
+    The prefix accepted before the phrase is the decoration CR emits around it --
+    blockquote, heading, whitespace, a non-ASCII lead-in. Markdown list markers and
+    quote characters are not that, and a diff touching these patterns is exactly
+    where a walkthrough writes the wording as a bullet or a quotation. Admitting
+    those made `_cr_is_notice_body` strip a whole body from marker evidence and
+    demote a completed check-run to `rate_limited`/`paused`.
+    """
+    body = _walk(HEAD, posted=2)["body"] + "\n" + prose.format(p=phrase)
+    s = coderabbit_state(HEAD, [_cr(body)], [], [_check("completed", "success")])
+    assert s["state"] == "done"
+    assert s["reviewed_head_with_content"] is True
+
+
+@pytest.mark.parametrize(
+    "line,label",
+    [
+        ("> ## Review limit reached", "rate_limited"),
+        ("## Reviews paused", "paused"),
+        ("\u26a0\ufe0f Rate limit exceeded. Try again in 8 minutes.", "rate_limited"),
+        ("Reviews paused", "paused"),
+    ],
+)
+def test_coderabbit_emitted_notice_layouts_still_match(line, label):
+    """The layouts CR actually emits must keep matching after the prefix tightening."""
+    assert (
+        coderabbit_state(
+            HEAD,
+            [
+                _cr(_walk("0000aaa")["body"] + "\n" + line),
+            ],
+            [],
+        )["state"]
+        == label
+    )
+
+
 def test_coderabbit_pause_notice_demotes_to_paused_not_rate_limited():
     """The two notices need different recoveries, so they keep different states.
 

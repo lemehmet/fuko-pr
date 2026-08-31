@@ -79,20 +79,23 @@ _CR_IN_PROGRESS = re.compile(r"review in progress|Currently processing new chang
 # #137 makes them decisional over whole bodies -- stripping marker evidence and
 # demoting a completion -- so a body merely *quoting* the wording could withhold a
 # genuine review, and re-withhold it on every push while the quote persisted. The
-# prefix class is any run of non-letters rather than a fixed set, because CR
-# decorates the notice both as a blockquoted heading (`> ## Review limit reached`)
-# and with an emoji lead-in (`⚠️ Rate limit exceeded. Try again in 8 minutes`).
-# What it buys is that the phrase must be the FIRST alphabetic content on its
-# line, which a quotation mid-sentence never is. The machine marker stays
-# unanchored: CR emits it as a bare HTML comment, and it is not quotable prose.
+# accepted prefix is the set of decorations CR actually emits around the phrase --
+# blockquote and heading marks, whitespace, and a non-ASCII lead-in -- and nothing
+# else. The recorded layouts are `> ## Review limit reached`, `## Reviews paused`,
+# `⚠️ Rate limit exceeded. Try again in 8 minutes`, and the bare phrase. Markdown
+# LIST markers and quote characters are excluded on purpose, so a line of prose
+# *about* the notice (`- Reviews paused`, `> "Review limit reached"`) is not read
+# as one -- which a diff touching these very patterns invites. The machine marker
+# stays unanchored: CR emits it as a bare HTML comment, not as quotable prose.
 _CR_RATE_LIMIT = re.compile(
     r"auto-generated comment: rate limited by coderabbit\.ai"
-    r"|^[^A-Za-z\n]*Rate limit exceeded\b"
-    r"|^[^A-Za-z\n]*Review limit reached\b",
+    r"|^(?:[>#\s]|[^\x00-\x7f])*Rate limit exceeded\b"
+    r"|^(?:[>#\s]|[^\x00-\x7f])*Review limit reached\b",
     re.I | re.M,
 )
 _CR_PAUSED = re.compile(
-    r"review paused by coderabbit\.ai|^[^A-Za-z\n]*Reviews paused\b",
+    r"review paused by coderabbit\.ai"
+    r"|^(?:[>#\s]|[^\x00-\x7f])*Reviews paused\b",
     re.I | re.M,
 )
 _CR_DONE_ZERO = re.compile(r"(?im)^[>\s*_]*No actionable comments(?: were generated)?\b")
