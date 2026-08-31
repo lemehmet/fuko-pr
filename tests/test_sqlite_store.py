@@ -596,3 +596,28 @@ def test_digest_survives_a_source_round_trip(store):
     )
     rows, total = store.list_learnings(repo="o/r", source="digest")
     assert total == 1 and rows[0]["source"] == "digest"
+
+
+def test_query_batches_its_row_fetch_over_the_sqlite_var_limit(store, monkeypatch):
+    """The KNN window is no longer capped at candidate_k, so the IN list must batch.
+
+    Dark-mode widening adds the repo's whole digest backlog to `k`, and one
+    placeholder per returned row would eventually cross SQLite's host-parameter
+    limit — at which point every query for the repo raises and the runner
+    swallows it into empty knowledge, losing the ordinary learnings too.
+    """
+    monkeypatch.setattr(ss, "_VAR_BATCH", 3)
+    monkeypatch.setattr(ss.settings, "digest_retrieval", False)
+    monkeypatch.setattr(ss.settings, "top_k", 50)
+    store.ingest(
+        "o/r",
+        [IngestItem(text=f"auth learning {i}", source="remember") for i in range(10)]
+        + [
+            IngestItem(text=f"auth index {i}", source="digest", file_globs=["src/auth/a.rs"])
+            for i in range(10)
+        ],
+    )
+
+    hits = store.query("o/r", ["src/auth/a.rs"], query_text="auth")
+    assert len(hits) == 10
+    assert {r["source"] for r in hits} == {"remember"}

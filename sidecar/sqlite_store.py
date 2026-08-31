@@ -338,12 +338,24 @@ class SqliteVecStore:
             dist = {lid: d for lid, d in knn}
             if not dist:
                 return []
-            marks = ",".join("?" * len(dist))
-            rows = conn.execute(
-                f"SELECT lid, text, source, source_url, file_globs, topic FROM learnings "
-                f"WHERE lid IN ({marks}) AND (expires_at IS NULL OR expires_at > ?)",
-                (*dist.keys(), now),
-            ).fetchall()
+            # Batched like `_existing_keys`, and for the same reason: the KNN
+            # window is no longer capped at `candidate_k` once the widening
+            # above adds the repo's digest backlog, and one placeholder per row
+            # would eventually cross SQLite's host-parameter limit -- past which
+            # every query for that repo raises, and `build_knowledge` swallows
+            # it into empty knowledge, losing the ordinary learnings too.
+            lids = list(dist)
+            rows: list[tuple] = []
+            for i in range(0, len(lids), _VAR_BATCH):
+                batch = lids[i : i + _VAR_BATCH]
+                marks = ",".join("?" * len(batch))
+                rows.extend(
+                    conn.execute(
+                        f"SELECT lid, text, source, source_url, file_globs, topic FROM learnings "
+                        f"WHERE lid IN ({marks}) AND (expires_at IS NULL OR expires_at > ?)",
+                        (*batch, now),
+                    ).fetchall()
+                )
             results: list[dict] = []
             for lid, text, source, source_url, file_globs, topic in rows:
                 if source == DIGEST_SOURCE and not digests:
