@@ -58,6 +58,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from . import review_state
+from .logfmt import flatten_for_log
 from .review_state import OpenLedger, SettledFinding, StoredFinding
 from .reviewer.prompt import AgenticFinding, ExaminedRegion, PriorCoverage
 
@@ -206,6 +207,18 @@ def _mark_down(url: str, exc: Exception) -> None:
     a 200, so latching on it would turn one broken handler into a lost ledger for
     every remaining call, and the latch exists to bound time, not errors.
 
+    Stated exactly, the bound is one timeout per concurrently-calling BRANCH, not
+    one per process: :data:`_transport_down` is read in :func:`_remote` without
+    the lock, so branches already in flight when the first one trips can each
+    spend a timeout of their own. That is deliberate rather than overlooked. The
+    branches are threads, so their timeouts overlap and the round's WALL CLOCK
+    cost is still the one timeout the latch promises; what the race can add is
+    concurrent requests, bounded by the number of A/B branches -- two, today --
+    where the thing being prevented is ten SERIAL timeouts per branch. Taking the
+    lock on every :func:`_remote` call would put contention on the hot path of
+    every ledger call, in every round, to save nothing measurable in the one
+    round where the sidecar is already dead.
+
     Process-wide and never reset, which is the right lifetime: a runner process
     is one review run, and an A/B run's branches are threads of it that share the
     one sidecar. The worst case is the degradation the epic already accepts --
@@ -239,6 +252,20 @@ def _guarded(default_factory):
     branch it happens to take, so a later transport (or a stubbed primitive)
     cannot reach a caller through an unguarded path. The line names the endpoint
     so the two branches stay distinguishable in a log.
+
+    The exception text is flattened before it is printed. On the remote reads a
+    body that fails ``model_validate`` raises a pydantic ``ValidationError``
+    whose message echoes part of the offending input -- i.e. stored finding and
+    coverage text, written by a model about a PR-author-controlled checkout, and
+    never stripped of newlines. Printed raw, that hands foreign text column 0 of
+    its own line on a stderr whose downstream gates are ``^``-anchored, which is
+    the forgery :func:`sidecar.logfmt.flatten_for_log` exists to close (#147) and
+    which every author-influenced line in the agentic backend already goes
+    through. It takes a broken, version-skewed or hostile sidecar to reach --
+    a healthy one answers with schema-valid bodies -- but this is the same
+    stderr the settle receipts are read from. ``_mark_down``'s sibling print
+    needs no flattening for the opposite reason: its text is httpx's own.
+    Raised by ``qwen-anthropic/qwen3.8-max`` on #171.
     """
 
     def _decorate(fn):
@@ -251,7 +278,10 @@ def _guarded(default_factory):
                 return default_factory()
             except Exception as e:
                 where = _endpoint()[0] or "local store"
-                print(f"fuko: review-state {fn.__name__} failed ({where}): {e}", file=sys.stderr)
+                print(
+                    f"fuko: review-state {fn.__name__} failed ({where}): {flatten_for_log(str(e))}",
+                    file=sys.stderr,
+                )
                 return default_factory()
 
         return _wrapped

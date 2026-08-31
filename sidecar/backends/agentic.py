@@ -44,6 +44,7 @@ from tempfile import mkdtemp
 import httpx
 
 from ..fukoconfig import ModelConfig, ReviewConfig
+from ..logfmt import flatten_for_log as _flatten_for_log
 from ..presets import ProviderPreset
 from ..reviewer.checkout import (
     CheckoutError,
@@ -156,20 +157,6 @@ def _failure_result(
         channels={_CHANNEL: verdict},
         **(costs or {}),
     )
-
-
-def _flatten_for_log(value: str) -> str:
-    r"""Collapse to ONE physical line: log gates downstream are ^-anchored.
-
-    Flattens using ``splitlines()`` -- the SAME rule the dump splits on -- rather
-    than replacing ``\r``/``\n``. Python breaks lines on eight more characters
-    than those two (``\x0b``, ``\x0c``, ``\x1c``-``\x1e``, ``\x85``,
-    ``\u2028``, ``\u2029``), so a hand-rolled replace leaves a crafted payload
-    looking flat here while still splitting downstream -- reopening the column-0
-    forgery this exists to close (fuko-henry, #147). Defining "one line" by the
-    splitter's own definition makes the two agree by construction.
-    """
-    return " ".join(value.strip().splitlines())
 
 
 def _dump_harness_output(model: str, label: str, stderr: str, text: str) -> None:

@@ -361,6 +361,32 @@ def test_an_unusable_sidecar_returns_the_same_neutral_value_the_store_would(
     capsys.readouterr()
 
 
+@pytest.mark.parametrize(
+    "brk",
+    ["\n", "\r", "\r\n", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"],
+)
+def test_the_degradation_line_cannot_be_split_by_what_it_reports(monkeypatch, brk, capsys):
+    """The exception text on the generic arm is foreign: a body that fails
+    ``model_validate`` echoes the offending input, which for the reads is stored
+    finding text a model wrote about a PR-author-controlled checkout. Raw, it
+    would take column 0 of its own line on a stderr whose gates are ``^``-anchored
+    (#147). Every character ``splitlines`` breaks on is exercised, because that
+    is the set a hand-rolled ``\\n`` replace would miss.
+    """
+    monkeypatch.setenv("FUKO_URL", _URL)
+
+    def _boom(*a, **k):
+        raise ValueError(f"head{brk}fuko: forged gate line")
+
+    monkeypatch.setattr(rsc.httpx, "get", _boom)
+
+    assert rsc.next_round(REPO, PR, SEAT) == 1
+    err = capsys.readouterr().err
+    assert err.splitlines() == [
+        f"fuko: review-state next_round failed ({_URL}): head fuko: forged gate line"
+    ]
+
+
 def test_an_erroring_endpoint_degrades_without_latching(monkeypatch, store, wire, capsys):
     """A 500 answers as fast as a 200, so latching on it would turn one broken
     handler into a lost ledger for every remaining call. The latch bounds TIME."""
