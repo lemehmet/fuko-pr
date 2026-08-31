@@ -73,7 +73,10 @@ class ModelConfig(BaseModel):
             "before it reaches a gating one. Per-entry and never shared: two "
             "seats on one PR keep disjoint ledgers, because merging them would "
             "buy fleet coverage with the independent second opinion that is the "
-            "reason the second seat exists."
+            "reason the second seat exists. A failover attempt inside a branch's "
+            "pool runs the BRANCH's value, not the backup's (#204) -- unlike "
+            "`extra_instructions`, this is state ownership, and a backup is not "
+            "a seat."
         ),
     )
     findings_ledger: bool = Field(
@@ -95,7 +98,9 @@ class ModelConfig(BaseModel):
             "unconditional and therefore identical in both arms. Turning it "
             "back on self-heals -- the next flag-on round "
             "retires rows whose files the head no longer carries against the "
-            "checkout it already has."
+            "checkout it already has. Like `coverage_ledger`, a failover attempt "
+            "inside a branch's pool runs the BRANCH's value, not the backup's "
+            "(#204)."
         ),
     )
     tool_timeout: int | None = Field(

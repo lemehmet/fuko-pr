@@ -815,6 +815,68 @@ def _finalize_branch_header(
         print(f"fuko: could not finalize A/B branch header for {label}: {e}", file=sys.stderr)
 
 
+_BRANCH_LEDGER_FIELDS = ("findings_ledger", "coverage_ledger")
+"""Per-entry flags a failover attempt inherits from the branch it rescues (#204)."""
+
+
+def _ledger_owner(pool: list[ModelConfig]) -> ModelConfig | None:
+    """The pool's branch entry -- the seat whose ledger configuration the pool runs.
+
+    ``pool[0]`` by contract: every ``_run_pool`` call site composes the pool as
+    ``[entry, *_compatible_backups(entry, ...)]``, and that same ``entry`` is
+    where the caller read ``slot``/``seat``/``role`` from.
+
+    ``None`` when the pool has no branch to own it -- an empty pool, or the
+    degenerate solo path where no reviewer is configured at all and the pool is
+    nothing but shared backups. Crowning backup #1 the flag owner for backups
+    2..n there would invent a lane that does not exist, so every entry keeps its
+    own flags instead.
+    """
+    if not pool:
+        return None
+    head = pool[0]
+    return None if getattr(head, "role", "active") == "backup" else head
+
+
+def _with_branch_ledger(entry: ModelConfig, branch: ModelConfig | None) -> ModelConfig:
+    """``entry`` running under ``branch``'s ledger flags, for a failover attempt.
+
+    The ledger is keyed per SEAT and a backup is not a seat: it carries no
+    ``token_env`` of its own, posts under the identity of the branch it rescued,
+    and is filtered to that branch's driver before it ever enters the pool (the
+    same argument :data:`sidecar.backends.base.ENV_SEAT` already makes for the
+    seat lane). Letting it additionally decide whether the round reads, verdicts
+    and writes Tier 1 / Tier 2 state would make one lane's ledger behaviour
+    depend on which entry happened to answer -- and would silently run a
+    stateless #159 arm as stateful whenever a default-flagged backup rescued it,
+    contaminating the metric the epic ships on (#204).
+
+    Scoped to failover WITHIN one branch's pool. An escalation promotion
+    (:func:`plan_escalation`) is the other case and deliberately keeps its own
+    flags: it copies the backup to ``role="active"`` and starts a branch of its
+    own, so it IS the seat and there is no rescued lane to inherit from.
+    ``extra_instructions`` stays entry-keyed in both cases -- documented on the
+    field, and steering is the answering model's business in a way that
+    ownership of another seat's persistent state is not.
+    """
+    if branch is None or entry is branch:
+        return entry
+    update = {
+        field: getattr(branch, field)
+        for field in _BRANCH_LEDGER_FIELDS
+        if getattr(entry, field) != getattr(branch, field)
+    }
+    if not update:
+        return entry
+    carried = ", ".join(f"{k}={v}" for k, v in sorted(update.items()))
+    print(
+        f"fuko: {entry.provider}/{entry.name}: carrying the rescued branch's ledger "
+        f"configuration ({carried}) instead of its own",
+        file=sys.stderr,
+    )
+    return entry.model_copy(update=update)
+
+
 def _run_pool(
     backend,
     pr: PRRef,
@@ -852,8 +914,16 @@ def _run_pool(
     (from the branch header post) — required for author-scoped marking under
     App installation tokens, whose ``GET /user`` probe 403s (#66). When unset
     normalization falls back to the process token.
+
+    ``pool[0]`` is the BRANCH entry by contract -- every call site composes the
+    pool as ``[entry, *_compatible_backups(entry, ...)]`` -- and it is the same
+    entry the caller derived ``slot``/``seat``/``role`` from. ``order_pool`` may
+    demote it behind a backup for context-fit or cooldown reasons, which changes
+    the trial ORDER, never which entry owns the branch. The ledger flags follow
+    that ownership: see :func:`_with_branch_ledger`.
     """
     tools = review.tools if tools is None else tools
+    branch = _ledger_owner(pool)
     ordered = order_pool(pool, cooled, required)
 
     result = InvokeResult(returncode=1, detail="no providers configured")
@@ -861,7 +931,7 @@ def _run_pool(
     for index, model in enumerate(ordered):
         attempt_started = time.monotonic()
         preset = get_preset(model.provider)
-        env = backend.build_env(preset, model, knowledge, tools)
+        env = backend.build_env(preset, _with_branch_ledger(model, branch), knowledge, tools)
         env.update(gh_env)
         # The BRANCH's seat, not the answering entry's: per-seat review state is
         # keyed by the lane, and a promoted backup rescues its branch rather than
