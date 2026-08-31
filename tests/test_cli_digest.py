@@ -1,7 +1,9 @@
 """Tests for the `fuko digest` command and its supersede-on-write step."""
 
 import fnmatch
+import hashlib
 from argparse import Namespace
+from pathlib import Path
 
 from sidecar import cli, digest
 from tests.fakes import FakeStore
@@ -66,7 +68,7 @@ def _use(monkeypatch, tmp_path, store=None):
 def test_candidates_skip_files_below_the_floor(tmp_path):
     _big(tmp_path, "big.rs")
     (tmp_path / "tiny.rs").write_text("fn a() {}\n")
-    found = cli._digest_candidates([str(tmp_path)], 100)
+    found = cli._digest_candidates([str(tmp_path)], 100, tmp_path.resolve())
     assert [p for p in found if p.endswith("big.rs")]
     assert not [p for p in found if p.endswith("tiny.rs")]
 
@@ -75,13 +77,13 @@ def test_candidates_skip_vendored_and_generated_trees(tmp_path):
     _big(tmp_path, "src/real.rs")
     _big(tmp_path, "node_modules/dep/index.js")
     _big(tmp_path, "target/debug/gen.rs")
-    found = cli._digest_candidates([str(tmp_path)], 100)
+    found = cli._digest_candidates([str(tmp_path)], 100, tmp_path.resolve())
     assert len(found) == 1 and found[0].endswith("real.rs")
 
 
 def test_candidates_survive_a_path_that_vanished_after_collection(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_collect_files", lambda _patterns: ["no/such/file.rs"])
-    assert cli._digest_candidates(["."], 100) == []
+    assert cli._digest_candidates(["."], 100, Path.cwd().resolve()) == []
     assert "could not stat" in capsys.readouterr().err
 
 
@@ -266,3 +268,35 @@ def test_a_cap_too_small_for_the_header_skips_the_file(tmp_path, monkeypatch, ca
     err = capsys.readouterr().err
     assert "cannot index big.rs" in err and "nothing to index" in err
     assert store.items == []
+
+
+def test_a_checkout_under_a_skip_named_directory_is_still_indexed(tmp_path, monkeypatch):
+    """The skip set names directories inside a repository, not above it.
+
+    A checkout at `/srv/build/myrepo` is plausible on a CI host, and matching the
+    skip set against a candidate's absolute ancestors dropped every file in it --
+    before the outside-checkout warning could say anything, so the command
+    reported "nothing to index", which was false and pointed at the wrong cause.
+    """
+    checkout = tmp_path / "build" / "myrepo"
+    _big(checkout, "src/big.rs")
+    _big(checkout, "node_modules/dep/index.js")
+    store = _use(monkeypatch, checkout)
+    cli._cmd_digest(_args(tmp_path, paths=[str(checkout)]))
+    assert [row["file_globs"] for row in store.items] == [["src/big.rs"]]
+
+
+def test_the_rendered_blob_hash_is_reproducible_from_the_file_on_disk(tmp_path, monkeypatch):
+    """The index invites the reader to check it, so `sha256sum` has to agree.
+
+    Reading in text mode normalised newlines, so a CRLF file's hash and size
+    described content that exists nowhere on disk.
+    """
+    path = tmp_path / "big.rs"
+    path.write_bytes(b"".join(b"pub fn f%d() { /* padding padding */ }\r\n" % i for i in range(60)))
+    store = _use(monkeypatch, tmp_path)
+    cli._cmd_digest(_args(tmp_path))
+    (row,) = store.items
+    on_disk = path.read_bytes()
+    assert f"blob sha256:{hashlib.sha256(on_disk).hexdigest()[:12]}" in row["text"]
+    assert f"{len(on_disk) / 1024:.1f} KB" in row["text"]

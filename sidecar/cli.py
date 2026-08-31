@@ -446,16 +446,22 @@ _DIGEST_SKIP_DIRS = frozenset(
 )
 
 
-def _digest_candidates(patterns: list[str], min_bytes: int) -> list[str]:
+def _digest_candidates(patterns: list[str], min_bytes: int, root: Path) -> list[str]:
     """Return the readable files under ``patterns`` that are at least ``min_bytes``.
 
     Generated and vendored trees are skipped: an index of a checked-in bundle
     would displace real knowledge from a review's ``top_k`` budget while
-    describing code nobody reviews.
+    describing code nobody reviews. The skip set names directories *inside* a
+    repository, so it is tested against the ``root``-relative path -- matching it
+    against a candidate's absolute ancestors would drop every file of a checkout
+    that merely happens to live under ``/srv/build``. A candidate outside
+    ``root`` is kept here so :func:`_cmd_digest` can report it as unreachable
+    rather than have it vanish at the wrong check.
     """
     out: list[str] = []
     for candidate in _collect_files(patterns):
-        parts = set(Path(candidate).parts)
+        rel = _index_path(candidate, root)
+        parts = set(Path(rel).parts) if rel is not None else set()
         if parts & _DIGEST_SKIP_DIRS:
             continue
         try:
@@ -519,7 +525,7 @@ def _cmd_digest(args) -> None:
     items = []
     paths: list[str] = []
     root = Path.cwd().resolve()
-    candidates = _digest_candidates(args.paths, args.min_bytes)
+    candidates = _digest_candidates(args.paths, args.min_bytes, root)
     outside = [p for p in candidates if _index_path(p, root) is None]
     if outside:
         print(
@@ -534,7 +540,11 @@ def _cmd_digest(args) -> None:
         if rel is None:
             continue
         try:
-            text = Path(fp).read_text(encoding="utf-8")
+            # Decoded from the raw bytes, not `read_text`: text mode normalises
+            # newlines, which would make the rendered blob hash and size describe
+            # something no `sha256sum` of the file on disk can reproduce -- and
+            # the index tells its reader to check exactly that.
+            text = Path(fp).read_bytes().decode("utf-8")
         except (OSError, UnicodeDecodeError) as e:
             print(f"warning: could not read {fp}: {e}; skipping", file=sys.stderr)
             continue

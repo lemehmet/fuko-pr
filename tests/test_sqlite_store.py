@@ -576,11 +576,12 @@ def test_a_dark_digest_does_not_displace_a_learning_from_the_candidate_window(st
     query returned nothing at all.
     """
     monkeypatch.setattr(ss.settings, "candidate_k", 1)
+    monkeypatch.setattr(ss.settings, "digest_retrieval", False)
     store.ingest(
         "o/r",
         [
             IngestItem(text="auth digest index", source="digest", file_globs=["src/auth/a.rs"]),
-            IngestItem(text="auth convention", source="remember", file_globs=["src/auth/a.rs"]),
+            IngestItem(text="db convention", source="remember", file_globs=["src/auth/a.rs"]),
         ],
     )
 

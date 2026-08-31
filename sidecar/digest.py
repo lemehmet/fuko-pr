@@ -144,7 +144,12 @@ def blob_hash(text: str) -> str:
     Digests are keyed on this: a file edit produces a different hash, which is
     what makes a stale digest detectable rather than silently wrong. It is
     rendered into the digest body too, so a reader can tell whether the index
-    matches the checkout in front of them.
+    matches the checkout in front of them -- and because that is an invitation
+    to go and check, the value has to be one a checkout holder can reproduce.
+    It is the first 12 hex characters of the SHA-256 of the file's exact bytes,
+    i.e. the head of ``sha256sum``, which is why the caller must hand this
+    function text decoded from those bytes rather than newline-normalised text.
+    The rendered header names the algorithm for the same reason.
     """
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:12]
 
@@ -242,7 +247,7 @@ def _header(path: str, text: str, scanner: str) -> list[str]:
     size = len(text.encode("utf-8", errors="replace"))
     return [
         f"Structural index of {path}",
-        f"blob {blob_hash(text)} | {size / 1024:.1f} KB | "
+        f"blob sha256:{blob_hash(text)} | {size / 1024:.1f} KB | "
         f"{len(text.splitlines())} lines | scanner: {scanner}",
         "This index lists only WHERE declarations are, so a targeted read can "
         "replace a whole-file read. It is not a review, states nothing about "
