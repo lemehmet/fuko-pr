@@ -574,11 +574,14 @@ class AgenticBackend:
         # source of truth for both consumers.
         if model.max_context:
             env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(model.max_context)
-        # Entry-keyed like `extra_instructions`, and for the sharper version of
-        # the same reason: a promoted backup rescues a branch but is its own
-        # model, and whether a seat's coverage state is trustworthy is a claim
-        # about the model that produced it. Only entries that opt in emit the
-        # variable at all, so an unconfigured fleet's environment is unchanged.
+        # Read off the entry the runner hands in, which on a FAILOVER attempt is
+        # the backup already carrying the rescued branch's ledger flags: the
+        # ledger is keyed per seat, a backup is not a seat, and the seat is the
+        # unit #159 scores (`runner._with_branch_ledger`, #204). An
+        # escalation-PROMOTED backup starts a branch of its own and so arrives
+        # here with its own flags -- the same rule read from the other side.
+        # Only entries that opt in emit the variable at all, so an unconfigured
+        # fleet's environment is unchanged.
         if model.coverage_ledger:
             env[_ENV_COVERAGE_LEDGER] = "1"
         # Emitted only to say NO. The default-on tier needs no variable to stay

@@ -10,9 +10,11 @@ from sidecar.abmetrics import (
     arm_metrics,
     chapman_pool_size,
     claim_title,
+    backup_served_rounds,
     collect_claims,
     pair_metrics,
 )
+from sidecar.signals import RunReceipt, with_run_receipt
 
 
 def _c(arm, round_key, file, title, scope=""):
@@ -291,3 +293,72 @@ def test_the_same_claim_in_two_rounds_of_one_pr_is_a_re_report():
     m = arm_metrics("a", claims)
 
     assert m.re_reported == 1 and m.distinct_claims == 1 and m.one_shot_rate == 0.0
+
+
+def _header(login, label, model, head="head1", state="done"):
+    """A branch-header issue comment carrying one finalized run receipt."""
+    receipt = RunReceipt(
+        label=label, model=model, head_sha=head, state=state, app=login, slot="dorian"
+    )
+    return {"user": {"login": login}, "body": with_run_receipt("\U0001f916 **fuko A/B**", receipt)}
+
+
+def test_a_round_the_primary_answered_is_not_backup_served():
+    """`label == model` is the clean case, and the common one."""
+    headers = [_header("fuko-dorian[bot]", "qwen/qwen3.8-max", "qwen/qwen3.8-max")]
+
+    assert backup_served_rounds(headers, ARMS, 7) == set()
+
+
+def test_a_rescued_round_is_named_under_the_arm_that_posted_it():
+    """The seat is the poster; the model that answered is the backup's (#204)."""
+    headers = [
+        _header("fuko-gray[bot]", "qwen/qwen3.8-max", "zai/glm-5.3", head="head2"),
+        _header("fuko-dorian[bot]", "qwen/qwen3.8-max", "qwen/qwen3.8-max"),
+    ]
+
+    assert backup_served_rounds(headers, ARMS, 7) == {("treatment", "7@head2")}
+
+
+def test_an_unfinished_receipt_claims_no_rescue_either_way():
+    """An in-progress receipt names no answering model; a dead branch is not evidence."""
+    headers = [_header("fuko-dorian[bot]", "qwen/qwen3.8-max", "", state="in_progress")]
+
+    assert backup_served_rounds(headers, ARMS, 7) == set()
+
+
+def test_a_header_from_outside_the_named_arms_is_skipped():
+    """Same rule the claim join follows: an unnamed author is not an arm."""
+    headers = [_header("fuko-henry[bot]", "qwen/qwen3.8-max", "zai/glm-5.3")]
+
+    assert backup_served_rounds(headers, ARMS, 7) == set()
+
+
+def test_an_exhausted_pool_is_not_a_rescue():
+    """`failed` means primary AND backups died: `model` is the last entry TRIED."""
+    headers = [_header("fuko-gray[bot]", "qwen/qwen3.8-max", "zai/glm-5.3", state="failed")]
+
+    assert backup_served_rounds(headers, ARMS, 7) == set()
+
+
+def test_an_unknown_author_cannot_mint_a_round_from_the_receipt_body():
+    """A quoted receipt is not a run: `app` stands in for a MISSING author, not a wrong one."""
+    quoted = _header("fuko-gray[bot]", "qwen/qwen3.8-max", "zai/glm-5.3", head="head2")
+    quoted["user"] = {"login": "lemehmet"}
+
+    assert backup_served_rounds([quoted], ARMS, 7) == set()
+
+
+def test_an_unanchored_receipt_names_no_round():
+    """`_head_for_receipts` degrades to "": an unknown commit joins to no round."""
+    headers = [_header("fuko-gray[bot]", "qwen/qwen3.8-max", "zai/glm-5.3", head="")]
+
+    assert backup_served_rounds(headers, ARMS, 7) == set()
+
+
+def test_a_receipt_read_without_its_envelope_still_names_its_arm():
+    """The `app` fallback the docstring promises: no author field at all."""
+    payload = _header("fuko-gray[bot]", "qwen/qwen3.8-max", "zai/glm-5.3", head="head2")
+    del payload["user"]
+
+    assert backup_served_rounds([payload], ARMS, 7) == {("treatment", "7@head2")}

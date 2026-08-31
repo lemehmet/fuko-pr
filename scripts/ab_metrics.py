@@ -1,11 +1,14 @@
 """Score the stateful-vs-stateless review A/B from PR receipts (#159, epic #160).
 
 Fetches each named PR's review receipts through BOTH channels the reviewers
-publish on -- inline comments, and the review bodies that carry unanchorable
-findings -- normalizes them with fuko's own recognizers, assigns each finding to
+publish FINDINGS on -- inline comments, and the review bodies that carry
+unanchorable ones -- normalizes them with fuko's own recognizers, assigns each to
 an ARM by its author login, and reports the metrics the epic is scored on:
 findings per arm, distinct paths, path concentration, one-shot rate, cross-arm
 agreement, and Chapman pool coverage.
+The branch headers are read as a third channel, for their ``fuko-run:v1``
+receipts alone: a round a failover backup answered is scored under the rescued
+arm and is named in the output as a model confound (#204).
 Token and cost per run come from ``review_runs`` (#152) and are printed only
 when a database is configured.
 
@@ -57,7 +60,14 @@ import subprocess
 import sys
 
 from sidecar import run_metrics, runner
-from sidecar.abmetrics import Claim, TOP_PATHS, arm_metrics, collect_claims, pair_metrics
+from sidecar.abmetrics import (
+    Claim,
+    TOP_PATHS,
+    arm_metrics,
+    backup_served_rounds,
+    collect_claims,
+    pair_metrics,
+)
 from sidecar.backends.base import PRRef
 
 BASELINES = {
@@ -129,6 +139,20 @@ def _claims(
     )
 
 
+def _backup_rounds(
+    repo: str, pr_num: int, token: str, arms: dict[str, str]
+) -> set[tuple[str, str]]:
+    """Fetch one PR's branch headers and reduce them to its backup-served rounds.
+
+    A third credentialed read beside the two in :func:`_claims`, on the third
+    channel a run publishes: the branch header issue comments that carry the
+    ``fuko-run:v1`` receipts. The reduction is
+    :func:`sidecar.abmetrics.backup_served_rounds`, which is pure and unit-tested.
+    """
+    pr = PRRef(repo=repo, number=pr_num, url=f"https://github.com/{repo}/pull/{pr_num}")
+    return backup_served_rounds(runner.fetch_issue_comments(pr, token, _API), arms, pr_num)
+
+
 def _pct(value: float | None) -> str:
     """Format a fraction as a percentage, or ``n/a`` when it is undefined."""
     return "n/a" if value is None else f"{value * 100:.1f}%"
@@ -186,6 +210,50 @@ def _report_pair(claims: list[Claim], arms: dict[str, str], receipts: set[tuple[
         )
 
 
+def _report_backup_rounds(rescued: set[tuple[str, str]], receipts: set[tuple[str, str]]) -> None:
+    """Name the rounds a failover backup answered, so the model confound is visible.
+
+    Printed rather than subtracted (#204): these rounds are attributed to the
+    right arm and run the right ledger configuration, but a different model
+    produced them, and a reader comparing two arms is entitled to know which
+    rounds are not a clean single-variable comparison.
+
+    Split against ``receipts`` -- the reviewed-round set every metric is built
+    from -- so a reader can tell a key that locates its round from one that does
+    not. Neither note asserts metric MEMBERSHIP, and that restraint is the point:
+    a round key is the head the run STARTED on, while a round is keyed by the
+    commit GitHub stamps at submission, so a push landing mid-run shifts the key
+    off its own round (#210). It can then miss every reviewed round while the
+    round itself is still scored under the submission-time head, or collide with
+    a neighbouring round that was never rescued at all. Saying "included" or "in
+    no metric" would be wrong in one of those cases whichever way it is phrased;
+    what is always true is that nothing here is subtracted from any metric.
+    """
+    named = rescued & receipts
+    unanchored = rescued - receipts
+    if named:
+        print(
+            f"\nnote: {len(named)} round(s) were answered by a FAILOVER backup, not the "
+            "arm's own model. The arm is the seat's, and so is the ledger configuration "
+            "for any round run on a runner carrying #204; the model is a confound:"
+        )
+        for arm, round_key in sorted(named):
+            print(f"    {arm}: {round_key}")
+    if unanchored:
+        print(
+            f"\nnote: {len(unanchored)} further backup-answered round(s) carry a key "
+            "matching no reviewed round here:"
+        )
+        for arm, round_key in sorted(unanchored):
+            print(f"    {arm}: {round_key}")
+    if rescued:
+        print(
+            "    (a key is the head its run STARTED on, not the one its review was "
+            "submitted against, so a mid-run push can shift a key off its own round --"
+            " #210. Rescued rounds are never subtracted from any metric.)"
+        )
+
+
 def _report_cost(repo: str, slots: dict[str, str], days: int) -> None:
     """Print per-arm token and cost totals from ``review_runs``, or why they are absent."""
     if not slots:
@@ -238,11 +306,13 @@ def main() -> None:
     token = _token()
     claims: list[Claim] = []
     receipts: set[tuple[str, str]] = set()
+    rescued: set[tuple[str, str]] = set()
     untitled = 0
     for pr_num in args.prs:
         got, seen, blank = _claims(args.repo, pr_num, token, arms)
         claims += got
         receipts |= seen
+        rescued |= _backup_rounds(args.repo, pr_num, token, arms)
         untitled += blank
         print(
             f"{args.repo}#{pr_num}: {len(got)} claim(s) over {len(seen)} reviewed round(s) "
@@ -258,6 +328,7 @@ def main() -> None:
             "rehydrates them"
         )
     _report_arms(claims, arms, receipts)
+    _report_backup_rounds(rescued, receipts)
     _report_pair(claims, arms, receipts)
     _report_cost(args.repo, _pairs(args.slot, "--slot"), args.days)
     print("\npublished baselines (different rule -- orientation only):")

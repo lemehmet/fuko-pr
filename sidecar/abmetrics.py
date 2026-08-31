@@ -40,6 +40,7 @@ from dataclasses import dataclass
 
 from .normalizers import collect_review_signals, collect_signals
 from .reviewer.ledger import claim_anchor
+from .signals import extract_run_receipts
 
 _LABEL_RE = re.compile(r"^\s*🤖\s*`[^`]*`\s*$")
 """The visible model label a comment carries in A/B mode. Decoration, not a title."""
@@ -231,6 +232,72 @@ def collect_claims(
         receipts.add((claim.arm, claim.round_key))
         claims.append(claim)
     return claims, receipts, untitled
+
+
+def backup_served_rounds(
+    issue_comments: Sequence[dict],
+    arms: Mapping[str, str],
+    pr_num: int,
+) -> set[tuple[str, str]]:
+    """The ``(arm, round_key)`` rounds a FAILOVER backup answered, not the seat's primary.
+
+    Every metric above assigns a round to an arm by who POSTED it, which is the
+    rescued seat's identity whether its own model answered or a shared backup
+    did. That is correct attribution and a silent confound at the same time: the
+    arms are meant to differ in one variable, and a rescued round differs in the
+    model too. The discriminator needs no new plumbing -- the branch header's
+    ``fuko-run:v1`` receipt already records ``label`` (the branch's configured
+    primary) beside ``model`` (the entry that actually answered), and they differ
+    when a backup answered under a different ``provider/name``. That is a
+    sufficient test, not a biconditional: two entries may legally share a
+    ``provider/name`` and differ only by ``token_env``/endpoint, and a rescue
+    between those is invisible here. The error direction is under-reporting a
+    confound, never inventing one.
+
+    Reported, never subtracted. Dropping such a round would change the
+    denominator of a metric whose charter is repeatability, and #204's runner fix
+    already removed the part that made a rescue *wrong* rather than merely
+    different: the ledger configuration a rescued round runs is the branch's, so
+    what is left is a model confound the reader should weigh, not a mislabelled
+    arm. A caller that wants them excluded can subtract this set itself.
+
+    Only a ``done`` receipt counts. ``in_progress`` names no answering model
+    yet, and ``failed`` means the branch's pool was EXHAUSTED -- primary and
+    backups alike -- so its ``model`` is whichever entry was tried LAST, not one
+    that answered. A round nobody answered produces no claims, so it is in no
+    metric above, and naming it in a report that says these rounds are
+    "INCLUDED in every metric" would be false. That is not hypothetical here:
+    an exhausted pool is the shape a dead backup key produces on every branch.
+
+    An empty ``head_sha`` is skipped for the same reason. It is a designed
+    degradation, not a bug -- :func:`sidecar.runner._head_for_receipts` returns
+    ``""`` when HEAD cannot be resolved, so the receipt still records that the
+    instance ran, on an unknown commit -- and its own contract is that "a
+    consumer treats an empty ``head_sha`` as not covering the current HEAD".
+    This is such a consumer. Keying one anyway yields ``<pr>@``, which joins to
+    no round: the claims and review receipts are keyed by the review's
+    ``commit_id``, so the round itself sits under ``<pr>@<sha>`` and a reader
+    subtracting the printed key would subtract nothing while being told the
+    round is included.
+
+    The arm comes from the comment's own author. The receipt's ``app`` is a
+    fallback only for a payload read WITHOUT its envelope -- no usable author
+    login. An author that is present and names no arm is skipped rather than
+    re-attributed from the body, so a receipt quoted or copied by a third party
+    cannot mint a round for the seat it happens to name.
+    """
+    login_to_arm = {login: arm for arm, login in arms.items()}
+    out: set[tuple[str, str]] = set()
+    for comment in issue_comments:
+        login = (comment.get("user") or {}).get("login") or ""
+        for receipt in extract_run_receipts(comment.get("body") or ""):
+            arm = login_to_arm.get(login) if login else login_to_arm.get(receipt.app)
+            if arm is None or receipt.state != "done" or not receipt.head_sha:
+                continue
+            if not receipt.model or receipt.model == receipt.label:
+                continue
+            out.add((arm, f"{pr_num}@{receipt.head_sha}"))
+    return out
 
 
 @dataclass(frozen=True)

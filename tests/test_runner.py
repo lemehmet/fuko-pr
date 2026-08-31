@@ -2211,6 +2211,163 @@ def test_run_pool_names_the_branchs_seat_in_the_backend_env(monkeypatch):
         assert seen[-1].get("FUKO_SEAT") == expected
 
 
+def _ledger_failover_backend(agentic, seen):
+    class FailoverBackend:
+        def build_env(self, preset, model, knowledge, tools):
+            return agentic.build_env(preset, model, knowledge, tools)
+
+        def invoke(self, pr, env, tools):
+            seen.append(dict(env))
+            if len(seen) == 1:
+                return InvokeResult(returncode=1, throttled=True, detail="429 quota", provider="p")
+            return InvokeResult(returncode=0)
+
+    return FailoverBackend()
+
+
+def test_run_pool_carries_the_branchs_ledger_flags_into_a_failover(monkeypatch):
+    """A rescued round runs the SEAT's ledger configuration, not the backup's (#204).
+
+    The shared backup declares neither flag, so on its own it parses as
+    ``findings_ledger=True`` / ``coverage_ledger=False`` -- the pair that
+    contaminates the two #159 arms in opposite directions the moment it answers.
+    Asserted through ``_run_pool`` because ``build_env`` alone cannot see a
+    rescue; the readback of these variables is covered by the ledger tests.
+    """
+    from sidecar.backends.agentic import AgenticBackend
+
+    monkeypatch.setenv("ANTHROPIC_KEY", "antkey")
+    monkeypatch.setattr(runner, "_normalize", lambda *a, **k: 0)
+    monkeypatch.setattr(runner, "_record_run", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_cb_trip", lambda *a, **k: None)
+    seen: list[dict] = []
+    backend = _ledger_failover_backend(AgenticBackend(_review_config_for_receipts()), seen)
+
+    backup = ReviewModel(
+        provider="anthropic", name="backup-model", key_env="ANTHROPIC_KEY", role="backup"
+    )
+    control = ReviewModel(
+        provider="anthropic",
+        name="control-model",
+        key_env="ANTHROPIC_KEY",
+        findings_ledger=False,
+        coverage_ledger=False,
+    )
+    treatment = control.model_copy(
+        update={"name": "treatment-model", "findings_ledger": True, "coverage_ledger": True}
+    )
+
+    for branch, findings, coverage in ((control, "0", None), (treatment, None, "1")):
+        seen.clear()
+        runner._run_pool(
+            backend,
+            PRRef("o/r", 8, "u"),
+            "",
+            {},
+            _review_config_for_receipts(),
+            [branch, backup],
+            set(),
+            None,
+            tools=["review"],
+            seat="dorian",
+        )
+        assert len(seen) == 2
+        rescued = seen[1]
+        assert rescued["FUKO_AGENTIC_MODEL"] == "backup-model"
+        assert rescued["FUKO_SEAT"] == "dorian"
+        assert rescued.get("FUKO_AGENTIC_FINDINGS_LEDGER") == findings
+        assert rescued.get("FUKO_AGENTIC_COVERAGE_LEDGER") == coverage
+
+
+def test_order_pool_demoting_the_branch_does_not_move_ledger_ownership(monkeypatch):
+    """Ownership is `pool[0]`, not `ordered[0]` -- reordering changes trial ORDER only.
+
+    The branch is ranked last here (its `max_context` cannot hold `required`), so
+    the BACKUP is tried first and the whole design rests on the owner having been
+    captured before `order_pool`. Deriving it from the ordered list instead --
+    the mistake `_run_pool`'s docstring warns against -- passes every other
+    ledger test in this file, because they all leave the pool in config order.
+    """
+    from sidecar.backends.agentic import AgenticBackend
+
+    monkeypatch.setenv("ANTHROPIC_KEY", "antkey")
+    monkeypatch.setattr(runner, "_normalize", lambda *a, **k: 0)
+    monkeypatch.setattr(runner, "_record_run", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_cb_trip", lambda *a, **k: None)
+    seen: list[dict] = []
+    backend = _ledger_failover_backend(AgenticBackend(_review_config_for_receipts()), seen)
+
+    backup = ReviewModel(
+        provider="anthropic", name="backup-model", key_env="ANTHROPIC_KEY", role="backup"
+    )
+    branch = ReviewModel(
+        provider="anthropic",
+        name="control-model",
+        key_env="ANTHROPIC_KEY",
+        findings_ledger=False,
+        coverage_ledger=False,
+        max_context=100,
+    )
+
+    runner._run_pool(
+        backend,
+        PRRef("o/r", 8, "u"),
+        "",
+        {},
+        _review_config_for_receipts(),
+        [branch, backup],
+        set(),
+        1000,
+        tools=["review"],
+        seat="dorian",
+    )
+
+    # The backup really was tried first -- otherwise this test proves nothing.
+    assert seen[0]["FUKO_AGENTIC_MODEL"] == "backup-model"
+    # ...and it still ran the demoted branch's flags, not its own defaults.
+    assert seen[0].get("FUKO_AGENTIC_FINDINGS_LEDGER") == "0"
+    assert seen[0].get("FUKO_AGENTIC_COVERAGE_LEDGER") is None
+    assert seen[0]["FUKO_SEAT"] == "dorian"
+
+
+def test_a_pool_of_bare_backups_keeps_every_entrys_own_ledger_flags(monkeypatch):
+    """No branch entry means no lane to inherit from, so nothing is overridden.
+
+    The solo path composes `[*reviewers, *backups]`; with no reviewer configured
+    the head is a backup, and treating it as the flag owner would invent a seat.
+    """
+    from sidecar.backends.agentic import AgenticBackend
+
+    monkeypatch.setenv("ANTHROPIC_KEY", "antkey")
+    monkeypatch.setattr(runner, "_normalize", lambda *a, **k: 0)
+    monkeypatch.setattr(runner, "_record_run", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_cb_trip", lambda *a, **k: None)
+    seen: list[dict] = []
+    backend = _ledger_failover_backend(AgenticBackend(_review_config_for_receipts()), seen)
+
+    first = ReviewModel(
+        provider="anthropic",
+        name="backup-one",
+        key_env="ANTHROPIC_KEY",
+        role="backup",
+        findings_ledger=False,
+    )
+    second = first.model_copy(update={"name": "backup-two", "findings_ledger": True})
+    runner._run_pool(
+        backend,
+        PRRef("o/r", 8, "u"),
+        "",
+        {},
+        _review_config_for_receipts(),
+        [first, second],
+        set(),
+        None,
+        tools=["review"],
+    )
+    assert seen[0].get("FUKO_AGENTIC_FINDINGS_LEDGER") == "0"
+    assert seen[1].get("FUKO_AGENTIC_FINDINGS_LEDGER") is None
+
+
 def test_declared_slots_are_the_lanes_when_they_are_the_branchs_own():
     """The normal fleet keeps its slots: model-agnostic, so failover cannot split them."""
     reviewers = [
