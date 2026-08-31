@@ -654,15 +654,30 @@ _EXAMINED_REQUIRED_FIELDS = ("checked", "conclusion", "evidence")
 # `_failure_result` caps a receipt detail at 460 characters and truncates from
 # the END, which would eat the "what to do next" clause -- the half the runbook
 # exists for. Every model-controlled span in the message is therefore clipped so
-# the total is bounded by construction rather than by hope; the ceiling is
-# pinned adversarially by `test_hollow_examined_runbook_survives_the_receipt`.
-# The arithmetic: 273 characters of fixed prose + 165 of locator + 12 of finding
-# count = 450 <= 460, whatever the model wrote, so the actionable clause is
-# never the part cut. The count is clipped for the same reason as the rest -- it
-# is `len(payload["findings"])`, which the model also chooses.
+# the total is bounded by construction rather than by hope.
+# The arithmetic is asserted rather than asserted-about: the fixed prose lives
+# in `_RUNBOOK` and the two model-controlled spans in the budgets below, so
+# `test_runbook_fits_the_receipt_cap_at_its_budget_ceiling` can add them up
+# against `DETAIL_CAP` itself and fail the moment either side moves. A payload
+# test cannot do that job -- the counts needed to saturate a budget are not
+# constructible -- which is why the ceiling is pinned on the constants and the
+# adversarial payload test pins the behaviour (fuko-henry, #178). The count is
+# clipped for the same reason as the rest: it is `len(payload["findings"])`,
+# which the model also chooses.
 _LOCATOR_BUDGET = 165
 _REGION_BUDGET = 60
 _COUNT_BUDGET = 12
+
+#: The runbook's fixed prose, with the two model-controlled spans as the only
+#: holes in it. Kept as one named template so its length is a value a test can
+#: measure rather than a number a comment has to keep true by hand.
+_RUNBOOK = (
+    "reviewer output rejected: {locator}; round discarded, {lost} finding(s) "
+    "in the rejected output; fault is the reviewer model's output, not the "
+    "PR diff; next: "
+    "re-run this seat; if the same model repeats it, swap the seat or "
+    "promote its backup; if urgent, merge without this seat's coverage."
+)
 
 
 def _clip(value: object, limit: int) -> str:
@@ -698,13 +713,16 @@ def _hollow_examined_runbook(exc: ValidationError, payload: object) -> str | Non
     others = 0
     for err in exc.errors():
         loc = err.get("loc", ())
-        if (
-            len(loc) >= 3
-            and loc[0] == "examined"
-            and isinstance(loc[1], int)
-            and loc[2] in _EXAMINED_REQUIRED_FIELDS
-        ):
+        entry_loc = len(loc) >= 2 and loc[0] == "examined" and isinstance(loc[1], int)
+        if entry_loc and len(loc) >= 3 and loc[2] in _EXAMINED_REQUIRED_FIELDS:
             hollow.setdefault(loc[1], {})[str(loc[2])] = err.get("type") == "missing"
+        elif entry_loc and len(loc) == 2:
+            # The entry is not an object at all (`"examined": [null]`), which
+            # pydantic rejects at the ENTRY's loc rather than at any field's.
+            # That is the most hollow shape there is -- it records nothing --
+            # so it gets the runbook rather than the generic complaint the
+            # short loc would otherwise drop it into (fuko-henry, #178).
+            hollow.setdefault(loc[1], {}).update(dict.fromkeys(_EXAMINED_REQUIRED_FIELDS, False))
         else:
             others += 1
     if not hollow:
@@ -726,6 +744,8 @@ def _hollow_examined_runbook(exc: ValidationError, payload: object) -> str | Non
     if isinstance(entry, Mapping):
         named = [str(entry.get(key, "")) for key in ("file", "region")]
         where = _clip(" ".join(part for part in named if part), _REGION_BUDGET)
+    elif isinstance(entries, list) and index < len(entries):
+        where = "entry is not an object"
     findings = payload.get("findings") if isinstance(payload, Mapping) else None
     lost = len(findings) if isinstance(findings, list) else 0
 
@@ -739,14 +759,7 @@ def _hollow_examined_runbook(exc: ValidationError, payload: object) -> str | Non
         f"examined[{index}] ({where or 'no file recorded'}) {faults}{extra}",
         _LOCATOR_BUDGET,
     )
-    return (
-        f"reviewer output rejected: {locator}; round discarded, "
-        f"{_clip(lost, _COUNT_BUDGET)} finding(s) "
-        "in the rejected output; fault is the reviewer model's output, not the "
-        "PR diff; next: "
-        "re-run this seat; if the same model repeats it, swap the seat or "
-        "promote its backup; if urgent, merge without this seat's coverage."
-    )
+    return _RUNBOOK.format(locator=locator, lost=_clip(lost, _COUNT_BUDGET))
 
 
 def parse_review(text: str) -> AgenticReview:
