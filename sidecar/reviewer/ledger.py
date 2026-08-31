@@ -257,6 +257,14 @@ def carry_in(
       nothing. Every value in the line is fuko's own (seat, repo, pr, integers) --
       no model text reaches it, so it needs none of the flattening the settle
       log applies to a claim's title.
+
+    That total is the size of the window the READ saw, and the line says so:
+    :func:`_retire_missing` runs between the read and the print, so on a head
+    that deleted files the table already holds fewer open rows by the time the
+    line appears. Reporting the read's window is the accurate choice rather than
+    the tidy one -- the cap acted on that window, and the rows it cut were never
+    checked against the checkout at all, so netting off only the retirements
+    among the rows in hand would produce a number describing neither state.
     """
     opened = review_state.open_findings(repo, pr, seat)
     live = _retire_missing(opened.rows, checkout_root, head_sha)
@@ -269,9 +277,10 @@ def carry_in(
     round_ = review_state.next_round(repo, pr, seat)
     if opened.truncated:
         print(
-            f"fuko: review-state seat {seat} round {round_}: {repo}#{pr} holds "
-            f"{len(opened.rows) + opened.truncated} open findings for this seat, over the "
-            f"{review_state.MAX_OPEN_FINDINGS}-row read cap -- the {opened.truncated} NEWEST "
+            f"fuko: review-state seat {seat} round {round_}: {repo}#{pr} held "
+            f"{len(opened.rows) + opened.truncated} open findings for this seat at read time, "
+            f"over the {review_state.MAX_OPEN_FINDINGS}-row read cap -- "
+            f"the {opened.truncated} NEWEST "
             "are not in this round's prompt and cannot be settled until earlier rows close",
             file=sys.stderr,
         )

@@ -277,6 +277,11 @@ def test_review_state_ledgers_roundtrip_on_a_live_server():
     cut = R.open_findings(TEST_REPO, 1, "henry", limit=1)
     assert len(cut.rows) == 1
     assert cut.truncated == 1
+    # WHICH row survives is the half the count cannot show. The cap has to keep
+    # the OLDEST, because that is what makes a row's minted ``pN`` id the same
+    # id next round; a newest-first or unordered LIMIT would satisfy both
+    # assertions above while permuting every id the prompt carries.
+    assert [s.id for s in cut.rows] == [s.id for s in stored[:1]]
     # Same-round rows share a transaction timestamp, so their relative order is
     # decided by the ``id`` tiebreaker: arbitrary, but the same on every read --
     # which is the stability the minted ``pN`` ids depend on.
