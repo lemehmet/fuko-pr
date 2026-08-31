@@ -332,3 +332,26 @@ def test_a_header_from_outside_the_named_arms_is_skipped():
     headers = [_header("fuko-henry[bot]", "qwen/qwen3.8-max", "zai/glm-5.3")]
 
     assert backup_served_rounds(headers, ARMS, 7) == set()
+
+
+def test_an_exhausted_pool_is_not_a_rescue():
+    """`failed` means primary AND backups died: `model` is the last entry TRIED."""
+    headers = [_header("fuko-gray[bot]", "qwen/qwen3.8-max", "zai/glm-5.3", state="failed")]
+
+    assert backup_served_rounds(headers, ARMS, 7) == set()
+
+
+def test_an_unknown_author_cannot_mint_a_round_from_the_receipt_body():
+    """A quoted receipt is not a run: `app` stands in for a MISSING author, not a wrong one."""
+    quoted = _header("fuko-gray[bot]", "qwen/qwen3.8-max", "zai/glm-5.3", head="head2")
+    quoted["user"] = {"login": "lemehmet"}
+
+    assert backup_served_rounds([quoted], ARMS, 7) == set()
+
+
+def test_a_receipt_read_without_its_envelope_still_names_its_arm():
+    """The `app` fallback the docstring promises: no author field at all."""
+    payload = _header("fuko-gray[bot]", "qwen/qwen3.8-max", "zai/glm-5.3", head="head2")
+    del payload["user"]
+
+    assert backup_served_rounds([payload], ARMS, 7) == {("treatment", "7@head2")}

@@ -257,18 +257,29 @@ def backup_served_rounds(
     what is left is a model confound the reader should weigh, not a mislabelled
     arm. A caller that wants them excluded can subtract this set itself.
 
-    An ``in_progress`` receipt names no answering model yet and is skipped: a
-    branch that died before finalizing is not evidence of a rescue either way.
-    The arm comes from the comment's own author, falling back to the receipt's
-    ``app`` for a payload read without its envelope.
+    Only a ``done`` receipt counts. ``in_progress`` names no answering model
+    yet, and ``failed`` means the branch's pool was EXHAUSTED -- primary and
+    backups alike -- so its ``model`` is whichever entry was tried LAST, not one
+    that answered. A round nobody answered produces no claims, so it is in no
+    metric above, and naming it in a report that says these rounds are
+    "INCLUDED in every metric" would be false. That is not hypothetical here:
+    an exhausted pool is the shape a dead backup key produces on every branch.
+
+    The arm comes from the comment's own author. The receipt's ``app`` is a
+    fallback only for a payload read WITHOUT its envelope -- no author field at
+    all. An author that is present but names no arm is skipped rather than
+    re-attributed from the body, so a receipt quoted or copied by a third party
+    cannot mint a round for the seat it happens to name.
     """
     login_to_arm = {login: arm for arm, login in arms.items()}
     out: set[tuple[str, str]] = set()
     for comment in issue_comments:
-        login = (comment.get("user") or {}).get("login", "")
+        login = (comment.get("user") or {}).get("login") or ""
         for receipt in extract_run_receipts(comment.get("body") or ""):
-            arm = login_to_arm.get(login) or login_to_arm.get(receipt.app)
-            if arm is None or not receipt.model or receipt.model == receipt.label:
+            arm = login_to_arm.get(login) if login else login_to_arm.get(receipt.app)
+            if arm is None or receipt.state != "done":
+                continue
+            if not receipt.model or receipt.model == receipt.label:
                 continue
             out.add((arm, f"{pr_num}@{receipt.head_sha}"))
     return out
