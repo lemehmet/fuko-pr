@@ -25,6 +25,7 @@ from sidecar.reviewer.harness import (
     run_review,
     usage_tokens,
 )
+from sidecar.backends.agentic import DETAIL_CAP
 from sidecar.reviewer.prompt import (
     MAX_FINDINGS,
     MAX_PRIOR_COVERAGE,
@@ -34,6 +35,9 @@ from sidecar.reviewer.prompt import (
     PriorFindingStatus,
     PriorState,
     ReviewParseError,
+    _COUNT_BUDGET,
+    _LOCATOR_BUDGET,
+    _RUNBOOK,
     build_prompt,
     parse_review,
     render_prior_state,
@@ -661,6 +665,103 @@ def test_parse_review_rejects_garbage_and_bad_schema():
     # covers models that skip the section, not ones that file a hollow entry.
     with pytest.raises(ReviewParseError):
         parse_review('{"examined": [{"file": "a.py", "checked": "c", "evidence": "e"}]}')
+
+
+def test_hollow_examined_entry_raises_a_runbook_not_a_schema_complaint():
+    """#166: the boundary stays strict, so the failure has to be worth reading.
+
+    Asserted on the message, not the exception type, because the reader is an
+    engineer mid-incident: which entry and which field, what it cost, that the
+    fault is the reviewer's output rather than their diff, and what to do next.
+    """
+    payload = {
+        "findings": [{"file": "a.py", "line": i, "title": f"t{i}", "body": "b"} for i in range(5)],
+        "examined": [
+            {"file": "ok.py", "checked": "c", "conclusion": "x", "evidence": "e"},
+            {"file": "sidecar/backends/agentic.py", "region": "L120-L240", "checked": "c"},
+        ],
+    }
+    with pytest.raises(ReviewParseError) as excinfo:
+        parse_review(json.dumps(payload))
+    message = str(excinfo.value)
+
+    assert "examined[1]" in message  # which entry, not "1 validation error"
+    assert "sidecar/backends/agentic.py" in message and "L120-L240" in message
+    assert "missing conclusion, evidence" in message  # and which fields
+    assert "5 finding(s) in the rejected output" in message  # what it cost, at scale
+    assert "not the PR diff" in message  # where the fault is NOT
+    assert "re-run this seat" in message and "promote its backup" in message
+    assert "merge without this seat's coverage" in message
+
+
+def test_hollow_examined_runbook_separates_absent_fields_from_unusable_ones():
+    """A present-but-null required field is hollow too, and must not read as absent.
+
+    pydantic reports both at the same ``loc``, so a loc-only classification
+    calls a key the payload plainly contains "missing" -- the exact confusion
+    the runbook exists to remove (CodeRabbit and `qwen-anthropic/qwen3.8-max`,
+    #178). The entry still fails the round either way: a coverage claim whose
+    conclusion is ``null`` records no conclusion.
+    """
+    payload = {
+        "examined": [{"file": "a.py", "conclusion": None, "evidence": "e"}],
+    }
+    with pytest.raises(ReviewParseError) as excinfo:
+        parse_review(json.dumps(payload))
+    message = str(excinfo.value)
+
+    assert "missing checked" in message  # the omitted key
+    assert "invalid conclusion" in message  # the null one, named apart
+    assert "missing checked, conclusion" not in message
+    assert "0 finding(s) in the rejected output" in message
+
+
+def test_hollow_examined_runbook_covers_an_entry_that_is_not_an_object():
+    """`"examined": [null]` records nothing, so it is the shape most owed a runbook.
+
+    pydantic rejects it at the ENTRY's loc -- two elements, no field name -- so
+    a field-shaped filter drops the most hollow payload there is into the
+    generic complaint this exists to replace (fuko-henry, #178).
+    """
+    payload = {
+        "findings": [{"file": "a.py", "line": 1, "title": "t", "body": "b"}],
+        "examined": [None],
+    }
+    with pytest.raises(ReviewParseError) as excinfo:
+        parse_review(json.dumps(payload))
+    message = str(excinfo.value)
+
+    assert "examined[0] (entry is not an object)" in message
+    assert "invalid checked, conclusion, evidence" in message
+    assert "1 finding(s) in the rejected output" in message
+    assert "merge without this seat's coverage" in message
+
+
+def test_runbook_fits_the_receipt_cap_at_its_budget_ceiling():
+    """The ceiling is pinned on the constants, because no payload can saturate it.
+
+    A worst case needs a locator at its clip and a twelve-digit finding count;
+    the second is not constructible, so an adversarial payload test can only
+    show the message is short TODAY -- it would keep passing while the prose
+    grew past the cap (fuko-henry, #178). Adding the fixed prose to both
+    model-controlled budgets and comparing against `_failure_result`'s own
+    constant is the assertion that actually holds the line.
+    """
+    fixed = len(_RUNBOOK.format(locator="", lost=""))
+
+    assert fixed + _LOCATOR_BUDGET + _COUNT_BUDGET <= DETAIL_CAP
+
+
+def test_other_structural_failures_keep_the_generic_parse_message():
+    """The runbook is for the hollow-coverage shape only; #166 changed nothing else."""
+    for text in (
+        "no json here",
+        "{not json at all,}",
+        '{"findings": [{"file": "a.py", "body": "no title"}]}',
+    ):
+        with pytest.raises(ReviewParseError) as excinfo:
+            parse_review(text)
+        assert "round discarded" not in str(excinfo.value)
 
 
 def test_parse_review_without_ledger_sections_reviews_exactly_as_before():

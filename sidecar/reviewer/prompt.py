@@ -118,7 +118,10 @@ class ExaminedRegion(BaseModel):
     Omitting a required field is a different thing and still fails the review
     loudly, exactly as a finding without a ``title`` does: the fail-open
     guarantee is for a model that leaves ``examined`` out altogether, not for
-    one that files an entry recording no conclusion.
+    one that files an entry recording no conclusion. Loudly, but not opaquely --
+    the price of that boundary is paid by whoever reads the failed round, so
+    :func:`_hollow_examined_runbook` makes the message name the entry, the cost,
+    and the fact that the fault is the reviewer's rather than the diff's (#166).
     """
 
     file: str
@@ -401,7 +404,15 @@ def render_prior_state(
 
 
 class ReviewParseError(ValueError):
-    """Raised when the agent's final output cannot be parsed as a review."""
+    """Raised when the agent's final output cannot be parsed as a review.
+
+    The message is the *whole* diagnostic: it is what
+    ``AgenticBackend.invoke`` hands to ``_failure_result``, so it reaches the
+    run receipt and the job log and nothing else about the failure does. For
+    the one shape a reader cannot diagnose from a schema complaint -- a hollow
+    ``examined`` entry, which costs a round's findings for a section that is
+    advisory -- it is a runbook rather than a stack of pydantic locs (#166).
+    """
 
 
 _CONTRACT = f"""\
@@ -638,6 +649,119 @@ def build_prompt(
     return "\n".join(parts)
 
 
+_EXAMINED_REQUIRED_FIELDS = ("checked", "conclusion", "evidence")
+
+# `_failure_result` caps a receipt detail at 460 characters and truncates from
+# the END, which would eat the "what to do next" clause -- the half the runbook
+# exists for. Every model-controlled span in the message is therefore clipped so
+# the total is bounded by construction rather than by hope.
+# The arithmetic is asserted rather than asserted-about: the fixed prose lives
+# in `_RUNBOOK` and the two model-controlled spans in the budgets below, so
+# `test_runbook_fits_the_receipt_cap_at_its_budget_ceiling` can add them up
+# against `DETAIL_CAP` itself and fail the moment either side moves. A payload
+# test cannot do that job -- the counts needed to saturate a budget are not
+# constructible -- which is why the ceiling is pinned on the constants and the
+# adversarial payload test pins the behaviour (fuko-henry, #178). The count is
+# clipped for the same reason as the rest: it is `len(payload["findings"])`,
+# which the model also chooses.
+_LOCATOR_BUDGET = 165
+_REGION_BUDGET = 60
+_COUNT_BUDGET = 12
+
+#: The runbook's fixed prose, with the two model-controlled spans as the only
+#: holes in it. Kept as one named template so its length is a value a test can
+#: measure rather than a number a comment has to keep true by hand.
+_RUNBOOK = (
+    "reviewer output rejected: {locator}; round discarded, {lost} finding(s) "
+    "in the rejected output; fault is the reviewer model's output, not the "
+    "PR diff; next: "
+    "re-run this seat; if the same model repeats it, swap the seat or "
+    "promote its backup; if urgent, merge without this seat's coverage."
+)
+
+
+def _clip(value: object, limit: int) -> str:
+    text = " ".join(str(value).split())
+    return text if len(text) <= limit else text[: max(limit - 3, 0)] + "..."
+
+
+def _hollow_examined_runbook(exc: ValidationError, payload: object) -> str | None:
+    """Turn a hollow-``examined`` rejection into something actionable, or return None.
+
+    The boundary this reports on is deliberate (#166): a coverage claim with no
+    conclusion and no evidence is the unfalsifiable record the ledger exists not
+    to carry, so it fails the whole round rather than being quietly dropped. But
+    the reader of that failure is an engineer mid-incident with no context on
+    fuko's internals, and `1 validation error for AgenticReview` tells them
+    nothing -- worst of all, it does not tell them the fault is in the
+    *reviewer's* output rather than in their own change, which is the difference
+    between merging and hunting a phantom bug.
+
+    A required field supplied as ``null`` (or as any other non-string) is the
+    same hollow coverage claim as an omitted one and routes here too, but
+    pydantic reports it at the identical ``loc`` with a different ``type``, so
+    the two are named apart -- ``missing`` for an absent key, ``invalid`` for a
+    present but unusable value. Calling a present key missing would send the
+    reader looking for something the dumped payload beside it plainly contains
+    (CodeRabbit and `qwen-anthropic/qwen3.8-max`, #178).
+
+    Returns ``None`` when no error names one of the three required
+    ``ExaminedRegion`` fields, so every other structural failure keeps the
+    generic message unchanged.
+    """
+    hollow: dict[int, dict[str, bool]] = {}
+    others = 0
+    for err in exc.errors():
+        loc = err.get("loc", ())
+        entry_loc = len(loc) >= 2 and loc[0] == "examined" and isinstance(loc[1], int)
+        if entry_loc and len(loc) >= 3 and loc[2] in _EXAMINED_REQUIRED_FIELDS:
+            hollow.setdefault(loc[1], {})[str(loc[2])] = err.get("type") == "missing"
+        elif entry_loc and len(loc) == 2:
+            # The entry is not an object at all (`"examined": [null]`), which
+            # pydantic rejects at the ENTRY's loc rather than at any field's.
+            # That is the most hollow shape there is -- it records nothing --
+            # so it gets the runbook rather than the generic complaint the
+            # short loc would otherwise drop it into (fuko-henry, #178).
+            hollow.setdefault(loc[1], {}).update(dict.fromkeys(_EXAMINED_REQUIRED_FIELDS, False))
+        else:
+            others += 1
+    if not hollow:
+        return None
+
+    index = min(hollow)
+    fields = hollow[index]
+    faults = "; ".join(
+        f"{verb} {', '.join(names)}"
+        for verb, names in (
+            ("missing", [f for f in _EXAMINED_REQUIRED_FIELDS if fields.get(f)]),
+            ("invalid", [f for f in _EXAMINED_REQUIRED_FIELDS if f in fields and not fields[f]]),
+        )
+        if names
+    )
+    entries = payload.get("examined") if isinstance(payload, Mapping) else None
+    entry = entries[index] if isinstance(entries, list) and index < len(entries) else None
+    where = ""
+    if isinstance(entry, Mapping):
+        named = [str(entry.get(key, "")) for key in ("file", "region")]
+        where = _clip(" ".join(part for part in named if part), _REGION_BUDGET)
+    elif isinstance(entries, list) and index < len(entries):
+        where = "entry is not an object"
+    findings = payload.get("findings") if isinstance(payload, Mapping) else None
+    lost = len(findings) if isinstance(findings, list) else 0
+
+    tails = []
+    if len(hollow) > 1:
+        tails.append(f"+{len(hollow) - 1} more hollow")
+    if others:
+        tails.append(f"+{others} other")
+    extra = f" ({', '.join(tails)})" if tails else ""
+    locator = _clip(
+        f"examined[{index}] ({where or 'no file recorded'}) {faults}{extra}",
+        _LOCATOR_BUDGET,
+    )
+    return _RUNBOOK.format(locator=locator, lost=_clip(lost, _COUNT_BUDGET))
+
+
 def parse_review(text: str) -> AgenticReview:
     """Parse the agent's final text into an :class:`AgenticReview`.
 
@@ -653,11 +777,22 @@ def parse_review(text: str) -> AgenticReview:
     rather than a false clean pass, but a silent one either way. Hence the
     slicing stays whole-object: the ledger travels or fails with the review it
     was produced by, never half-parsed out of it.
+
+    The one failure that gets more than a schema complaint is a hollow
+    ``examined`` entry: it is the shape whose cost (a whole round of findings)
+    is most out of proportion to its cause, so it raises the runbook
+    :func:`_hollow_examined_runbook` builds instead (#166).
     """
     start, end = text.find("{"), text.rfind("}")
     if start == -1 or end <= start:
         raise ReviewParseError(f"no JSON object in reviewer output: {text[:200]!r}")
     try:
-        return AgenticReview.model_validate(json.loads(text[start : end + 1]))
-    except (json.JSONDecodeError, ValidationError) as e:
+        payload = json.loads(text[start : end + 1])
+    except json.JSONDecodeError as e:
         raise ReviewParseError(f"malformed reviewer output: {e}") from e
+    try:
+        return AgenticReview.model_validate(payload)
+    except ValidationError as e:
+        raise ReviewParseError(
+            _hollow_examined_runbook(e, payload) or f"malformed reviewer output: {e}"
+        ) from e

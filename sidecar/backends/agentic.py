@@ -90,6 +90,13 @@ _CHANNEL = "agentic-review"
 #: sibling's and splice a line (fuko-henry, #147).
 _DUMP_LOCK = threading.Lock()
 
+#: How much of a failure message reaches ``InvokeResult.detail``. Truncation is
+#: from the END, so anything a message needs the reader to see has to fit --
+#: named rather than inlined so the reviewer-side budgets that size themselves
+#: against it (``sidecar.reviewer.prompt``'s runbook) can be pinned to the same
+#: number instead of a copy of it (fuko-henry, #178).
+DETAIL_CAP = 460
+
 
 def _run_costs(result: HarnessResult | None) -> dict:
     """The token/cost fields one harness run contributes to its result (#152).
@@ -141,7 +148,7 @@ def _failure_result(
     expensive shapes this fleet produces -- so the accounting rides the failure
     returns too, whenever the harness got far enough to report it.
     """
-    body = _flatten_for_log(message)[:460]
+    body = _flatten_for_log(message)[:DETAIL_CAP]
     return InvokeResult(
         returncode=TIMEOUT_RETURNCODE if verdict == "killed:timeout" else 1,
         detail=f"{verdict}: {body}" if body else verdict,
@@ -806,7 +813,7 @@ class AgenticBackend:
             # is PR-author-influenced and `detail` is printed into a log whose
             # gates are ^-anchored, so an embedded newline would hand chosen
             # text column 0 of its own line (fuko-henry, #147).
-            stderr_tail = _flatten_for_log(result.stderr)[:460]
+            stderr_tail = _flatten_for_log(result.stderr)[:DETAIL_CAP]
             throttled = is_throttle(result.returncode, output)
             # Same vocabulary the pr-agent driver records per tool, so a consumer
             # reads one channel map regardless of backend: a hung run is
@@ -831,6 +838,25 @@ class AgenticBackend:
             _dump_harness_output(
                 model_name, "parse-failure (harness exit 0)", result.stderr, result.text
             )
+            # The dump above is the evidence; THIS is the diagnosis, and it has
+            # to reach the job log on its own rather than only via `detail` —
+            # the caller that prints `detail` is several frames away and an A/B
+            # run joins eight of them into one string (#166). Prefixed and
+            # flattened like every other author-influenced line here: the
+            # message quotes model-written paths and the gates are ^-anchored.
+            # Carries the MODEL for the same reason `_dump_harness_output` puts
+            # it on every line: seats are threads on one stderr, so two branches
+            # failing in the same round -- a correlated bad payload, exactly the
+            # incident this runbook is written for -- would otherwise emit two
+            # indistinguishable lines and leave "re-run this seat" pointing at
+            # no seat (fuko-henry, #178). Written under `_DUMP_LOCK` for the
+            # other half of that hazard, which `_dump_harness_output` documents:
+            # a bare `print` from one branch can be spliced into another's dump
+            # mid-line, which both scrambles the attribution and hands harness
+            # content column 0 of the spliced line.
+            with _DUMP_LOCK:
+                sys.stderr.write(f"fuko: {model_name} {_flatten_for_log(str(e))}\n")
+                sys.stderr.flush()
             # Lead with the verdict here too. This path returns
             # `failed:exit 1` on the channel, so a detail opening with parser
             # prose would break the contract the other failure paths keep
