@@ -492,14 +492,24 @@ def _index_path(candidate: str, root: Path) -> str | None:
 
 
 def _forget_superseded(store, repo: str, current: dict[str, str]) -> int:
-    """Delete digests of ``current``'s paths that describe some older blob.
+    """Delete every stored index of ``current``'s paths that is not the current one.
 
-    Called *after* the new digests are inserted, not before: the current topic
-    is then already stored, so the predicate below cannot delete it, and there
-    is never a moment when an indexed file has no index at all. The cost of the
-    other order -- a failed insert leaving the file unindexed -- is worse than
-    this order's cost, which is a few seconds with two indexes of one file in a
-    store nothing reads mid-command.
+    ``current`` maps an indexed path to the exact text just stored for it, and
+    the predicate is inequality against that text -- not against the topic. The
+    topic carries only ``<path>@<blob hash>``, so two renderings of the *same*
+    blob (a different ``--max-chars``, or any later change to what ``render``
+    emits) share a topic while ingest, which dedups on text, inserts the second
+    one beside the first. Keying supersession on the topic left both rows in
+    place, reported ``0 superseded``, and no later run could ever collapse them.
+    Comparing text makes the invariant the one that was always intended: one
+    index row per indexed path.
+
+    Called *after* the new digests are inserted, not before: the current text is
+    then already stored, so the predicate cannot delete it, and there is never a
+    moment when an indexed file has no index at all. The cost of the other order
+    -- a failed insert leaving the file unindexed -- is worse than this order's
+    cost, which is a few seconds with two indexes of one file in a store nothing
+    reads mid-command.
     """
     stale: list[str] = []
     offset = 0
@@ -511,7 +521,7 @@ def _forget_superseded(store, repo: str, current: dict[str, str]) -> int:
             break
         for row in rows:
             path = digest.topic_path(row.get("topic"))
-            if path in current and row.get("topic") != current[path]:
+            if path in current and row.get("text") != current[path]:
                 stale.append(row["id"])
         offset += len(rows)
         if offset >= total:
@@ -525,6 +535,18 @@ def _cmd_digest(args) -> None:
     items = []
     paths: list[str] = []
     root = Path.cwd().resolve()
+    if not (root / ".git").exists():
+        # The complementary direction of the outside-the-checkout warning below,
+        # and the silent one: a file *under* a subdirectory is happily keyed
+        # relative to that subdirectory, so it stores a path GitHub never reports
+        # for a pull request and is just as unreachable -- with nothing to see.
+        print(
+            f"fuko: warning: no .git in {root}, which may not be the checkout root. "
+            "Indexes are keyed relative to the working directory and matched against "
+            "the repository-relative paths a pull request reports, so one collected "
+            "from a subdirectory can never be retrieved.",
+            file=sys.stderr,
+        )
     candidates = _digest_candidates(args.paths, args.min_bytes, root)
     outside = [p for p in candidates if _index_path(p, root) is None]
     if outside:
@@ -574,7 +596,7 @@ def _cmd_digest(args) -> None:
     # Keyed on the literal path, not on ``file_globs`` -- the stored glob is
     # escaped for fnmatch, while ``topic_path`` returns the path verbatim.
     superseded = _forget_superseded(
-        store, args.repo, {path: item.topic for path, item in zip(paths, items, strict=True)}
+        store, args.repo, {path: item.text for path, item in zip(paths, items, strict=True)}
     )
     print(
         f"indexed {len(items)} file(s): {inserted} new, {skipped} unchanged, "

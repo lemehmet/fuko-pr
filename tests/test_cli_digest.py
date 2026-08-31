@@ -300,3 +300,39 @@ def test_the_rendered_blob_hash_is_reproducible_from_the_file_on_disk(tmp_path, 
     on_disk = path.read_bytes()
     assert f"blob sha256:{hashlib.sha256(on_disk).hexdigest()[:12]}" in row["text"]
     assert f"{len(on_disk) / 1024:.1f} KB" in row["text"]
+
+
+def test_a_rerender_of_an_unchanged_blob_replaces_its_index(tmp_path, monkeypatch, capsys):
+    """One index row per path, even when the blob is identical.
+
+    The topic is `<path>@<blob hash>` and carries nothing about rendering, so a
+    re-run with a different `--max-chars` produced text that ingest saw as new
+    beside a row supersession saw as current — two rows for one file, which no
+    later run could collapse.
+    """
+    _big(tmp_path, "big.rs")
+    store = _use(monkeypatch, tmp_path)
+    cli._cmd_digest(_args(tmp_path))
+    capsys.readouterr()
+
+    cli._cmd_digest(_args(tmp_path, max_chars=1200))
+
+    assert "1 superseded" in capsys.readouterr().out
+    assert len(store.items) == 1
+    assert len(store.items[0]["text"]) <= 1200
+
+
+def test_a_working_directory_without_a_git_dir_is_called_out(tmp_path, monkeypatch, capsys):
+    """Running from a subdirectory is the silent half of the unreachable-path bug."""
+    _big(tmp_path, "big.rs")
+    _use(monkeypatch, tmp_path)
+    cli._cmd_digest(_args(tmp_path))
+    assert "may not be the checkout root" in capsys.readouterr().err
+
+
+def test_a_checkout_root_draws_no_layout_warning(tmp_path, monkeypatch, capsys):
+    _big(tmp_path, "big.rs")
+    (tmp_path / ".git").mkdir()
+    _use(monkeypatch, tmp_path)
+    cli._cmd_digest(_args(tmp_path))
+    assert "may not be the checkout root" not in capsys.readouterr().err
