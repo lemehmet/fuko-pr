@@ -326,6 +326,25 @@ def test_coderabbit_stale_marker_in_a_bumped_notice_summary_is_not_evidence():
     assert s["reviewed_head_with_content"] is False
 
 
+def test_coderabbit_stale_one_off_marker_is_not_content_for_head():
+    """The fourth door: a stale one-off comment feeding the `with_content` escape hatch.
+
+    A review on HEAD admits CR's live summary as describing HEAD. Admitting CR's
+    OTHER issue comments alongside it lets a one-off reply from an earlier round --
+    never rewritten, so permanently stale -- supply the terminal marker that cancels
+    the demotion, and the live limit notice in the summary is overruled by evidence
+    about a different commit (CodeRabbit finding, round 1).
+    """
+    stale_reply = _cr(
+        "<!-- This is an auto-generated reply by CodeRabbit -->\n**Actionable comments posted: 3**"
+    )
+    s = coderabbit_state(
+        HEAD, [_cr(_FAIR_USAGE), stale_reply], [_cr_review(HEAD, state="APPROVED")]
+    )
+    assert s["state"] == "rate_limited"
+    assert s["reviewed_head_with_content"] is False
+
+
 def test_coderabbit_pause_notice_demotes_to_paused_not_rate_limited():
     """The two notices need different recoveries, so they keep different states.
 

@@ -369,7 +369,15 @@ def coderabbit_state(
         # terminal marker that body carries.
         [b for b in bodies if any(_sha_match(h, head_sha) for h in _range_heads(b))]
         + [r.get("body", "") or "" for r in cr_reviews if r.get("commit_id") == head_sha]
-        + (cr_issue_bodies if review_on_head else [])
+        # A review on HEAD makes CR's LIVE summary describe HEAD, so it is admitted
+        # even when its own range line does not name HEAD. Only the summary: it is
+        # the one comment CR rewrites in place, and this list is the sole source of
+        # the `with_content` escape hatch that disables the #137 demotion. A stale
+        # one-off CR comment carrying an old terminal marker would otherwise vouch
+        # for a HEAD CR never opened, which is the exact failure the demotion exists
+        # to catch (CodeRabbit finding, round 1). The scoping mirrors `notice_blob`
+        # below: absent an in-place-edited anchor, neither side trusts a one-off.
+        + ([b for b in cr_issue_bodies if _CR_SUMMARY.search(b)] if review_on_head else [])
     )
     head_blob = "\n".join(head_bodies)
     # A body that IS a limit/pause notice cannot also be evidence that CR read
