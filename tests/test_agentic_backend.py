@@ -795,6 +795,141 @@ def test_a_re_raised_closed_finding_is_named_on_its_own_log_line(monkeypatch, ca
     assert not logged[0].startswith("fuko: review completed")
 
 
+def test_build_env_carries_the_coverage_opt_in_only_when_the_entry_asks(monkeypatch):
+    """Default off, per entry, and never derivable from anything ambient (#157)."""
+    monkeypatch.setenv("ANTHROPIC_KEY", "k")
+    preset = get_preset("anthropic")
+
+    assert "FUKO_AGENTIC_COVERAGE_LEDGER" not in AgenticBackend().build_env(
+        preset, _model(), "", ["review"]
+    )
+    assert (
+        AgenticBackend().build_env(preset, _model(coverage_ledger=True), "", ["review"])[
+            "FUKO_AGENTIC_COVERAGE_LEDGER"
+        ]
+        == "1"
+    )
+
+
+def _coverage(monkeypatch):
+    """Record what invoke does to the coverage ledger, without a store."""
+    seen: dict = {"recorded": [], "expired": [], "read": 0}
+    monkeypatch.setattr(
+        review_state,
+        "record_coverage",
+        lambda repo, pr, seat, round, head_sha, regions: (
+            seen["recorded"].append((seat, round, head_sha, [r.file for r in regions]))
+            or len(regions)
+        ),
+    )
+    monkeypatch.setattr(
+        review_state,
+        "expire_coverage",
+        lambda repo, pr, seat, files=None: bool(seen["expired"].append((seat, files))) or 0,
+    )
+    monkeypatch.setattr(
+        review_state,
+        "live_coverage",
+        lambda *a, **k: seen.__setitem__("read", seen["read"] + 1) or [],
+    )
+    return seen
+
+
+def test_invoke_expires_the_coverage_this_rounds_delta_invalidates(monkeypatch):
+    """The delta's ONE use in the epic: it invalidates state, it never scopes review."""
+    _ledger(monkeypatch)
+    seen = _coverage(monkeypatch)
+
+    _, captured = _invoke(
+        monkeypatch,
+        AgenticBackend(),
+        HarnessResult(0, REVIEW_JSON),
+        env={
+            "FUKO_AGENTIC_MODEL": "claude-x",
+            "FUKO_SEAT": "dorian",
+            "FUKO_AGENTIC_COVERAGE_LEDGER": "1",
+        },
+    )
+
+    assert seen["expired"] == [("dorian", ["src/app.py"])]
+    # Scoping is what this must NOT do: the whole diff still reaches the prompt.
+    assert "<diff>" in captured["prompt"]
+
+
+def test_invoke_records_what_the_round_examined_when_the_seat_opts_in(monkeypatch):
+    """The coverage half of the round trip, wired end to end."""
+    _ledger(monkeypatch)
+    seen = _coverage(monkeypatch)
+    payload = json.loads(REVIEW_JSON)
+    payload["examined"] = [
+        {
+            "file": "src/util.py",
+            "region": "open_source",
+            "checked": "whether callers handle None",
+            "conclusion": "all four branch on None",
+            "evidence": "src/util.py:118-166",
+        }
+    ]
+
+    _invoke(
+        monkeypatch,
+        AgenticBackend(),
+        HarnessResult(0, json.dumps(payload)),
+        env={
+            "FUKO_AGENTIC_MODEL": "claude-x",
+            "FUKO_SEAT": "dorian",
+            "FUKO_AGENTIC_COVERAGE_LEDGER": "1",
+        },
+    )
+
+    assert seen["recorded"] == [("dorian", 4, "beef", ["src/util.py"])]
+    assert seen["read"] == 1
+
+
+def test_invoke_leaves_coverage_alone_for_a_seat_that_did_not_opt_in(monkeypatch):
+    """Default off is a real default: no read, no write -- but expiry still runs.
+
+    Expiry is ungated on purpose: it can only ever remove a stale assurance, and
+    gating it would let a seat toggled off and on again carry entries describing
+    heads no round in between could expire.
+    """
+    _ledger(monkeypatch)
+    seen = _coverage(monkeypatch)
+    payload = json.loads(REVIEW_JSON)
+    payload["examined"] = [
+        {"file": "src/util.py", "checked": "c", "conclusion": "e", "evidence": "v"}
+    ]
+
+    _invoke(
+        monkeypatch,
+        AgenticBackend(),
+        HarnessResult(0, json.dumps(payload)),
+        env={"FUKO_AGENTIC_MODEL": "claude-x", "FUKO_SEAT": "dorian"},
+    )
+
+    assert seen["recorded"] == [] and seen["read"] == 0
+    assert seen["expired"] == [("dorian", ["src/app.py"])]
+
+
+def test_a_value_other_than_one_reads_as_coverage_off(monkeypatch):
+    """A config typo must not switch on a feature that changes what the reviewer reads."""
+    _ledger(monkeypatch)
+    seen = _coverage(monkeypatch)
+
+    _invoke(
+        monkeypatch,
+        AgenticBackend(),
+        HarnessResult(0, REVIEW_JSON),
+        env={
+            "FUKO_AGENTIC_MODEL": "claude-x",
+            "FUKO_SEAT": "dorian",
+            "FUKO_AGENTIC_COVERAGE_LEDGER": "true",
+        },
+    )
+
+    assert seen["read"] == 0 and seen["recorded"] == []
+
+
 def test_invoke_without_a_seat_still_keeps_one_ledger(monkeypatch):
     """A solo config is one seat, not none."""
     written = _ledger(monkeypatch)

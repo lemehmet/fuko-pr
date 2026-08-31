@@ -27,6 +27,7 @@ from sidecar.reviewer.harness import (
 )
 from sidecar.backends.agentic import DETAIL_CAP
 from sidecar.reviewer.prompt import (
+    COVERAGE_ADVISORY,
     MAX_FINDINGS,
     MAX_PRIOR_COVERAGE,
     MAX_PRIOR_EVIDENCE,
@@ -496,6 +497,32 @@ def test_render_prior_state_leaves_evidence_inside_the_bound_untouched():
 
     assert "      evidence: src/a.py:10, src/b.py:20" in state.text
     assert "truncated" not in state.text
+
+
+def test_render_prior_state_bounds_a_coverage_rows_evidence_too():
+    """Coverage rows are capped in COUNT but at a number far too loose to bound this.
+
+    40 entries at the store's 4000-character text cap is 160k characters of
+    citation alone, in the one section added to make a round cheaper to aim.
+    """
+    state = render_prior_state([], [_prior_coverage(evidence="x" * 5_000)])
+    evidence = _rendered_evidence(state.text)
+
+    assert len(evidence) <= MAX_PRIOR_EVIDENCE
+    assert "evidence truncated to fit" in evidence
+
+
+def test_the_coverage_block_leads_with_the_advisory_framing():
+    """#157's third mitigation, and the difference between a hint and a blind spot.
+
+    The framing travels inside the rendered block rather than only in the
+    strategy text: the block is what the store hands a round.
+    """
+    state = render_prior_state([], [_prior_coverage()])
+
+    assert state.text.startswith(COVERAGE_ADVISORY)
+    assert "skip" not in COVERAGE_ADVISORY.lower()
+    assert "Deprioritise" in COVERAGE_ADVISORY and "not established fact" in COVERAGE_ADVISORY
 
 
 def test_render_prior_state_cannot_have_a_row_forged_by_carried_evidence():

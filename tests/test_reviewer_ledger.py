@@ -1,8 +1,10 @@
-"""Tests for the Tier-1 open-findings ledger policy (#156).
+"""Tests for the review-ledger policy: open findings (#156) and coverage (#157).
 
 The store is faked in memory rather than mocked call-by-call: the acceptance
 criterion is a ROUND TRIP ("a finding reported in round N and unaddressed is
-present in round N+1's prompt"), which per-call assertions cannot express.
+present in round N+1's prompt"; "coverage recorded in round N is gone from round
+N+1's prompt once the delta touches its file"), which per-call assertions cannot
+express.
 """
 
 import os
@@ -13,13 +15,29 @@ from sidecar import review_state
 from sidecar.reviewer import ledger
 from sidecar.reviewer.ledger import CarriedState, carry_in, settle
 from sidecar.reviewer.prompt import (
+    COVERAGE_ADVISORY,
+    EXAMINED_REQUIRED_FIELDS,
     AgenticFinding,
+    ExaminedRegion,
+    PriorCoverage,
     PriorFinding,
     PriorFindingStatus,
     PriorState,
 )
 
 REPO, PR, SEAT = "o/r", 9, "dorian"
+
+
+def _examined(**overrides) -> ExaminedRegion:
+    base = dict(
+        file="src/util.py",
+        region="open_source",
+        checked="whether every caller handles a None device",
+        conclusion="all four callers branch on None before use",
+        evidence="src/util.py:118-166, src/shim.py:402",
+    )
+    base.update(overrides)
+    return ExaminedRegion(**base)
 
 
 def _finding(**overrides) -> AgenticFinding:
@@ -37,10 +55,11 @@ def _finding(**overrides) -> AgenticFinding:
 
 
 class _Store:
-    """An in-memory stand-in for the five ``review_state`` primitives used here."""
+    """An in-memory stand-in for the ``review_state`` primitives both ledgers use."""
 
     def __init__(self):
         self.rows: dict[str, dict] = {}
+        self.coverage: list[dict] = []
         self.touched: list[str] = []
         self._n = 0
 
@@ -122,6 +141,37 @@ class _Store:
         row["reopened"] += 1
         return True
 
+    def record_coverage(self, repo, pr, seat, round, head_sha, regions):
+        for region in regions:
+            self.coverage.append(
+                {"key": (repo, pr, seat), "round": round, "region": region, "expired": False}
+            )
+        return len(regions)
+
+    def live_coverage(self, repo, pr, seat, limit=review_state.MAX_LIVE_COVERAGE):
+        return [
+            PriorCoverage(
+                file=row["region"].file,
+                checked=row["region"].checked,
+                conclusion=row["region"].conclusion,
+                evidence=row["region"].evidence,
+                region=row["region"].region,
+                round=row["round"],
+            )
+            for row in self.coverage
+            if row["key"] == (repo, pr, seat) and not row["expired"]
+        ][:limit]
+
+    def expire_coverage(self, repo, pr, seat, files=None):
+        expired = 0
+        for row in self.coverage:
+            if row["key"] != (repo, pr, seat) or row["expired"]:
+                continue
+            if files is None or row["region"].file in files:
+                row["expired"] = True
+                expired += 1
+        return expired
+
 
 @pytest.fixture
 def store(monkeypatch):
@@ -135,6 +185,9 @@ def store(monkeypatch):
         "touch_findings",
         "settled_findings",
         "reopen",
+        "record_coverage",
+        "live_coverage",
+        "expire_coverage",
     ):
         monkeypatch.setattr(review_state, name, getattr(fake, name))
     return fake
@@ -838,13 +891,240 @@ def _forbidden(name):
     return _fail
 
 
-def test_tier_1_never_touches_the_coverage_ledger(monkeypatch, store):
-    """Coverage is #157's: a half-wired assurance nothing expires is worse than none."""
-    for name in ("record_coverage", "live_coverage", "expire_coverage"):
+def test_a_seat_with_the_coverage_ledger_off_neither_reads_nor_writes_coverage(monkeypatch, store):
+    """Default off means default off: no read, no write, and the same prompt as before.
+
+    Expiry is deliberately NOT forbidden here -- it runs on every seat (see the
+    flag-flip test below), because it can only ever remove a stale assurance.
+    """
+    for name in ("record_coverage", "live_coverage"):
         monkeypatch.setattr(review_state, name, _forbidden(name))
 
-    carried = carry_in(REPO, PR, SEAT)
-    settle(carried, repo=REPO, pr=PR, seat=SEAT, head_sha="head1", findings=[_finding()])
+    carried = carry_in(REPO, PR, SEAT, touched_files=["src/app.py"])
+    outcome = settle(
+        carried,
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        findings=[_finding()],
+        examined=[_examined()],
+    )
+
+    assert carried.coverage == 0 and outcome.coverage == 0
+    assert COVERAGE_ADVISORY not in carried.text
+
+
+def test_coverage_recorded_in_one_round_is_carried_into_the_next(store):
+    """The Tier-2 acceptance criterion: a round is told what it has already covered."""
+    first = settle(
+        carry_in(REPO, PR, SEAT, coverage_ledger=True),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        examined=[_examined()],
+        coverage_ledger=True,
+    )
+    assert first.coverage == 1
+
+    second = carry_in(REPO, PR, SEAT, touched_files=["src/other.py"], coverage_ledger=True)
+
+    assert second.coverage == 1 and second.expired == 0
+    assert "src/util.py open_source -- round 1" in second.text
+    assert "checked: whether every caller handles a None device" in second.text
+    assert "evidence: src/util.py:118-166, src/shim.py:402" in second.text
+
+
+def test_a_delta_that_touches_a_file_expires_its_coverage(store):
+    """Mitigation 2: the conclusion described a tree the head no longer has.
+
+    The one use the epic makes of the delta, and it INVALIDATES rather than
+    scopes -- the coverage of a file the round did not touch survives alongside.
+    """
+    settle(
+        carry_in(REPO, PR, SEAT, coverage_ledger=True),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        examined=[
+            _examined(),
+            _examined(file="src/untouched.py", evidence="src/untouched.py:1-40"),
+        ],
+        coverage_ledger=True,
+    )
+
+    second = carry_in(REPO, PR, SEAT, touched_files=["src/util.py"], coverage_ledger=True)
+
+    assert second.expired == 1 and second.coverage == 1
+    assert "src/util.py open_source -- round 1" not in second.text
+    assert "src/untouched.py open_source -- round 1" in second.text
+
+
+def test_expiry_runs_even_for_a_seat_whose_coverage_ledger_is_off(store):
+    """A flag that only ADDS behaviour must not be able to preserve a stale assurance.
+
+    A seat that ran the ledger, was switched off for some rounds and was switched
+    back on would otherwise be handed entries describing heads no round in
+    between had a chance to expire.
+    """
+    settle(
+        carry_in(REPO, PR, SEAT, coverage_ledger=True),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        examined=[_examined()],
+        coverage_ledger=True,
+    )
+
+    off = carry_in(REPO, PR, SEAT, touched_files=["src/util.py"])
+    back_on = carry_in(REPO, PR, SEAT, coverage_ledger=True)
+
+    assert off.expired == 1
+    assert back_on.coverage == 0 and back_on.text == ""
+
+
+def test_an_empty_delta_expires_nothing(store):
+    """A round whose delta touched no file must not discard the ledger wholesale.
+
+    `expire_coverage(files=None)` is the wholesale case; the empty sequence is
+    not the same thing, and conflating them would make an unparseable diff erase
+    every assurance the seat holds.
+    """
+    settle(
+        carry_in(REPO, PR, SEAT, coverage_ledger=True),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        examined=[_examined()],
+        coverage_ledger=True,
+    )
+
+    second = carry_in(REPO, PR, SEAT, touched_files=[], coverage_ledger=True)
+
+    assert second.expired == 0 and second.coverage == 1
+
+
+def test_a_bare_string_delta_reaches_the_stores_guard_intact():
+    """`touched_files="src/app.py"` must not be normalised into a list of characters.
+
+    A `sorted(set(...))` applied unconditionally would defeat the store's own
+    guard (`_not_a_bare_string`, covered in test_review_state.py), which exists
+    precisely because such a call expires nothing while reporting the same `0` as
+    "there was no coverage for that file" -- a stale assurance kept.
+    """
+    assert ledger._expiry_targets("src/util.py") == "src/util.py"
+    # Everything else is de-duplicated and ordered, so the store's parameter is a
+    # function of the delta rather than of a set's iteration order.
+    assert ledger._expiry_targets(frozenset({"b.py", "a.py"})) == ["a.py", "b.py"]
+    assert ledger._expiry_targets(["a.py", "a.py"]) == ["a.py"]
+
+
+def test_a_hollow_coverage_entry_is_dropped_rather_than_injected(store, capsys):
+    """Mitigation 1: an entry nothing can retrace is the record this ledger must not carry.
+
+    The schema can only require the KEYS -- `""` satisfies a required `str` -- so
+    an entry with a conclusion, no `checked` and no evidence passes validation and
+    is a bare clean bill of health. It is dropped on the way back out, loudly.
+    """
+    settle(
+        carry_in(REPO, PR, SEAT, coverage_ledger=True),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        examined=[
+            _examined(checked="   ", conclusion="error handling here is fine"),
+            _examined(file="src/b.py", evidence=""),
+            _examined(file="src/c.py"),
+        ],
+        coverage_ledger=True,
+    )
+    capsys.readouterr()
+
+    second = carry_in(REPO, PR, SEAT, coverage_ledger=True)
+
+    assert second.coverage == 1
+    assert "src/c.py" in second.text
+    assert "error handling here is fine" not in second.text and "src/b.py" not in second.text
+    logged = [line for line in capsys.readouterr().err.splitlines() if "review-state" in line]
+    assert len(logged) == 1 and "dropped 2 coverage entries" in logged[0]
+    assert "/".join(EXAMINED_REQUIRED_FIELDS) in logged[0]
+
+
+def test_two_seats_on_one_pr_never_read_each_others_coverage(store):
+    """Per-seat, never shared (#160). Sharing would buy coverage with the second opinion.
+
+    The seats overlap on most files, so a shared ledger looks like free coverage
+    and is in fact the manufacture of exactly the correlation the second seat
+    exists to break.
+    """
+    settle(
+        carry_in(REPO, PR, SEAT, coverage_ledger=True),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        examined=[_examined()],
+        coverage_ledger=True,
+    )
+
+    other = carry_in(REPO, PR, "henry", coverage_ledger=True)
+
+    assert other.coverage == 0 and other.text == ""
+    assert carry_in(REPO, PR, SEAT, coverage_ledger=True).coverage == 1
+
+
+def test_the_carried_coverage_block_is_advisory_and_never_says_to_pass_a_region_over(store):
+    """Mitigation 3: an instruction to bypass turns a wrong row into a permanent blind spot.
+
+    Asserted on fuko's own prose only -- a stored path or citation may legitimately
+    contain any word, so a naive scan of the whole block would be a test of the
+    model's vocabulary rather than of this contract.
+    """
+    settle(
+        carry_in(REPO, PR, SEAT, coverage_ledger=True),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        examined=[_examined()],
+        coverage_ledger=True,
+    )
+
+    text = carry_in(REPO, PR, SEAT, coverage_ledger=True).text
+
+    assert COVERAGE_ADVISORY in text
+    assert "skip" not in COVERAGE_ADVISORY.lower()
+    assert "Deprioritise" in COVERAGE_ADVISORY
+    # The three re-entry conditions, and the standing permission to disagree.
+    assert "concrete reason to doubt" in COVERAGE_ADVISORY
+    assert "not established fact" in COVERAGE_ADVISORY
+    assert "never what was found to be sound" in COVERAGE_ADVISORY
+
+
+def test_coverage_is_recorded_exactly_as_the_round_reported_it(store):
+    """The write is unjudged: the table records what a round said, filtering happens on read.
+
+    Re-deciding a conclusion on the way in would make the ledger disagree with
+    the round it describes, and nothing about a coverage row is published, so
+    there is no valve to route around here.
+    """
+    outcome = settle(
+        carry_in(REPO, PR, SEAT, coverage_ledger=True),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        examined=[_examined(), _examined(file="src/b.py", evidence="")],
+        coverage_ledger=True,
+    )
+
+    assert outcome.coverage == 2
+    assert [row["region"].file for row in store.coverage] == ["src/util.py", "src/b.py"]
 
 
 def test_no_store_configured_carries_nothing_and_records_nothing(monkeypatch):
