@@ -294,10 +294,14 @@ def test_an_empty_write_never_leaves_the_runner(wire, store):
     _spy("record_findings", 99)
     _spy("record_coverage", 99)
     _spy("touch_findings", 99)
+    _spy("expire_coverage", 99)
 
     assert rsc.record_findings(REPO, PR, SEAT, 4, "sha", []) == 0
     assert rsc.record_coverage(REPO, PR, SEAT, 4, "sha", []) == 0
     assert rsc.touch_findings(REPO, PR, SEAT, []) == 0
+    # `expire_coverage` most of all: it is `carry_in`'s first store call, so its
+    # round-trip is paid before the prompt is even built.
+    assert rsc.expire_coverage(REPO, PR, SEAT, []) == 0
     assert calls == []
 
 
@@ -574,9 +578,26 @@ def test_every_ledger_route_is_behind_the_bearer_dependency(monkeypatch):
 
 def test_the_transition_endpoint_cannot_invent_a_verdict_the_store_refuses(monkeypatch):
     """The vocabulary guard travels with the primitive, so it holds for the wire
-    too: a request naming an unrecognised status closes nothing."""
+    too: a request naming an unrecognised status closes nothing.
+
+    The store is ENABLED here, which is the whole difficulty. With an empty
+    ``database_url`` -- the module default under this file's autouse fixture --
+    ``_best_effort`` short-circuits before the wrapped body ever runs, so
+    ``{"changed": false}`` would be produced by the disabled store rather than by
+    the vocabulary check and deleting that check would leave this green. So the
+    connection string is set and :func:`sidecar.db.db` is replaced by something
+    that fails the test if it is reached: ``transition`` returns ``False`` at the
+    ``status not in FINDING_STATUSES`` line, BEFORE it imports ``db``, and that
+    ordering is exactly what the assertion is now about. Raised by
+    ``qwen-anthropic/qwen3.8-max`` on #171.
+    """
+    import sidecar.db
+
     monkeypatch.setattr(main.settings, "auth_token", _TOKEN)
-    monkeypatch.setattr(review_state.settings, "database_url", "")
+    monkeypatch.setattr(review_state.settings, "database_url", "postgresql://unused/never")
+    monkeypatch.setattr(
+        sidecar.db, "db", lambda *a, **k: pytest.fail("refused before any connection")
+    )
     client = TestClient(main.app, headers={"Authorization": f"Bearer {_TOKEN}"})
 
     resp = client.post(

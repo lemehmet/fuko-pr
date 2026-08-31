@@ -273,9 +273,9 @@ def _guarded(default_factory):
     which every author-influenced line in the agentic backend already goes
     through. It takes a broken, version-skewed or hostile sidecar to reach --
     a healthy one answers with schema-valid bodies -- but this is the same
-    stderr the settle receipts are read from. ``_mark_down``'s sibling print
-    needs no flattening for the opposite reason: its text is httpx's own.
-    Raised by ``qwen-anthropic/qwen3.8-max`` on #171.
+    stderr the settle receipts are read from. ``_mark_down`` flattens for the
+    same reason; see its docstring for why it does so even though its own text
+    comes from httpx. Raised by ``qwen-anthropic/qwen3.8-max`` on #171.
     """
 
     def _decorate(fn):
@@ -420,6 +420,13 @@ def expire_coverage(repo: str, pr: int, seat: str, files: Sequence[str]) -> int:
         raise TypeError(f"files must be a sequence of strings, not: {files!r}")
     if not _remote():
         return review_state.expire_coverage(repo, pr, seat, files)
+    # An empty delta expires nothing, and the store says so with no I/O at all.
+    # This is `carry_in`'s FIRST store call and it blocks prompt construction, so
+    # a round whose delta names no file would otherwise open the review with a
+    # round-trip whose only possible answer is 0 -- the same short-circuit the
+    # three sibling writes already have.
+    if not files:
+        return 0
     return LedgerCountResponse.model_validate(
         _post(
             "/rs/coverage/expire",
