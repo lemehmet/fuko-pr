@@ -236,3 +236,16 @@ def test_fit_keeps_a_cheap_entry_behind_one_that_did_not_fit():
     fitting, dropped = D._fit([wide, narrow], budget)
     assert [s.name for s in fitting] == ["b"]
     assert dropped == 1
+
+
+def test_the_truncation_note_does_not_claim_the_omissions_were_shorter():
+    """Packing drops whatever did not fit, which is not always the shorter thing.
+
+    Calling every omission "shorter" would tell a reader that all the large
+    regions are listed -- the exact misdirection the note exists to prevent.
+    """
+    body = "".join(f"fn f{i}() {{}}\n" for i in range(200))
+    body += "fn enormous() {\n" + "    // body\n" * 400 + "}\n"
+    out = D.render("big.rs", body, max_chars=900)
+    assert "further declaration(s) omitted" in out
+    assert "shorter declaration" not in out

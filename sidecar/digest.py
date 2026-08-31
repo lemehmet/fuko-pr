@@ -64,7 +64,7 @@ _TAIL_RESERVE = 200
 """Characters held back from ``max_chars`` for whichever trailing note applies.
 
 Every rendered index ends in at most one note -- either "no declarations
-recognised" or "N shorter declarations omitted" -- and both of those say
+recognised" or "N further declarations omitted" -- and both of those say
 something a reader must not miss, so they are reserved for rather than
 truncated. This reserve is also what makes the cap in :func:`render` a cap on
 the *whole* result: a limit too small to hold the header plus this reserve is
@@ -272,7 +272,7 @@ def _fit(symbols: list[Symbol], budget: int) -> tuple[list[Symbol], int]:
     an entry's *cost* is its line numbers and identifier length, which has
     nothing to do with its span: stopping at the first over-budget entry would
     also drop every cheaper one behind it, and could return nothing at all under
-    a tight cap while still claiming shorter declarations were the ones omitted.
+    a tight cap while keeping nothing at all.
     """
     kept = sorted(symbols, key=lambda s: (-s.span, s.start))
     used = 0
@@ -329,7 +329,13 @@ def _render_scanned(
     lines = [*head, *(_entry(s) for s in fitting)]
     if dropped:
         lines.append(
-            f"({dropped} shorter declaration(s) omitted to fit -- this index is "
+            # "further", not "shorter": the drop ORDER prefers small spans, but
+            # what is actually dropped is whatever did not fit, and an entry's
+            # cost is its line numbers and identifier length. A large-span
+            # symbol with an expensive entry can be skipped while cheaper
+            # smaller ones behind it are kept, so calling the omissions shorter
+            # would tell a reader that every large region is listed.
+            f"({dropped} further declaration(s) omitted to fit -- this index is "
             "INCOMPLETE; read the file for anything not listed above)"
         )
     return "\n".join(lines)

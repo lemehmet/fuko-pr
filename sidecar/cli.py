@@ -505,11 +505,15 @@ def _forget_superseded(store, repo: str, current: dict[str, str]) -> int:
     index row per indexed path.
 
     Called *after* the new digests are inserted, not before: the current text is
-    then already stored, so the predicate cannot delete it, and there is never a
-    moment when an indexed file has no index at all. The cost of the other order
-    -- a failed insert leaving the file unindexed -- is worse than this order's
-    cost, which is a few seconds with two indexes of one file in a store nothing
-    reads mid-command.
+    then already stored, so the predicate cannot delete it. For a single run that
+    means an indexed file is never left without an index -- the cost of the other
+    order, a failed insert leaving the file unindexed, is worse than this order's
+    cost of a few seconds with two indexes of one file. It is *not* a guarantee
+    across concurrent runs: two overlapping runs whose renderings of one file
+    differ each store their own row and each collects the other's as stale from a
+    snapshot taken before any delete, so the pair can remove both. Recovering is
+    a re-run, and closing it properly needs a delete that carries the predicate
+    rather than an id (see #199, which changes that call shape anyway).
     """
     stale: list[str] = []
     offset = 0
