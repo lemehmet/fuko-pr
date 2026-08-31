@@ -267,6 +267,12 @@ def _fit(symbols: list[Symbol], budget: int) -> tuple[list[Symbol], int]:
     The smallest spans go first: the index exists to point at the large regions
     that make a whole-file read expensive, so a five-line helper is the least
     costly thing to lose.
+
+    A symbol that does not fit is skipped rather than ending the loop, because
+    an entry's *cost* is its line numbers and identifier length, which has
+    nothing to do with its span: stopping at the first over-budget entry would
+    also drop every cheaper one behind it, and could return nothing at all under
+    a tight cap while still claiming shorter declarations were the ones omitted.
     """
     kept = sorted(symbols, key=lambda s: (-s.span, s.start))
     used = 0
@@ -274,7 +280,7 @@ def _fit(symbols: list[Symbol], budget: int) -> tuple[list[Symbol], int]:
     for symbol in kept:
         cost = len(_entry(symbol)) + 1
         if used + cost > budget:
-            break
+            continue
         used += cost
         fitting.append(symbol)
     fitting.sort(key=lambda s: s.start)
@@ -301,6 +307,13 @@ def render(path: str, text: str, max_chars: int = MAX_CHARS) -> str:
             instead, which is the only outcome that keeps the cap honest.
     """
     symbols, scanner = scan(path, text)
+    return _render_scanned(path, text, symbols, scanner, max_chars)
+
+
+def _render_scanned(
+    path: str, text: str, symbols: list[Symbol], scanner: str, max_chars: int
+) -> str:
+    """Render an index from an already-scanned file, so no caller scans twice."""
     head = _header(path, text, scanner)
     head_text = "\n".join(head)
     floor = len(head_text) + 1 + _TAIL_RESERVE
@@ -322,8 +335,16 @@ def render(path: str, text: str, max_chars: int = MAX_CHARS) -> str:
     return "\n".join(lines)
 
 
-def build_item(path: str, text: str, max_chars: int = MAX_CHARS) -> IngestItem:
-    """Return the learning that stores the digest of ``path``.
+def build_item(path: str, text: str, max_chars: int = MAX_CHARS) -> IngestItem | None:
+    """Return the learning that stores the digest of ``path``, or ``None``.
+
+    ``None`` means the file declares nothing an index could point at -- a
+    lockfile, a data dump, prose. Such a file is skipped rather than stored:
+    its index would be the header and "no declarations recognised", which costs
+    an embedding and then competes on cosine score for one of the ``top_k``
+    slots of every pull request touching that path, while offering a reader
+    nothing to navigate to. That is the same waste the skip-directory set exists
+    to prevent, reached through a file kind instead of a directory.
 
     ``file_globs`` is the file's own path, which is what makes the existing
     glob filter in :func:`sidecar.retrieve.query` surface the digest for exactly
@@ -334,8 +355,11 @@ def build_item(path: str, text: str, max_chars: int = MAX_CHARS) -> IngestItem:
     would be stored, embedded, and permanently unreachable. ``topic`` keeps the
     literal path, so supersession still recognises the file by name.
     """
+    symbols, scanner = scan(path, text)
+    if not symbols:
+        return None
     return IngestItem(
-        text=render(path, text, max_chars),
+        text=_render_scanned(path, text, symbols, scanner, max_chars),
         source=DIGEST_SOURCE,
         file_globs=[glob.escape(path)],
         topic=topic_for(path, blob_hash(text)),

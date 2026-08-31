@@ -534,6 +534,7 @@ def _forget_superseded(store, repo: str, current: dict[str, str]) -> int:
 def _cmd_digest(args) -> None:
     items = []
     paths: list[str] = []
+    featureless: list[str] = []
     root = Path.cwd().resolve()
     if not (root / ".git").exists():
         # The complementary direction of the outside-the-checkout warning below,
@@ -571,11 +572,24 @@ def _cmd_digest(args) -> None:
             print(f"warning: could not read {fp}: {e}; skipping", file=sys.stderr)
             continue
         try:
-            items.append(digest.build_item(rel, text, args.max_chars))
+            item = digest.build_item(rel, text, args.max_chars)
         except ValueError as e:
             print(f"warning: cannot index {rel}: {e}; skipping", file=sys.stderr)
             continue
+        if item is None:
+            featureless.append(rel)
+            continue
+        items.append(item)
         paths.append(rel)
+
+    if featureless:
+        print(
+            f"fuko: skipped {len(featureless)} file(s) with no recognised declarations "
+            f"(e.g. {featureless[0]}); an index of a lockfile or a data dump has nothing "
+            "to navigate to, and storing one would spend an embedding and a retrieval "
+            "slot on it.",
+            file=sys.stderr,
+        )
 
     if not items:
         print(

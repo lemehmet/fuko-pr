@@ -336,3 +336,13 @@ def test_a_checkout_root_draws_no_layout_warning(tmp_path, monkeypatch, capsys):
     _use(monkeypatch, tmp_path)
     cli._cmd_digest(_args(tmp_path))
     assert "may not be the checkout root" not in capsys.readouterr().err
+
+
+def test_a_file_with_no_declarations_is_reported_and_not_stored(tmp_path, monkeypatch, capsys):
+    """A lockfile-shaped index has nothing to navigate to, so it is not worth a slot."""
+    (tmp_path / "pnpm-lock.yaml").write_text("a: 1\nb: 2\n" * 200)
+    _big(tmp_path, "big.rs")
+    store = _use(monkeypatch, tmp_path)
+    cli._cmd_digest(_args(tmp_path))
+    assert "no recognised declarations" in capsys.readouterr().err
+    assert [row["file_globs"] for row in store.items] == [["big.rs"]]

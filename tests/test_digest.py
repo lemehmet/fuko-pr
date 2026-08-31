@@ -216,3 +216,23 @@ def test_digest_is_a_known_source_on_both_backends():
 def test_symbol_span_is_at_least_one_line():
     assert D.Symbol("fn", "x", 5, 5).span == 1
     assert D.Symbol("fn", "x", 5, 9).span == 5
+
+
+def test_build_item_declines_a_file_that_declares_nothing():
+    """A lockfile's index would be a header and a shrug, at the price of a slot."""
+    assert D.build_item("pnpm-lock.yaml", "a: 1\nb: 2\n" * 200) is None
+
+
+def test_fit_keeps_a_cheap_entry_behind_one_that_did_not_fit():
+    """Entry cost is line numbers and name length, which has nothing to do with span.
+
+    Stopping at the first over-budget entry also dropped every cheaper one
+    behind it, and could keep nothing at all while the note claimed the shorter
+    declarations were the omitted ones.
+    """
+    wide = D.Symbol("fn", "a_very_long_identifier_indeed" * 3, 1, 900)
+    narrow = D.Symbol("fn", "b", 901, 905)
+    budget = len(D._entry(narrow)) + 1
+    fitting, dropped = D._fit([wide, narrow], budget)
+    assert [s.name for s in fitting] == ["b"]
+    assert dropped == 1
