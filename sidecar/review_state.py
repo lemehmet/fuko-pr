@@ -275,6 +275,13 @@ def open_findings(repo: str, pr: int, seat: str, limit: int = MAX_OPEN_FINDINGS)
       at stays inside the window however long the branch lives; keyed on
       ``created_at`` it would age out of its own ledger while still open, which
       is exactly the silent loss this table exists to stop.
+    * ``evidence`` is projected alongside the claim (#174). It is the one column
+      :func:`record_findings` writes that this read once dropped, which handed
+      the next round a finding LESS grounded than the one its predecessor
+      published -- the citation stripped from exactly the claim the round is
+      asked to re-verify. What it costs in prompt budget is bounded by the
+      renderer, per row (:data:`sidecar.reviewer.prompt.MAX_PRIOR_EVIDENCE`),
+      not here: the store keeps what the round actually said.
     * ``id`` breaks the tie. One round's findings are inserted in a single
       transaction, so ``now()`` -- and therefore ``created_at`` -- is identical
       for every row of that round, and equal sort keys have no stable order in
@@ -287,7 +294,8 @@ def open_findings(repo: str, pr: int, seat: str, limit: int = MAX_OPEN_FINDINGS)
 
     with db() as conn:
         rows = conn.execute(
-            "SELECT id, file, line, severity, category, title, body, round, count(*) OVER () "
+            "SELECT id, file, line, severity, category, title, body, evidence, round, "
+            "count(*) OVER () "
             "FROM review_findings "
             "WHERE repo = %s AND pr = %s AND seat = %s AND status = 'open' "
             "AND updated_at > now() - make_interval(days => %s) "
@@ -305,14 +313,15 @@ def open_findings(repo: str, pr: int, seat: str, limit: int = MAX_OPEN_FINDINGS)
                 severity=severity,
                 category=category,
                 round=round_,
+                evidence=evidence,
             ),
         )
-        for row_id, file, line, severity, category, title, body, round_, _total in rows
+        for row_id, file, line, severity, category, title, body, evidence, round_, _total in rows
     )
     # No rows means no window column to read, and the count can only be clamped
     # upward from zero: a total BELOW the rows in hand would be a contradiction,
     # and reporting a negative truncation would be worse than reporting none.
-    total = int(rows[0][8]) if rows else 0
+    total = int(rows[0][9]) if rows else 0
     return OpenLedger(rows=stored, truncated=max(0, total - len(stored)))
 
 

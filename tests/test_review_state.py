@@ -169,7 +169,18 @@ def test_stored_text_is_bounded_because_the_ledger_is_replayed_every_round(pg):
 def test_open_findings_returns_rows_paired_with_their_prior_finding(pg):
     conn = pg(
         rows=[
-            (_UUID, "src/app.py", 42, "high", "bug", "unchecked None", "body text", 2, 1),
+            (
+                _UUID,
+                "src/app.py",
+                42,
+                "high",
+                "bug",
+                "unchecked None",
+                "body text",
+                "read src/app.py:118-166",
+                2,
+                1,
+            ),
         ]
     )
     ledger = review_state.open_findings("o/r", 7, "henry")
@@ -186,11 +197,30 @@ def test_open_findings_returns_rows_paired_with_their_prior_finding(pg):
         severity="high",
         category="bug",
         round=2,
+        evidence="read src/app.py:118-166",
     )
     sql, params = conn.statements[0]
     assert "status = 'open'" in sql and "ORDER BY round, created_at, id" in sql
     assert params[3] == review_state.RETENTION_DAYS
     assert params[4] == review_state.MAX_OPEN_FINDINGS
+
+
+def test_findings_evidence_is_both_written_and_read_back(pg):
+    """#174: the column was written on every recorded finding and named by no
+    read, so a carried finding reached the next round with the citation its
+    publication carried stripped off -- the half that supports re-verifying it.
+    Pinning BOTH ends here is what stops it drifting back to write-only."""
+    written = pg()
+    review_state.record_findings("o/r", 7, "henry", 1, "sha", [_finding()])
+    write_sql, write_params = written.statements[0]
+
+    read = pg()
+    review_state.open_findings("o/r", 7, "henry")
+    projection = read.statements[0][0].split(" FROM ")[0]
+
+    assert "evidence" in write_sql
+    assert "src/app.py:118-166" in write_params
+    assert "evidence" in projection
 
 
 def test_open_findings_measures_retention_from_the_last_reassertion(pg):
@@ -223,7 +253,7 @@ def test_open_findings_clamps_a_caller_supplied_limit(pg):
 
 
 def _open_row(n: int, total: int) -> tuple:
-    return (_UUID, "src/app.py", n, "high", "bug", f"finding {n}", "body", 1, total)
+    return (_UUID, "src/app.py", n, "high", "bug", f"finding {n}", "body", "evidence", 1, total)
 
 
 def test_open_findings_reports_how_many_rows_the_cap_cut(pg):
