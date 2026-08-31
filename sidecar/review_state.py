@@ -77,7 +77,10 @@ MAX_OPEN_FINDINGS = 200
 Every row returned here is rendered into the next prompt in full
 (:func:`sidecar.reviewer.prompt.render_prior_state` caps coverage but never
 findings, on purpose), so an unbounded read is an unbounded prompt. A PR whose
-seat has 200 unsettled findings has a problem no ledger will fix.
+seat has 200 unsettled findings has a problem no ledger will fix -- but past
+this bound the ledger at least NAMES that problem rather than absorbing it:
+the read reports what it cut (:class:`OpenLedger`), because a row that is never
+offered to a round is a row no round can settle (#173).
 """
 
 MAX_LIVE_COVERAGE = 500
@@ -181,6 +184,30 @@ class StoredFinding:
     prior: PriorFinding
 
 
+@dataclass(frozen=True)
+class OpenLedger:
+    """One read of the open ledger: the rows it returns, and the rows it cut.
+
+    ``truncated`` is how many open rows the window held beyond
+    :data:`MAX_OPEN_FINDINGS` -- rows that exist, are ``open``, and were NOT
+    handed to the caller. They matter because of what the cap does to the ledger
+    downstream: a row never offered to a round is never minted a ``pN`` id, so
+    no verdict can address it and it can only leave ``open`` by ageing out of the
+    retention window months later (#173). That is the silent loss this table
+    exists to stop, arriving through the cap instead of through a round.
+
+    Reporting the cut rather than raising on it is the fail-safe direction here.
+    :func:`_best_effort` turns an exception into the neutral value, so a raise
+    would hand the round an EMPTY ledger: partial truncation would become total
+    loss, and the 200 rows that were readable would go unsettled too. Deciding
+    what to DO about the cut -- warn, alarm, page -- stays with the policy half
+    (:func:`sidecar.reviewer.ledger.carry_in`), per this module's charter.
+    """
+
+    rows: tuple[StoredFinding, ...] = ()
+    truncated: int = 0
+
+
 @_best_effort(lambda: 0)
 def record_findings(
     repo: str,
@@ -225,15 +252,20 @@ def record_findings(
     return len(findings)
 
 
-@_best_effort(list)
-def open_findings(
-    repo: str, pr: int, seat: str, limit: int = MAX_OPEN_FINDINGS
-) -> list[StoredFinding]:
+@_best_effort(OpenLedger)
+def open_findings(repo: str, pr: int, seat: str, limit: int = MAX_OPEN_FINDINGS) -> OpenLedger:
     """Return this seat's still-open findings, oldest round first (empty when disabled).
 
     Oldest first so the minted ``p1..pN`` ids stay stable as new rounds append:
     a finding keeps the id it had last round unless something ahead of it closed,
     which makes a prompt diff between two rounds readable by a human.
+
+    That ordering decides WHICH rows ``limit`` cuts, and it cuts the newest --
+    the ones a round most needs to settle. So the count of cut rows travels back
+    with them (:class:`OpenLedger`, ``truncated``), from the same read that did
+    the cutting rather than from a second count that could disagree with it:
+    ``count(*) OVER ()`` is evaluated after the ``WHERE`` and before the
+    ``LIMIT``, so it is the size of the window this read is a prefix of.
 
     Two details make that ordering and that window mean what they say:
 
@@ -255,14 +287,14 @@ def open_findings(
 
     with db() as conn:
         rows = conn.execute(
-            "SELECT id, file, line, severity, category, title, body, round "
+            "SELECT id, file, line, severity, category, title, body, round, count(*) OVER () "
             "FROM review_findings "
             "WHERE repo = %s AND pr = %s AND seat = %s AND status = 'open' "
             "AND updated_at > now() - make_interval(days => %s) "
             "ORDER BY round, created_at, id LIMIT %s",
             (repo, pr, seat, RETENTION_DAYS, min(max(1, limit), MAX_OPEN_FINDINGS)),
         ).fetchall()
-    return [
+    stored = tuple(
         StoredFinding(
             id=str(row_id),
             prior=PriorFinding(
@@ -275,8 +307,13 @@ def open_findings(
                 round=round_,
             ),
         )
-        for row_id, file, line, severity, category, title, body, round_ in rows
-    ]
+        for row_id, file, line, severity, category, title, body, round_, _total in rows
+    )
+    # No rows means no window column to read, and the count can only be clamped
+    # upward from zero: a total BELOW the rows in hand would be a contradiction,
+    # and reporting a negative truncation would be worse than reporting none.
+    total = int(rows[0][8]) if rows else 0
+    return OpenLedger(rows=stored, truncated=max(0, total - len(stored)))
 
 
 @_best_effort(lambda: 1)
