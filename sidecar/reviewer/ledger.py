@@ -255,14 +255,22 @@ def _reopen_reason(row: SettledFinding, round_: int) -> str:
     in every case rather than some -- a verdict can only close a row carried in
     from an earlier round, so the closing round is always strictly later than the
     one the row was recorded in (qwen3.8-max on #189).
+
+    The old reason comes LAST, after every fixed part, because
+    :func:`sidecar.review_state.reopen` clips what it stores at
+    :data:`sidecar.review_state.MAX_TEXT` and that reason is model text already
+    held at up to the same cap. Composed with the prose in the middle, a closure
+    reason near the cap pushed the provenance suffix past the clip and this line
+    silently lost the very thing it was composed to add. Ordered this way the
+    clip can only ever cost the tail of the old prose (qwen3.8-max on #189).
     """
-    closure = row.status
-    if row.reason.strip():
-        closure = f"{closure} ({row.reason.strip()})"
-    return (
+    line = (
         f"re-raised in round {round_}: an independent finding contradicts "
-        f"{closure}, on a finding recorded in round {row.round}"
+        f"{row.status}, on a finding recorded in round {row.round}"
     )
+    if row.reason.strip():
+        line = f"{line}; the closure stated: {row.reason.strip()}"
+    return line
 
 
 def _reopen_candidates(repo: str, pr: int, seat: str) -> dict[tuple[str, str], SettledFinding]:

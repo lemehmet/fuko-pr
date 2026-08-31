@@ -327,6 +327,37 @@ def test_a_closed_finding_is_re_raised_by_a_later_round_that_finds_it_again(stor
     assert list(carry_in(REPO, PR, SEAT).rows.values()) == [row_id]
 
 
+def test_a_closure_reason_at_the_cap_cannot_clip_the_re_raises_own_provenance():
+    """The composed line's structured half outlives the store's clip; the prose does not.
+
+    ``reopen`` clips what it writes at ``MAX_TEXT``, and the closure reason it
+    carries forward is model text already stored at up to that same cap. With the
+    prose in the middle, a closure reason near the cap pushed "recorded in round
+    N" -- the provenance this line exists to add -- past the clip, silently. So
+    the fixed parts lead, and truncation can only cost the oldest prose
+    (qwen3.8-max, #189).
+    """
+    reason = ledger._reopen_reason(
+        review_state.SettledFinding(
+            id="row-1",
+            file="src/a.py",
+            title="leaks the handle",
+            status="fixed",
+            round=1,
+            reason="x" * (review_state.MAX_TEXT * 2),
+        ),
+        3,
+    )
+    stored = review_state._clip(reason)
+
+    assert len(stored) == review_state.MAX_TEXT
+    assert stored.startswith("re-raised in round 3: an independent finding contradicts fixed,")
+    assert "on a finding recorded in round 1" in stored
+    # What the clip took is the tail of the model's prose, which is the only part
+    # of the line a reader can lose without losing the sequence itself.
+    assert stored.endswith("x")
+
+
 def test_a_stale_row_is_not_re_raised(store):
     """`stale` is fuko's own retirement, not a verdict -- softening it is #175's."""
     settle(
