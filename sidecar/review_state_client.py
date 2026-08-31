@@ -361,14 +361,25 @@ def expire_coverage(repo: str, pr: int, seat: str, files: Sequence[str]) -> int:
 
     Narrower than the primitive on purpose: ``files`` is a sequence and never
     ``None``, so the wholesale case is not reachable through this seam (see
-    :class:`ExpireCoverageRequest`). A bare ``str`` is still rejected rather than
-    iterated into characters, here as there -- the local path delegates to the
-    guard that owns that rule, and the HTTP path cannot serialize one as a list.
+    :class:`ExpireCoverageRequest`). A bare ``str`` is refused too, rather than
+    iterated into characters.
+
+    Both guards run BEFORE the branch point, and for ``None`` that placement is
+    the whole point. The primitive reads ``None`` as "expire this seat's coverage
+    WHOLESALE", so a ``None`` that reached the local branch would discard the
+    entire ledger while the identical call over HTTP is a logged no-op --
+    two transports with two semantics, on the most destructive call the ledger
+    has, which is the outcome this module exists to prevent. No caller passes one
+    today (:mod:`sidecar.reviewer.ledger` reaches the store only through here,
+    and both its call sites pass lists), but ``ledger.py`` reaching the store
+    ONLY through this seam is exactly what makes the divergence something a later
+    caller inherits rather than something the current ones are spared.
+    Raised by ``qwen-anthropic/qwen3.8-max`` on #171.
     """
+    if files is None or isinstance(files, str):
+        raise TypeError(f"files must be a sequence of strings, not: {files!r}")
     if not _remote():
         return review_state.expire_coverage(repo, pr, seat, files)
-    if isinstance(files, str):
-        raise TypeError(f"files must be a sequence of strings, not a single str: {files!r}")
     return LedgerCountResponse.model_validate(
         _post(
             "/rs/coverage/expire",

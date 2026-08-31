@@ -458,6 +458,28 @@ def test_a_bare_string_is_refused_on_the_wire_as_it_is_in_the_store(monkeypatch,
     assert "files must be a sequence" in err and "finding_ids must be a sequence" in err
 
 
+def test_wholesale_expiry_is_refused_on_BOTH_branches_not_just_the_wire(monkeypatch, local, capsys):
+    """The guard has to sit above the branch point, because the two branches
+    disagree about what ``None`` MEANS.
+
+    Over HTTP it is unserializable and degrades to 0; in the store it is
+    "expire this seat's coverage wholesale". A guard placed after the branch
+    would therefore make the same call a logged no-op on a runner and a silent
+    discard of the whole ledger on the sidecar host -- the two-transports-two-
+    semantics outcome this module exists to prevent, on its most destructive
+    call. Asserted with NO sidecar configured, which is the branch that used to
+    let it through.
+    """
+    assert rsc.expire_coverage(REPO, PR, SEAT, None) == 0
+    assert rsc.expire_coverage(REPO, PR, SEAT, "src/app.py") == 0
+    # Never delegated: the store never saw a call it would have read as wholesale.
+    assert local == []
+    # And the legitimate call on the same branch still reaches it.
+    assert rsc.expire_coverage(REPO, PR, SEAT, ["src/app.py"]) == 2
+    assert [name for name, _, _ in local] == ["expire_coverage"]
+    assert capsys.readouterr().err.count("files must be a sequence") == 2
+
+
 def test_an_expire_request_without_files_is_rejected_not_read_as_wholesale(wire, store):
     """``expire_coverage(files=None)`` discards a seat's whole coverage ledger.
     An omitted key, a typo'd key or a truncated body must not reach it."""
