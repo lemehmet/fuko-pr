@@ -289,7 +289,7 @@ def test_record_writes_an_unstorable_cost_as_unmeasured(monkeypatch):
             captured["params"] = params
 
     @contextlib.contextmanager
-    def _fake_db():
+    def _fake_db(*_a, **_k):
         yield _Conn()
 
     monkeypatch.setattr(sidecar.db, "db", _fake_db)

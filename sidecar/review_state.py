@@ -278,9 +278,9 @@ def record_findings(
     """
     if not findings:
         return 0
-    from .db import db
+    from .db import db_best_effort
 
-    with db() as conn:
+    with db_best_effort() as conn:
         for finding in findings:
             conn.execute(
                 "INSERT INTO review_findings "
@@ -347,9 +347,9 @@ def open_findings(repo: str, pr: int, seat: str, limit: int = MAX_OPEN_FINDINGS)
       without it their ``pN`` ids could permute between two reads that settled
       nothing.
     """
-    from .db import db
+    from .db import db_best_effort
 
-    with db() as conn:
+    with db_best_effort() as conn:
         rows = conn.execute(
             "SELECT id, file, line, severity, category, title, body, evidence, round, "
             "count(*) OVER () "
@@ -415,9 +415,9 @@ def next_round(repo: str, pr: int, seat: str) -> int:
     whose label is uncertain, trades a wrong label for a lost finding, which is
     the direction this table exists to avoid.
     """
-    from .db import db
+    from .db import db_best_effort
 
-    with db() as conn:
+    with db_best_effort() as conn:
         row = conn.execute(
             "SELECT coalesce(max(round), 0) + 1 FROM ("
             "SELECT round FROM review_findings WHERE repo = %s AND pr = %s AND seat = %s "
@@ -463,9 +463,9 @@ def transition(
     """
     if status not in FINDING_STATUSES or not _is_uuid(finding_id):
         return False
-    from .db import db
+    from .db import db_best_effort
 
-    with db() as conn:
+    with db_best_effort() as conn:
         cur = conn.execute(
             "UPDATE review_findings SET status = %s, status_reason = %s, updated_at = now() "
             "WHERE id = %s AND status = 'open' AND repo = %s AND pr = %s AND seat = %s",
@@ -496,9 +496,9 @@ def settled_findings(
     reads as "no closure to re-raise": the caller then records the re-found claim
     as a new open row, which is what it did before this read existed.
     """
-    from .db import db
+    from .db import db_best_effort
 
-    with db() as conn:
+    with db_best_effort() as conn:
         rows = conn.execute(
             "SELECT id, file, title, status, round, status_reason "
             "FROM review_findings "
@@ -558,9 +558,9 @@ def reopen(repo: str, pr: int, seat: str, finding_id: str, reason: str) -> bool:
     """
     if not _is_uuid(finding_id):
         return False
-    from .db import db
+    from .db import db_best_effort
 
-    with db() as conn:
+    with db_best_effort() as conn:
         cur = conn.execute(
             "UPDATE review_findings SET status = 'open', status_reason = %s, "
             "reopened = reopened + 1, updated_at = now() "
@@ -588,9 +588,9 @@ def touch_findings(repo: str, pr: int, seat: str, finding_ids: Sequence[str]) ->
     ids = [i for i in finding_ids if _is_uuid(i)]
     if not ids:
         return 0
-    from .db import db
+    from .db import db_best_effort
 
-    with db() as conn:
+    with db_best_effort() as conn:
         cur = conn.execute(
             "UPDATE review_findings SET updated_at = now() "
             "WHERE id = ANY(%s) AND status = 'open' AND repo = %s AND pr = %s AND seat = %s",
@@ -616,9 +616,9 @@ def record_coverage(
     """
     if not regions:
         return 0
-    from .db import db
+    from .db import db_best_effort
 
-    with db() as conn:
+    with db_best_effort() as conn:
         for region in regions:
             conn.execute(
                 "INSERT INTO review_coverage "
@@ -659,9 +659,9 @@ def live_coverage(
     out of the prompt on their own. The renderer's own sort does not repair it:
     it sorts by round with a stable sort, inheriting whatever order arrives here.
     """
-    from .db import db
+    from .db import db_best_effort
 
-    with db() as conn:
+    with db_best_effort() as conn:
         rows = conn.execute(
             "SELECT file, checked, conclusion, evidence, region, round "
             "FROM review_coverage "
@@ -714,7 +714,7 @@ def expire_coverage(repo: str, pr: int, seat: str, files: Sequence[str] | None =
         _not_a_bare_string(files, "files")
         if not files:
             return 0
-    from .db import db
+    from .db import db_best_effort
 
     if files is None:
         sql = (
@@ -730,6 +730,6 @@ def expire_coverage(repo: str, pr: int, seat: str, files: Sequence[str] | None =
         )
         params = (repo, pr, seat, [_clip(f) for f in files])
 
-    with db() as conn:
+    with db_best_effort() as conn:
         cur = conn.execute(sql, params)
         return cur.rowcount or 0

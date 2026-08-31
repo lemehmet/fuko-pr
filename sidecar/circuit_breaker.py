@@ -27,9 +27,9 @@ def get_cooldowns() -> dict[str, str]:
     """Return ``{provider: cooldown_until_iso}`` for providers still cooling down."""
     if not _enabled():
         return {}
-    from .db import db
+    from .db import db_best_effort
 
-    with db() as conn:
+    with db_best_effort() as conn:
         rows = conn.execute(
             "SELECT provider, cooldown_until FROM provider_cooldown WHERE cooldown_until > now()"
         ).fetchall()
@@ -45,9 +45,9 @@ def trip(provider: str, cooldown_seconds: int, reason: str = "") -> str | None:
     if not _enabled():
         return None
     until = datetime.now(timezone.utc) + timedelta(seconds=max(1, cooldown_seconds))
-    from .db import db
+    from .db import db_best_effort
 
-    with db() as conn:
+    with db_best_effort() as conn:
         conn.execute(
             "INSERT INTO provider_cooldown (provider, cooldown_until, tripped_at, reason) "
             "VALUES (%s, %s, now(), %s) "

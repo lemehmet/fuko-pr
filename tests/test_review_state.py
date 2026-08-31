@@ -54,7 +54,7 @@ def pg(monkeypatch):
         conn = _FakeConn(rows, rowcount)
 
         @contextlib.contextmanager
-        def fake_db():
+        def fake_db(*_a, **_k):
             yield conn
 
         monkeypatch.setattr(sidecar.db, "db", fake_db)
@@ -146,7 +146,7 @@ def test_a_store_failure_never_reaches_the_review(pg, monkeypatch, capsys):
     """State must never fail a review: a raising store degrades to the no-op value."""
 
     @contextlib.contextmanager
-    def exploding_db():
+    def exploding_db(*_a, **_k):
         raise RuntimeError("connection refused")
         yield  # pragma: no cover
 
