@@ -540,3 +540,117 @@ def test_search_is_case_insensitive_beyond_ascii(store):
     hits, total = store.list_learnings(repo="o/r", q="äpfel")
     assert total == 1 and "ÄPFEL" in hits[0]["text"]
     assert store.list_learnings(repo="o/r", q="ÄPFEL")[1] == 1
+
+
+def test_digests_are_dark_until_retrieval_is_enabled(store, monkeypatch):
+    """A populated digest reaches no review until the deployment opts in (#158)."""
+    store.ingest(
+        "o/r",
+        [
+            IngestItem(
+                text="auth login flow notes", source="remember", file_globs=["src/auth/a.rs"]
+            ),
+            IngestItem(
+                text="Structural index of src/auth/a.rs -- auth",
+                source="digest",
+                file_globs=["src/auth/a.rs"],
+                topic="file-index:src/auth/a.rs@abc123abc123",
+            ),
+        ],
+    )
+
+    dark = store.query("o/r", ["src/auth/a.rs"], query_text="auth")
+    assert {r["source"] for r in dark} == {"remember"}
+
+    monkeypatch.setattr(ss.settings, "digest_retrieval", True)
+    lit = store.query("o/r", ["src/auth/a.rs"], query_text="auth")
+    assert {r["source"] for r in lit} == {"remember", "digest"}
+
+
+def test_a_dark_digest_does_not_displace_a_learning_from_the_candidate_window(store, monkeypatch):
+    """Filtering digests after the KNN must not cost a real learning its slot.
+
+    ``vec_learnings`` has no ``source`` column, so the exclusion can only happen
+    post-KNN; the window is widened by the digest count to compensate. With a
+    candidate window of one and a digest scoring at least as well, the un-widened
+    query returned nothing at all.
+    """
+    monkeypatch.setattr(ss.settings, "candidate_k", 1)
+    monkeypatch.setattr(ss.settings, "digest_retrieval", False)
+    store.ingest(
+        "o/r",
+        [
+            IngestItem(text="auth digest index", source="digest", file_globs=["src/auth/a.rs"]),
+            IngestItem(text="db convention", source="remember", file_globs=["src/auth/a.rs"]),
+        ],
+    )
+
+    dark = store.query("o/r", ["src/auth/a.rs"], query_text="auth")
+    assert [r["source"] for r in dark] == ["remember"]
+
+
+def test_digest_survives_a_source_round_trip(store):
+    store.ingest(
+        "o/r",
+        [IngestItem(text="auth index", source="digest", file_globs=["src/auth/a.rs"])],
+    )
+    rows, total = store.list_learnings(repo="o/r", source="digest")
+    assert total == 1 and rows[0]["source"] == "digest"
+
+
+def _spy_on_hydration(monkeypatch) -> list[int]:
+    """Record the bind-parameter count of every `lid IN (...)` hydration query."""
+    widths: list[int] = []
+    real_read = ss.SqliteVecStore._read
+
+    class _Watched:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, params=()):
+            if "FROM learnings WHERE lid IN" in sql:
+                widths.append(len(params))
+            return self._conn.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    monkeypatch.setattr(
+        ss.SqliteVecStore, "_read", lambda self, fn: real_read(self, lambda c: fn(_Watched(c)))
+    )
+    return widths
+
+
+def test_query_batches_its_row_fetch_over_the_sqlite_var_limit(store, monkeypatch):
+    """The KNN window is no longer capped at candidate_k, so the IN list must batch.
+
+    Dark-mode widening adds the repo's whole digest backlog to `k`, and one
+    placeholder per returned row would eventually cross SQLite's host-parameter
+    limit — at which point every query for the repo raises and the runner
+    swallows it into empty knowledge, losing the ordinary learnings too.
+
+    The result alone cannot show this: 20 ids fit in one `IN` list, and reaching
+    a real SQLite build's 32766-parameter limit is not a unit test. So the
+    hydration queries are observed directly, and the assertion is on their
+    parameter counts rather than on the rows they return.
+    """
+    monkeypatch.setattr(ss, "_VAR_BATCH", 3)
+    monkeypatch.setattr(ss.settings, "digest_retrieval", False)
+    monkeypatch.setattr(ss.settings, "top_k", 50)
+    store.ingest(
+        "o/r",
+        [IngestItem(text=f"auth learning {i}", source="remember") for i in range(10)]
+        + [
+            IngestItem(text=f"auth index {i}", source="digest", file_globs=["src/auth/a.rs"])
+            for i in range(10)
+        ],
+    )
+    widths = _spy_on_hydration(monkeypatch)
+
+    hits = store.query("o/r", ["src/auth/a.rs"], query_text="auth")
+
+    assert len(hits) == 10
+    assert {r["source"] for r in hits} == {"remember"}
+    # One query per batch, and none wider than the batch plus the `now` bind.
+    assert len(widths) == 7
+    assert max(widths) <= ss._VAR_BATCH + 1

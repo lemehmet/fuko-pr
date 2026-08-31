@@ -139,7 +139,7 @@ the trade-offs.
 
 ## The knowledge base
 
-Learnings come from three sources and live in your store:
+Learnings come from four sources and live in your store:
 
 - **`/remember <text>`** on a PR comment — stores a repo learning. Add a trailing
   `paths: src/**/*.py` line to scope it to files. (`workflows/ingest-comment.yml`)
@@ -149,6 +149,24 @@ Learnings come from three sources and live in your store:
   the merge settles the thread, and a decline is typically left unresolved while
   a fix resolves it. (`workflows/sweep-threads.yml`)
 - **Docs / ADRs** — `fuko ingest-docs <globs> --repo owner/repo`.
+- **File structure indexes** — `fuko digest <paths> --repo owner/repo`, run in a
+  checkout. For every file at or above `--min-bytes` (64 KB by default) it stores
+  a map of what the file declares and at which lines, scoped to that file's own
+  path and keyed on the hash of the blob it describes, so an edit supersedes its
+  own index. The point is that a reviewer facing a 400 KB source file can read
+  the two hundred lines it needs instead of the whole thing. Paths are stored
+  relative to the working directory and anything outside it is skipped with a
+  warning — retrieval matches these against the repository-relative paths a pull
+  request reports, so an index keyed any other way could never be found.
+
+  The index is extracted mechanically (Python via `ast`, everything else via a
+  declaration scan) rather than written by a model, and it carries identifiers
+  and line numbers only — no prose, no doc comments. That is deliberate: an
+  index that cannot express an opinion cannot smuggle in "this file is fine",
+  and it shares nothing across reviewers that the source file does not already.
+
+  **Retrieval is off by default.** Indexes are stored but invisible to reviews
+  until `FUKO_DIGEST_RETRIEVAL=1` is set on the deployment that serves them.
 
 On each review, `fuko review` retrieves the most relevant learnings (semantic
 top-N by cosine distance plus any file-scoped ones matching the changed paths) and

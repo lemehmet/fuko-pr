@@ -23,5 +23,13 @@ class Settings(BaseSettings):
     candidate_k: int = 50
     ingest_max_new: int = 10
 
+    # File digests (#158) ship dark. Population is already opt-in -- nothing
+    # writes a digest until someone runs `fuko digest` -- but the knowledge base
+    # is shared across repositories and seats, so population alone is the wrong
+    # off-switch: one ingest would change what every gating seat reads. Gating
+    # retrieval instead means a populated store still reaches nobody until a
+    # deployment turns it on, which is what #159's trial seat is for.
+    digest_retrieval: bool = False
+
 
 settings = Settings()

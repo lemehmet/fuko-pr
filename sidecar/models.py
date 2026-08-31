@@ -11,12 +11,20 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-SOURCES: tuple[str, ...] = ("remember", "review_thread", "docs")
+SOURCES: tuple[str, ...] = ("remember", "review_thread", "docs", "digest")
 """Where a learning came from.
 
-The same three values are pinned by the ``learnings_source_check`` CHECK
-constraint (``migrations/005_review_thread_source.sql``); changing one means
-changing both.
+The same four values are pinned by the ``learnings_source_check`` CHECK
+constraint (``migrations/011_digest_source.sql``); changing one means changing
+both.
+
+Where the two backends are actually checked differs, and it is worth being exact
+about: :func:`check_source` guards the *edit* paths (``update_learning`` and the
+``fuko kb edit`` / console forms that reach it) on both backends, while on the
+*ingest* path only Postgres validates, via that CHECK constraint -- sqlite-vec
+has neither the constraint nor a call to :func:`check_source` there. So this
+tuple is the vocabulary, not an enforcement point that every write passes
+through.
 """
 
 
