@@ -430,10 +430,12 @@ def next_round(repo: str, pr: int, seat: str) -> int:
 
 
 @_best_effort(lambda: False)
-def transition(finding_id: str, status: str, reason: str = "") -> bool:
-    """Move one ``open`` finding to ``status``; return whether a row changed.
+def transition(
+    repo: str, pr: int, seat: str, finding_id: str, status: str, reason: str = ""
+) -> bool:
+    """Move one of this seat's ``open`` findings to ``status``; return whether a row changed.
 
-    Guarded three ways, all in the fail-safe direction -- a finding that does not
+    Guarded four ways, all in the fail-safe direction -- a finding that does not
     transition stays open, which is noise, where one that transitions wrongly is
     the silent loss this ledger exists to prevent:
 
@@ -442,7 +444,19 @@ def transition(finding_id: str, status: str, reason: str = "") -> bool:
     * a ``finding_id`` that is not a UUID changes nothing and costs no
       round-trip;
     * the UPDATE matches ``status = 'open'`` only, so an already-settled row
-      cannot be re-settled by a later round replaying a stale id.
+      cannot be re-settled by a later round replaying a stale id;
+    * the UPDATE matches ``(repo, pr, seat)`` as well as the id, so the row has
+      to be one of THIS seat's.
+
+    That last guard is why the lane travels with the id rather than the id
+    travelling alone. In-process it is redundant -- every id a caller holds came
+    out of :func:`open_findings` for the same ``(repo, pr, seat)`` -- but the
+    ledger now reaches the store over HTTP as well (#171), and there the
+    provenance of an id is a claim in a request body rather than a fact about
+    the call stack. One seat closing another's finding is precisely the
+    cross-seat coupling the per-seat ledger exists to prevent (#160), so the
+    constraint is stated in SQL, where it holds for both transports and for any
+    later one.
 
     Whether a given verdict is ALLOWED to close a row (a ``rejected`` with no
     reason must not, per #156) is the caller's policy, not this function's.
@@ -454,8 +468,8 @@ def transition(finding_id: str, status: str, reason: str = "") -> bool:
     with db() as conn:
         cur = conn.execute(
             "UPDATE review_findings SET status = %s, status_reason = %s, updated_at = now() "
-            "WHERE id = %s AND status = 'open'",
-            (status, _clip(reason), finding_id),
+            "WHERE id = %s AND status = 'open' AND repo = %s AND pr = %s AND seat = %s",
+            (status, _clip(reason), finding_id, repo, pr, seat),
         )
         return bool(cur.rowcount)
 
@@ -514,8 +528,8 @@ def settled_findings(
 
 
 @_best_effort(lambda: False)
-def reopen(finding_id: str, reason: str) -> bool:
-    """Return one model-closed finding to ``open``; return whether a row changed.
+def reopen(repo: str, pr: int, seat: str, finding_id: str, reason: str) -> bool:
+    """Return one of this seat's model-closed findings to ``open``; return whether a row changed.
 
     The inverse of :func:`transition`, and deliberately the narrower of the two:
 
@@ -525,6 +539,10 @@ def reopen(finding_id: str, reason: str) -> bool:
       that re-reported it);
     * a ``finding_id`` that is not a UUID changes nothing and costs no
       round-trip, as in :func:`transition`;
+    * the UPDATE matches ``(repo, pr, seat)`` as well as the id, for the reason
+      :func:`transition` states: over the HTTP seam (#171) an id's lane is a
+      claim in a request body, and re-raising another seat's row is the same
+      cross-seat coupling as closing one;
     * ``reopened`` is incremented rather than set, so the row carries how many
       times a round settled it and a later round contradicted that -- the audit
       trail a terminal closure could not leave (#177).
@@ -546,19 +564,25 @@ def reopen(finding_id: str, reason: str) -> bool:
         cur = conn.execute(
             "UPDATE review_findings SET status = 'open', status_reason = %s, "
             "reopened = reopened + 1, updated_at = now() "
-            "WHERE id = %s AND status = ANY(%s)",
-            (_clip(reason), finding_id, sorted(REOPENABLE_STATUSES)),
+            "WHERE id = %s AND status = ANY(%s) AND repo = %s AND pr = %s AND seat = %s",
+            (_clip(reason), finding_id, sorted(REOPENABLE_STATUSES), repo, pr, seat),
         )
         return bool(cur.rowcount)
 
 
 @_best_effort(lambda: 0)
-def touch_findings(finding_ids: Sequence[str]) -> int:
-    """Refresh ``updated_at`` on findings a round re-asserted; return the count.
+def touch_findings(repo: str, pr: int, seat: str, finding_ids: Sequence[str]) -> int:
+    """Refresh ``updated_at`` on this seat's re-asserted findings; return the count.
 
     The ``still_open`` verdict's only effect: the row keeps its state, but the
     ledger records that a round looked at it against the current head, so a
     later reader can tell a re-verified claim from one nobody has revisited.
+
+    Scoped to ``(repo, pr, seat)`` like :func:`transition` and :func:`reopen`.
+    A touch is the mildest of the three -- it changes no state, only a timestamp
+    -- but the timestamp is what the retention window and the open read's
+    ordering are measured from, so a cross-lane touch would still let one seat
+    reach into another's ledger.
     """
     _not_a_bare_string(finding_ids, "finding_ids")
     ids = [i for i in finding_ids if _is_uuid(i)]
@@ -568,8 +592,9 @@ def touch_findings(finding_ids: Sequence[str]) -> int:
 
     with db() as conn:
         cur = conn.execute(
-            "UPDATE review_findings SET updated_at = now() WHERE id = ANY(%s) AND status = 'open'",
-            (ids,),
+            "UPDATE review_findings SET updated_at = now() "
+            "WHERE id = ANY(%s) AND status = 'open' AND repo = %s AND pr = %s AND seat = %s",
+            (ids, repo, pr, seat),
         )
         return cur.rowcount or 0
 

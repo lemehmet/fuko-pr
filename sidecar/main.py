@@ -7,6 +7,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 
 from . import circuit_breaker
 from . import models
+from . import review_state
+from . import review_state_client as rs
 from . import reviewer_health
 from . import run_metrics
 from . import web
@@ -286,3 +288,119 @@ def rh_observe_endpoint(req: models.ObserveHealthRequest) -> dict:
     for obs in req.observations:
         reviewer_health.observe(req.repo, obs.reviewer, obs.state, req.pr, obs.detail or "")
     return {"recorded": len(req.observations), "persisted": bool(settings.database_url)}
+
+
+# --- The per-seat review ledgers, for runners with no connection string (#171).
+#
+# One endpoint per :mod:`sidecar.review_state` primitive, each handler a direct
+# call to it, so the HTTP path and the local path share one semantics rather
+# than resembling each other. Why not the two composite endpoints #171 sketches,
+# what stays behind on the runner, and how a dead sidecar is bounded, are all in
+# :mod:`sidecar.review_state_client`.
+#
+# WHAT THIS BOUNDARY DOES AND DOES NOT CHECK. The store-side guards travel with
+# the primitives and so hold for both transports: the ``FINDING_STATUSES``
+# vocabulary, ``REOPENABLE_STATUSES`` (``stale`` is fuko's own closure and no
+# request can reverse it), the UUID check, ``_clip``'s text bound, the read caps
+# and the retention window -- plus the ``(repo, pr, seat)`` scope now matched in
+# SQL, which is what keeps one seat from settling another's row (#160).
+#
+# The prompt-side guards deliberately stay on the runner, because the sidecar
+# cannot evaluate them: ``p1..pN`` are minted per round by ``render_prior_state``
+# and mean nothing here; ``PriorState.accepted_status`` drops a verdict naming an
+# id THIS ROUND was not handed, which is a fact about the prompt the server never
+# sees; ``_one_line``/``_indented`` bound what a stored row may do to a later
+# prompt and belong at render time for the same reason. A caller holding
+# ``FUKO_TOKEN`` can therefore write a ledger row that no round would have
+# produced -- but that caller is the runner, model output never holds the token,
+# and the same token already authorizes ``/forget`` with ``all=true``. The
+# transport widens what a LEAKED token reaches, not what a reviewed pull request
+# can reach.
+
+
+@app.post("/rs/findings", response_model=rs.LedgerCountResponse, dependencies=[Depends(_auth)])
+def rs_record_findings_endpoint(req: rs.RecordFindingsRequest) -> dict:
+    """Record one round's newly-opened findings for a seat."""
+    return {
+        "count": review_state.record_findings(
+            req.repo, req.pr, req.seat, req.round, req.head_sha, req.findings
+        )
+    }
+
+
+@app.get("/rs/findings", response_model=rs.OpenFindingsResponse, dependencies=[Depends(_auth)])
+def rs_open_findings_endpoint(repo: str, pr: int, seat: str) -> dict:
+    """Return a seat's still-open findings, and how many the read cap cut."""
+    ledger = review_state.open_findings(repo, pr, seat)
+    return {"rows": list(ledger.rows), "truncated": ledger.truncated}
+
+
+@app.get("/rs/round", response_model=rs.NextRoundResponse, dependencies=[Depends(_auth)])
+def rs_next_round_endpoint(repo: str, pr: int, seat: str) -> dict:
+    """Return the round number a seat's next round should record under."""
+    return {"round": review_state.next_round(repo, pr, seat)}
+
+
+@app.get("/rs/settled", response_model=rs.SettledFindingsResponse, dependencies=[Depends(_auth)])
+def rs_settled_findings_endpoint(repo: str, pr: int, seat: str) -> dict:
+    """Return a seat's model-closed findings, the projection a re-raise needs."""
+    return {"rows": list(review_state.settled_findings(repo, pr, seat))}
+
+
+@app.post(
+    "/rs/findings/transition",
+    response_model=rs.LedgerChangedResponse,
+    dependencies=[Depends(_auth)],
+)
+def rs_transition_endpoint(req: rs.TransitionRequest) -> dict:
+    """Apply one verdict to one of a seat's open findings."""
+    return {
+        "changed": review_state.transition(
+            req.repo, req.pr, req.seat, req.finding_id, req.status, req.reason
+        )
+    }
+
+
+@app.post(
+    "/rs/findings/reopen", response_model=rs.LedgerChangedResponse, dependencies=[Depends(_auth)]
+)
+def rs_reopen_endpoint(req: rs.ReopenRequest) -> dict:
+    """Re-raise one of a seat's findings that an earlier verdict closed."""
+    return {"changed": review_state.reopen(req.repo, req.pr, req.seat, req.finding_id, req.reason)}
+
+
+@app.post(
+    "/rs/findings/touch", response_model=rs.LedgerCountResponse, dependencies=[Depends(_auth)]
+)
+def rs_touch_findings_endpoint(req: rs.TouchRequest) -> dict:
+    """Refresh ``updated_at`` on the findings a seat's round re-asserted."""
+    return {"count": review_state.touch_findings(req.repo, req.pr, req.seat, req.finding_ids)}
+
+
+@app.post("/rs/coverage", response_model=rs.LedgerCountResponse, dependencies=[Depends(_auth)])
+def rs_record_coverage_endpoint(req: rs.RecordCoverageRequest) -> dict:
+    """Record one round's examined regions for a seat."""
+    return {
+        "count": review_state.record_coverage(
+            req.repo, req.pr, req.seat, req.round, req.head_sha, req.regions
+        )
+    }
+
+
+@app.get("/rs/coverage", response_model=rs.LiveCoverageResponse, dependencies=[Depends(_auth)])
+def rs_live_coverage_endpoint(repo: str, pr: int, seat: str) -> dict:
+    """Return a seat's unexpired coverage entries."""
+    return {"rows": list(review_state.live_coverage(repo, pr, seat))}
+
+
+@app.post(
+    "/rs/coverage/expire", response_model=rs.LedgerCountResponse, dependencies=[Depends(_auth)]
+)
+def rs_expire_coverage_endpoint(req: rs.ExpireCoverageRequest) -> dict:
+    """Expire a seat's coverage for the named files.
+
+    ``files`` is required by the request model, so this endpoint can never
+    perform the wholesale expiry that :func:`sidecar.review_state.expire_coverage`
+    reads a ``None`` as -- see :class:`sidecar.review_state_client.ExpireCoverageRequest`.
+    """
+    return {"count": review_state.expire_coverage(req.repo, req.pr, req.seat, req.files)}

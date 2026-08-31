@@ -624,7 +624,7 @@ def _ledger(monkeypatch, open_rows=(), settled=()):
     monkeypatch.setattr(
         review_state,
         "reopen",
-        lambda fid, reason: bool(written["reopened"].append((fid, reason))) or True,
+        lambda repo, pr, seat, fid, reason: bool(written["reopened"].append((fid, reason))) or True,
     )
     monkeypatch.setattr(
         review_state,
@@ -645,12 +645,14 @@ def _ledger(monkeypatch, open_rows=(), settled=()):
     monkeypatch.setattr(
         review_state,
         "transition",
-        lambda fid, status, reason="": (
+        lambda repo, pr, seat, fid, status, reason="": (
             bool(written["transitions"].append((fid, status, reason))) or True
         ),
     )
     monkeypatch.setattr(
-        review_state, "touch_findings", lambda ids: written["touched"].extend(ids) or len(ids)
+        review_state,
+        "touch_findings",
+        lambda repo, pr, seat, ids: written["touched"].extend(ids) or len(ids),
     )
     return written
 

@@ -110,16 +110,20 @@ class _Store:
         rounds += [c["round"] for c in self.coverage if c["key"] == (repo, pr, seat)]
         return max(rounds, default=0) + 1
 
-    def transition(self, finding_id, status, reason=""):
+    def transition(self, repo, pr, seat, finding_id, status, reason=""):
         row = self.rows.get(finding_id)
-        if row is None or row["status"] != "open":
+        # The lane is matched, not merely accepted: the real UPDATE now has
+        # `AND repo = %s AND pr = %s AND seat = %s` in its WHERE (#171), and a
+        # fake that ignored it could not fail a cross-seat write.
+        if row is None or row["key"] != (repo, pr, seat) or row["status"] != "open":
             return False
         row["status"], row["reason"] = status, reason
         return True
 
-    def touch_findings(self, finding_ids):
-        self.touched.extend(finding_ids)
-        return len(finding_ids)
+    def touch_findings(self, repo, pr, seat, finding_ids):
+        mine = [i for i in finding_ids if self.rows.get(i, {}).get("key") == (repo, pr, seat)]
+        self.touched.extend(mine)
+        return len(mine)
 
     def settled_findings(self, repo, pr, seat, limit=review_state.MAX_SETTLED_FINDINGS):
         rows = [
@@ -138,9 +142,13 @@ class _Store:
         # insertion order stands in for closure order in this fake.
         return tuple(reversed(rows))[:limit]
 
-    def reopen(self, finding_id, reason):
+    def reopen(self, repo, pr, seat, finding_id, reason):
         row = self.rows.get(finding_id)
-        if row is None or row["status"] not in review_state.REOPENABLE_STATUSES:
+        if (
+            row is None
+            or row["key"] != (repo, pr, seat)
+            or row["status"] not in review_state.REOPENABLE_STATUSES
+        ):
             return False
         row["status"], row["reason"] = "open", reason
         row["reopened"] += 1
@@ -428,7 +436,7 @@ def test_a_stale_row_is_not_re_raised(store):
     )
     carried = carry_in(REPO, PR, SEAT)
     row_id = carried.rows["p1"]
-    review_state.transition(row_id, "stale", "file absent from the tree at head2")
+    review_state.transition(REPO, PR, SEAT, row_id, "stale", "file absent from the tree at head2")
 
     outcome = settle(
         carry_in(REPO, PR, SEAT),
