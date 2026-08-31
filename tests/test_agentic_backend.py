@@ -787,6 +787,49 @@ def test_invoke_carries_the_seats_open_findings_into_the_prompt(monkeypatch):
     assert "unchecked None" in captured["prompt"]
 
 
+def test_invoke_runs_stateless_when_the_env_switches_the_findings_ledger_off(monkeypatch):
+    """The env-to-flag join, end to end: the piece each side's own test cannot see.
+
+    `build_env`'s polarity and the ledger's flag-off behaviour are covered
+    separately; a regression in the read here (`== "1"`, a wrong constant, or the
+    flag reaching only one of `carry_in`/`settle`) would leave both arms stateful
+    while every one of those tests still passed -- the exact failure #159 exists
+    to prevent.
+    """
+    written = _ledger(monkeypatch, [_stored()])
+    _, captured = _invoke(
+        monkeypatch,
+        AgenticBackend(),
+        HarnessResult(0, REVIEW_JSON),
+        env={
+            "FUKO_AGENTIC_MODEL": "claude-x",
+            "FUKO_SEAT": "dorian",
+            "FUKO_AGENTIC_FINDINGS_LEDGER": "0",
+        },
+    )
+
+    assert "<prior-review-state>" not in captured["prompt"]
+    assert written == {"recorded": [], "transitions": [], "touched": [], "reopened": []}
+
+
+def test_invoke_stays_stateful_for_any_env_value_that_is_not_zero(monkeypatch):
+    """Default-on polarity: a typo must not silently convert a seat to stateless."""
+    written = _ledger(monkeypatch, [_stored()])
+    _, captured = _invoke(
+        monkeypatch,
+        AgenticBackend(),
+        HarnessResult(0, REVIEW_JSON),
+        env={
+            "FUKO_AGENTIC_MODEL": "claude-x",
+            "FUKO_SEAT": "dorian",
+            "FUKO_AGENTIC_FINDINGS_LEDGER": "false",
+        },
+    )
+
+    assert "<prior-review-state>" in captured["prompt"]
+    assert written["recorded"]
+
+
 def test_invoke_records_only_the_findings_the_round_published(monkeypatch):
     """The withheld low-confidence finding must not re-enter via the ledger."""
     written = _ledger(monkeypatch)

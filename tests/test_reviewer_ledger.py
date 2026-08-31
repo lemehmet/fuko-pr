@@ -1381,6 +1381,9 @@ def test_a_flag_off_round_applies_no_verdict_even_holding_a_carried_state(monkey
         seat=SEAT,
         head_sha="head2",
         prior_status=[PriorFindingStatus(id=minted, status="fixed", reason="gone")],
+        # Re-published too, so the matching pass would have a carried claim to
+        # hit: a suppressed WRITE alone still reports the dedup it did not make.
+        findings=[_finding()],
         findings_ledger=False,
     )
 

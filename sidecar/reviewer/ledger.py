@@ -779,20 +779,22 @@ def settle(
     seat may run either tier alone, and #159's control runs neither while its
     treatment runs both.
 
-    The verdict pass is gated on the flag rather than on the emptiness a flag-off
+    Both Tier 1 passes -- the verdicts and the published-findings matching -- sit
+    inside the gate rather than relying on the emptiness a flag-off
     :func:`carry_in` produces, even though the in-flow pairing makes the two
-    equivalent. "Off writes nothing" should hold on this call's own arguments, so
+    equivalent. "Off does nothing" should hold on this call's own arguments, so
     that a caller which hands a flag-off round a carried state built while the
     flag was on -- a mismatched pair no runtime path builds, but one this public
-    signature permits -- still closes no rows. Every other write on this path is
-    already gated that way; the verdict loop was the one place where the property
-    rested on the caller instead (CodeRabbit, #203).
+    signature permits -- closes no rows and reports none closed. Suppressing only
+    the writes left the matching pass filling ``touch`` and ``deduped``, so the
+    returned :class:`Settlement` described a reassertion and a dedup that never
+    reached the store (CodeRabbit, #203). A receipt for a round that did not
+    happen is the same failure as the write, one layer out.
     """
     touch: list[str] = []
     closed = 0
     settled: set[str] = set()
-    verdicts = carried.state.accepted_status(prior_status) if findings_ledger else ()
-    for entry in verdicts:
+    for entry in carried.state.accepted_status(prior_status) if findings_ledger else ():
         row_id = carried.rows.get(entry.id)
         if row_id is None:
             continue
@@ -802,46 +804,54 @@ def settle(
             closed += int(ledger_store.transition(repo, pr, seat, row_id, entry.status, reason))
         else:
             touch.append(row_id)
-    # Rows this round leaves open, keyed by claim. A verdict that MEANT to close
-    # is excluded even if the write failed: the row is then still open, so the
-    # worst case is recording the duplicate anyway -- the noise direction.
-    still_open = {
-        claim_anchor(prior.file, prior.title): carried.rows[minted]
-        for minted, prior in carried.state.ids.items()
-        if minted in carried.rows and minted not in settled
-    }
-    fresh: list[AgenticFinding] = []
     deduped: list[str] = []
     reopened: list[str] = []
-    # Only read the closed ledger when there is something that could re-raise it.
-    candidates = _reopen_candidates(repo, pr, seat) if findings and findings_ledger else {}
-    for finding in findings:
-        anchor = claim_anchor(finding.file, finding.title)
-        row_id = still_open.get(anchor)
-        if row_id is not None:
-            deduped.append(f"{finding.file}: {finding.title}")
-            if row_id not in touch:
-                touch.append(row_id)
-            continue
-        # `pop`, so two published findings on one claim re-raise ONE row -- and
-        # the re-raised row joins `still_open`, so the SECOND of them takes the
-        # dedup path above rather than being recorded fresh. Either half alone
-        # still leaves two open rows for one claim, which is the compounding the
-        # dedup exists to stop, arriving by the new door: a reopened row is an
-        # open row, and the rest of this round has to see it as one.
-        closed_row = candidates.pop(anchor, None)
-        if closed_row is not None and ledger_store.reopen(
-            repo, pr, seat, closed_row.id, _reopen_reason(closed_row, carried.round)
-        ):
-            reopened.append(f"{finding.file}: {finding.title}")
-            still_open[anchor] = closed_row.id
-            continue
-        fresh.append(finding)
+    recorded = 0
+    # The whole Tier 1 matching pass, not just its writes. Matching a published
+    # finding against a carried claim appends to `touch` and `deduped`, so
+    # leaving the loop to run under a suppressed write made the Settlement
+    # REPORT a reassertion and a dedup that never reached the store -- a receipt
+    # describing a round that did not happen (CodeRabbit, #203). Everything the
+    # tier derives is now inside the gate, so "off" is one branch rather than a
+    # write-site audit.
     if findings_ledger:
+        # Rows this round leaves open, keyed by claim. A verdict that MEANT to
+        # close is excluded even if the write failed: the row is then still open,
+        # so the worst case is recording the duplicate anyway -- the noise
+        # direction.
+        still_open = {
+            claim_anchor(prior.file, prior.title): carried.rows[minted]
+            for minted, prior in carried.state.ids.items()
+            if minted in carried.rows and minted not in settled
+        }
+        fresh: list[AgenticFinding] = []
+        # Only read the closed ledger when there is something that could re-raise it.
+        candidates = _reopen_candidates(repo, pr, seat) if findings else {}
+        for finding in findings:
+            anchor = claim_anchor(finding.file, finding.title)
+            row_id = still_open.get(anchor)
+            if row_id is not None:
+                deduped.append(f"{finding.file}: {finding.title}")
+                if row_id not in touch:
+                    touch.append(row_id)
+                continue
+            # `pop`, so two published findings on one claim re-raise ONE row --
+            # and the re-raised row joins `still_open`, so the SECOND of them
+            # takes the dedup path above rather than being recorded fresh. Either
+            # half alone still leaves two open rows for one claim, which is the
+            # compounding the dedup exists to stop, arriving by the new door: a
+            # reopened row is an open row, and the rest of this round has to see
+            # it as one.
+            closed_row = candidates.pop(anchor, None)
+            if closed_row is not None and ledger_store.reopen(
+                repo, pr, seat, closed_row.id, _reopen_reason(closed_row, carried.round)
+            ):
+                reopened.append(f"{finding.file}: {finding.title}")
+                still_open[anchor] = closed_row.id
+                continue
+            fresh.append(finding)
         ledger_store.touch_findings(repo, pr, seat, touch)
         recorded = ledger_store.record_findings(repo, pr, seat, carried.round, head_sha, fresh)
-    else:
-        recorded = 0
     coverage = (
         ledger_store.record_coverage(repo, pr, seat, carried.round, head_sha, _keyed(examined))
         if coverage_ledger

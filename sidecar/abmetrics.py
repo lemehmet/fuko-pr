@@ -22,19 +22,23 @@ Two consequences follow, and both are deliberate:
   coverage gain with no quality regression, never on a token saving alone -- and
   a module that scored the arms would be the obvious place to quietly soften it.
 
-Every function is pure: it takes claims and returns numbers. Fetching them from
-GitHub, mapping bot logins onto arms, and reading token cost out of
-``review_runs`` all live in the script, because those are the parts that need
-credentials and the parts most likely to change.
+Every function here is pure -- :func:`collect_claims` takes raw comment and
+review dicts and returns claims, the rest take claims and return numbers. What
+lives in the script is only what needs credentials or is likely to change:
+fetching those dicts from GitHub, naming the arms, reading token cost out of
+``review_runs``, and formatting. The join in :func:`collect_claims` is on this
+side of that line deliberately -- its failure mode is a claim that silently never
+arrives, so it has to be exercisable without a network.
 """
 
 from __future__ import annotations
 
 import re
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
+from .normalizers import collect_review_signals, collect_signals
 from .reviewer.ledger import claim_anchor
 
 _LABEL_RE = re.compile(r"^\s*🤖\s*`[^`]*`\s*$")
@@ -91,9 +95,11 @@ class Claim:
     """One finding a seat published, reduced to what the metrics need.
 
     ``round_key`` groups claims into the unit two arms are compared WITHIN --
-    the head they reviewed, in practice the inline comment's ``commit_id``.
-    Agreement is only meaningful inside one: two seats naming the same problem on
-    two different heads did not agree, they were asked twice.
+    the head they reviewed, which for an inline comment is its
+    ``original_commit_id`` and NOT the ``commit_id`` GitHub rewrites when it
+    re-anchors an outdated thread (see :func:`collect_claims`). Agreement is only
+    meaningful inside one: two seats naming the same problem on two different
+    heads did not agree, they were asked twice.
     """
 
     arm: str
@@ -113,6 +119,92 @@ class Claim:
         is between claims derived the same way, which is what makes it sound.
         """
         return claim_anchor(self.file, self.title)
+
+
+def collect_claims(
+    comments: Sequence[dict],
+    reviews: Sequence[dict],
+    arms: Mapping[str, str],
+    pr_num: int,
+) -> tuple[list[Claim], set[tuple[str, str]], int]:
+    """Reduce one PR's raw receipts to claims, review receipts, and untitled drops.
+
+    Pure, so the join it performs is testable without credentials -- which is the
+    point of it living here rather than in the fetching script. Its failure mode
+    is a claim that silently never arrives, and a join that can only be exercised
+    against live GitHub is a join nothing regression-tests.
+
+    BOTH publication channels are read. Anchorable findings become inline
+    comments; everything else rides the review BODY -- ``overflow`` under
+    "Findings without a diff anchor", and, on a 422 anchoring failure, a whole
+    round demoted body-only. Reading only the first would drop precisely the
+    off-diff class a stateful reviewer is hypothesized to add, so the exclusion
+    would not be direction-neutral: it would bias the coverage metric toward the
+    null.
+
+    A signal reaches an arm only through the comment or review it came from: the
+    normalized signal carries no author, so it is rejoined by ``thread_url``.
+    A finding whose author is not one of the named arms is skipped.
+
+    **A round is the head the arm actually reviewed, so an inline comment is keyed
+    on ``original_commit_id``, not ``commit_id``.** GitHub re-anchors an outdated
+    review comment onto a newer head, rewriting ``commit_id`` while
+    ``original_commit_id`` keeps the commit the comment was created against.
+    Keying on the mutable field merges every earlier round forward into the
+    latest head -- collapsing distinct rounds, inflating the one-shot rate,
+    intersecting claims the arms made against DIFFERENT heads inside one
+    "shared round", and, worst for a tool whose charter is repeatability, giving
+    a different answer each time the same PR is rescored. Not hypothetical: 18 of
+    28 top-level comments on ``lemehmet/fuko-pr#197`` carry a rewritten
+    ``commit_id``. A review's own ``commit_id`` is written once at submission and
+    stays put, so receipts keep using it.
+
+    A review RECEIPT -- ``(arm, round_key)`` -- is emitted for every head a named
+    arm reviewed, whether or not it published anything there, which is what lets
+    :func:`pair_metrics` score a one-versus-zero round rather than dropping the
+    most disagreeing round in the window. Each claim's own key is unioned in too,
+    so a receipt whose commit differs from its comments' can never exclude a
+    claim that was actually published.
+
+    A claim with no usable title is DROPPED and counted, never anchored on the
+    empty string -- see :func:`claim_title`.
+    """
+    login_to_arm = {login: arm for arm, login in arms.items()}
+    by_thread: dict[str, tuple[str, str]] = {
+        c.get("html_url"): (
+            (c.get("user") or {}).get("login", ""),
+            c.get("original_commit_id") or c.get("commit_id") or "",
+        )
+        for c in comments
+    }
+    # Review bodies join the same way: `collect_review_signals` stamps each
+    # marker's `thread_url` with the REVIEW's html_url when it carries none.
+    by_thread.update(
+        {
+            r.get("html_url"): ((r.get("user") or {}).get("login", ""), r.get("commit_id") or "")
+            for r in reviews
+        }
+    )
+    receipts: set[tuple[str, str]] = set()
+    for review in reviews:
+        arm = login_to_arm.get((review.get("user") or {}).get("login", ""))
+        if arm is not None:
+            receipts.add((arm, f"{pr_num}@{review.get('commit_id') or ''}"))
+    claims: list[Claim] = []
+    untitled = 0
+    for signal in collect_signals(list(comments)) + collect_review_signals(list(reviews)):
+        login, commit = by_thread.get(signal.thread_url or "", ("", ""))
+        arm = login_to_arm.get(login)
+        if arm is None or not signal.file:
+            continue
+        title = claim_title(signal.title, signal.body)
+        if not title:
+            untitled += 1
+            continue
+        claim = Claim(arm=arm, round_key=f"{pr_num}@{commit}", file=signal.file, title=title)
+        receipts.add((claim.arm, claim.round_key))
+        claims.append(claim)
+    return claims, receipts, untitled
 
 
 @dataclass(frozen=True)
@@ -146,11 +238,21 @@ class ArmMetrics:
 class PairMetrics:
     """What two arms did relative to each other, over the rounds both reviewed.
 
-    ``rounds`` counts only the heads where BOTH arms published at least one
-    claim. A round one arm sat out (throttled, timed out, or genuinely found
-    nothing) carries no information about agreement, and folding it in as a zero
-    would report a fleet that disagreed when it was really a fleet that was half
-    absent -- the exact confound a receipts experiment has to keep out.
+    ``rounds`` counts the heads where BOTH arms left a review RECEIPT. The
+    confound to keep out is a round an arm sat out -- throttled, timed out, App
+    token unminted -- which folded in as a zero would report a fleet that
+    disagreed when it was really a fleet that was half absent. Membership was
+    first keyed on published claims for that reason, but that key cannot tell an
+    absent arm from a present one that found nothing, and it excludes the
+    one-versus-zero round: the maximum-disagreement case, dropped from a pooled
+    ratio, biases agreement UPWARD on the metric #159 ships on (CodeRabbit,
+    #203). A review receipt separates the two cases directly -- an arm that
+    reviewed a head and published nothing left one; an arm that never ran did
+    not -- so it is the honest key, and the confound stays out.
+
+    With no receipts supplied the claim-derived key stands in, which is the older
+    behaviour and still the only thing available to a caller holding claims
+    alone.
 
     ``coverage`` is the Chapman estimate: the union of what the two arms saw,
     over the pool their overlap implies exists. It inherits capture-recapture's
@@ -199,14 +301,27 @@ def _by_round(claims: Iterable[Claim]) -> dict[str, set[tuple[str, str]]]:
     return out
 
 
-def arm_metrics(arm: str, claims: Sequence[Claim]) -> ArmMetrics:
+def _receipt_rounds(arm: str, receipts: Sequence[tuple[str, str]]) -> set[str]:
+    """The round keys ``arm`` left a review receipt on."""
+    return {key for owner, key in receipts if owner == arm}
+
+
+def arm_metrics(
+    arm: str, claims: Sequence[Claim], receipts: Sequence[tuple[str, str]] = ()
+) -> ArmMetrics:
     """Score one arm's own claims.
 
     ``claims`` may hold other arms' rows; they are filtered here so a caller can
     pass the whole window without partitioning it first.
+
+    ``receipts`` are ``(arm, round_key)`` pairs for every head an arm reviewed,
+    including the heads it reviewed and published nothing on. Supplying them
+    makes ``rounds`` count rounds REVIEWED rather than rounds published on, which
+    is both the honest figure and the one :func:`pair_metrics` scores against;
+    without them the claim-derived count stands in.
     """
     mine = [c for c in claims if c.arm == arm]
-    rounds = {c.round_key for c in mine}
+    rounds = _receipt_rounds(arm, receipts) if receipts else {c.round_key for c in mine}
     seen: dict[tuple[str, str], set[str]] = {}
     for claim in mine:
         seen.setdefault(claim.anchor, set()).add(claim.round_key)
@@ -226,8 +341,17 @@ def arm_metrics(arm: str, claims: Sequence[Claim]) -> ArmMetrics:
     )
 
 
-def pair_metrics(claims: Sequence[Claim], a: str, b: str) -> PairMetrics:
+def pair_metrics(
+    claims: Sequence[Claim], a: str, b: str, receipts: Sequence[tuple[str, str]] = ()
+) -> PairMetrics:
     """Score arm ``a`` against arm ``b`` over the rounds both of them reviewed.
+
+    ``receipts`` are ``(arm, round_key)`` pairs for every head an arm reviewed.
+    They decide round membership: a head both arms reviewed is scored even if one
+    of them published nothing there, which is the round that carries the most
+    disagreement and the one a claim-derived key silently drops. Pass them
+    whenever they can be observed; without them membership falls back to the
+    heads both arms published on, and the reported agreement is an upper bound.
 
     Agreement is pooled rather than averaged per round: the intersections and
     unions are summed across shared rounds and divided once. A mean of per-round
@@ -240,13 +364,17 @@ def pair_metrics(claims: Sequence[Claim], a: str, b: str) -> PairMetrics:
         _by_round(c for c in claims if c.arm == a),
         _by_round(c for c in claims if c.arm == b),
     )
-    shared_rounds = sorted(set(left) & set(right))
+    if receipts:
+        shared_rounds = sorted(_receipt_rounds(a, receipts) & _receipt_rounds(b, receipts))
+    else:
+        shared_rounds = sorted(set(left) & set(right))
     n1 = n2 = shared = union = 0
     for key in shared_rounds:
-        n1 += len(left[key])
-        n2 += len(right[key])
-        shared += len(left[key] & right[key])
-        union += len(left[key] | right[key])
+        mine, theirs = left.get(key, set()), right.get(key, set())
+        n1 += len(mine)
+        n2 += len(theirs)
+        shared += len(mine & theirs)
+        union += len(mine | theirs)
     return PairMetrics(
         rounds=len(shared_rounds),
         a_claims=n1,

@@ -56,9 +56,8 @@ import subprocess
 import sys
 
 from sidecar import run_metrics, runner
-from sidecar.abmetrics import Claim, TOP_PATHS, arm_metrics, claim_title, pair_metrics
+from sidecar.abmetrics import Claim, TOP_PATHS, arm_metrics, collect_claims, pair_metrics
 from sidecar.backends.base import PRRef
-from sidecar.normalizers import collect_review_signals, collect_signals
 
 BASELINES = {
     "cross-arm agreement": "4.7%",
@@ -110,65 +109,23 @@ def _pairs(values: list[str], flag: str) -> dict[str, str]:
     return out
 
 
-def _claims(repo: str, pr_num: int, token: str, arms: dict[str, str]) -> tuple[list[Claim], int]:
-    """Return one PR's claims for the mapped arms, plus how many carried no title.
+def _claims(
+    repo: str, pr_num: int, token: str, arms: dict[str, str]
+) -> tuple[list[Claim], set[tuple[str, str]], int]:
+    """Fetch one PR's receipts through both channels and reduce them to claims.
 
-    BOTH publication channels are read. Anchorable findings become inline
-    comments; everything else rides the review BODY -- ``overflow`` under
-    "Findings without a diff anchor", and, on a 422 anchoring failure, a whole
-    round demoted body-only. Reading only the first would drop precisely the
-    off-diff class the stateful arm is hypothesized to add, so the exclusion
-    would not be direction-neutral: it would bias the coverage metric this
-    experiment ships on toward the null. Empirically that channel is still empty
-    on this repo -- 0 body-carried signals across 78 reviews on #192, #197 and
-    #203 -- so reading it now closes the gap before it opens rather than
-    correcting a number already published.
-
-    A signal reaches an arm only through the comment or review it came from: the
-    normalized signal carries no author, so it is rejoined by ``thread_url``.
-    A finding whose author is not one of the named arms is skipped -- CodeRabbit's
-    findings are on the same PR and are not part of this experiment.
-
-    A claim with no usable title is DROPPED and counted, never anchored on the
-    empty string. Body-carried findings arrive titleless by construction --
-    ``encode_marker`` omits title and body, and nothing rehydrates them from the
-    rendered text (#142) -- so folding them in on a ``(file, "")`` anchor would
-    collapse every one of them per file and, because both arms collapse onto the
-    same key, report agreement the reviewers never reached. Dropping loudly costs
-    the count and keeps the metric honest; the caller prints it.
+    The reduction itself -- the arm/round rejoin, the two-channel union, the
+    round key and the untitled drop -- is :func:`sidecar.abmetrics.collect_claims`,
+    which is pure and unit-tested. All this adds is the two credentialed reads,
+    which is the whole division of labour between this file and that module.
     """
     pr = PRRef(repo=repo, number=pr_num, url=f"https://github.com/{repo}/pull/{pr_num}")
-    comments = runner.fetch_inline_comments(pr, token, _API)
-    reviews = runner.fetch_reviews(pr, token, _API)
-    by_thread = {
-        c.get("html_url"): (
-            (c.get("user") or {}).get("login", ""),
-            c.get("commit_id") or c.get("original_commit_id") or "",
-        )
-        for c in comments
-    }
-    # Review bodies join the same way: `collect_review_signals` stamps each
-    # marker's `thread_url` with the REVIEW's html_url when it carries none.
-    by_thread.update(
-        {
-            r.get("html_url"): ((r.get("user") or {}).get("login", ""), r.get("commit_id") or "")
-            for r in reviews
-        }
+    return collect_claims(
+        runner.fetch_inline_comments(pr, token, _API),
+        runner.fetch_reviews(pr, token, _API),
+        arms,
+        pr_num,
     )
-    login_to_arm = {login: arm for arm, login in arms.items()}
-    out: list[Claim] = []
-    untitled = 0
-    for signal in collect_signals(comments) + collect_review_signals(reviews):
-        login, commit = by_thread.get(signal.thread_url or "", ("", ""))
-        arm = login_to_arm.get(login)
-        if arm is None or not signal.file:
-            continue
-        title = claim_title(signal.title, signal.body)
-        if not title:
-            untitled += 1
-            continue
-        out.append(Claim(arm=arm, round_key=f"{pr_num}@{commit}", file=signal.file, title=title))
-    return out, untitled
 
 
 def _pct(value: float | None) -> str:
@@ -187,14 +144,14 @@ def _num(value: int | None) -> str:
     return "n/a" if value is None else str(value)
 
 
-def _report_arms(claims: list[Claim], arms: dict[str, str]) -> None:
+def _report_arms(claims: list[Claim], arms: dict[str, str], receipts: set[tuple[str, str]]) -> None:
     """Print the per-arm table."""
     print(
         f"\n{'arm':<12} {'rounds':>7} {'finds':>6} {'claims':>7} {'paths':>6} "
         f"{'re-rep':>7} {'one-shot':>9} {f'top{TOP_PATHS}':>7}"
     )
     for arm in arms:
-        m = arm_metrics(arm, claims)
+        m = arm_metrics(arm, claims, sorted(receipts))
         print(
             f"{arm:<12} {m.rounds:>7} {m.findings:>6} {m.distinct_claims:>7} "
             f"{m.distinct_paths:>6} {m.re_reported:>7} {_pct(m.one_shot_rate):>9} "
@@ -204,13 +161,13 @@ def _report_arms(claims: list[Claim], arms: dict[str, str]) -> None:
             print(f"    {touches:>3}x {path}")
 
 
-def _report_pair(claims: list[Claim], arms: dict[str, str]) -> None:
+def _report_pair(claims: list[Claim], arms: dict[str, str], receipts: set[tuple[str, str]]) -> None:
     """Print the cross-arm agreement and Chapman coverage, or say why it cannot."""
     names = list(arms)
     if len(names) != 2:
         print("\npair metrics need exactly two arms; skipped")
         return
-    p = pair_metrics(claims, names[0], names[1])
+    p = pair_metrics(claims, names[0], names[1], sorted(receipts))
     print(
         f"\nrounds both arms reviewed: {p.rounds}\n"
         f"claims: {names[0]}={p.a_claims} {names[1]}={p.b_claims} "
@@ -279,12 +236,18 @@ def main() -> None:
         raise SystemExit("at least one --arm NAME=LOGIN is required; arms are never inferred")
     token = _token()
     claims: list[Claim] = []
+    receipts: set[tuple[str, str]] = set()
     untitled = 0
     for pr_num in args.prs:
-        got, blank = _claims(args.repo, pr_num, token, arms)
+        got, seen, blank = _claims(args.repo, pr_num, token, arms)
         claims += got
+        receipts |= seen
         untitled += blank
-        print(f"{args.repo}#{pr_num}: {len(got)} claim(s) across the named arms", file=sys.stderr)
+        print(
+            f"{args.repo}#{pr_num}: {len(got)} claim(s) over {len(seen)} reviewed round(s) "
+            "across the named arms",
+            file=sys.stderr,
+        )
 
     print(f"\n=== {args.repo} PRs {args.prs} ===")
     if untitled:
@@ -293,8 +256,8 @@ def main() -> None:
             "every metric below; review-body findings arrive titleless until #142 "
             "rehydrates them"
         )
-    _report_arms(claims, arms)
-    _report_pair(claims, arms)
+    _report_arms(claims, arms, receipts)
+    _report_pair(claims, arms, receipts)
     _report_cost(args.repo, _pairs(args.slot, "--slot"), args.days)
     print("\npublished baselines (different rule -- orientation only):")
     for name, value in BASELINES.items():
