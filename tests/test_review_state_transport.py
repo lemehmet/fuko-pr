@@ -448,15 +448,20 @@ def test_an_expire_request_without_files_is_rejected_not_read_as_wholesale(wire,
         rsc.ExpireCoverageRequest(repo=REPO, pr=PR, seat=SEAT)
 
 
-def test_the_endpoints_are_behind_the_same_bearer_dependency_as_the_rest(monkeypatch):
-    """The ledger endpoints accept writes; an unauthenticated one must not."""
+def test_every_ledger_route_is_behind_the_bearer_dependency(monkeypatch):
+    """Enumerated off the app rather than listed, so an endpoint added later
+    without ``Depends(_auth)`` fails this test instead of shipping open. These
+    routes accept ledger WRITES; an unauthenticated one is a write path into the
+    reviewer's own next prompt."""
     monkeypatch.setattr(main.settings, "auth_token", _TOKEN)
     anon = TestClient(main.app)
+    routes = [r for r in main.app.routes if getattr(r, "path", "").startswith("/rs/")]
 
-    assert (
-        anon.get("/rs/findings", params={"repo": REPO, "pr": PR, "seat": SEAT}).status_code == 401
-    )
-    assert anon.post("/rs/findings/transition", json={}).status_code == 401
+    assert len(routes) == 10
+    for route in routes:
+        for method in sorted(route.methods - {"HEAD", "OPTIONS"}):
+            resp = anon.request(method, route.path, json={})
+            assert resp.status_code == 401, (method, route.path, resp.status_code)
 
     monkeypatch.setattr(main.settings, "auth_token", None)
     assert TestClient(main.app).get("/rs/round", params={"repo": REPO}).status_code == 503
