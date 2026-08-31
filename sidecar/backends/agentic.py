@@ -299,6 +299,13 @@ _ENV_AUTH = "FUKO_AGENTIC_AUTH"
 # reads as off rather than being guessed at, so a config typo cannot switch on a
 # feature that changes what the reviewer looks at.
 _ENV_COVERAGE_LEDGER = "FUKO_AGENTIC_COVERAGE_LEDGER"
+# Per-entry opt-OUT of the findings ledger (#159), and the polarity is why it
+# reads the other way round: Tier 1 is on everywhere, so the ENABLED form is an
+# absent variable and only "0" disables. An unconfigured fleet therefore emits
+# this variable never and its harness environment is byte-identical to the one
+# it had before the flag existed; any other value reads as ON, which keeps a
+# config typo from silently converting a stateful seat into a stateless one.
+_ENV_FINDINGS_LEDGER = "FUKO_AGENTIC_FINDINGS_LEDGER"
 # Runner-merged GitHub credential names (PR-Agent dunder shape until #99 moves
 # them behind the driver contract); the process fallbacks keep laptop runs working.
 _ENV_GH_TOKEN = "GITHUB__USER_TOKEN"
@@ -525,7 +532,9 @@ class AgenticBackend:
 
         The entry's ``coverage_ledger`` opt-in travels the same way, in its own
         variable: it is a per-seat rollout switch (#157), so it must not be
-        derivable from anything ambient.
+        derivable from anything ambient. ``findings_ledger`` travels beside it
+        in its own variable and with the opposite polarity -- present only to
+        DISABLE (#159), because Tier 1 defaults on.
         """
         if preset.litellm_prefix != "anthropic/":
             raise ValueError(
@@ -572,6 +581,12 @@ class AgenticBackend:
         # variable at all, so an unconfigured fleet's environment is unchanged.
         if model.coverage_ledger:
             env[_ENV_COVERAGE_LEDGER] = "1"
+        # Emitted only to say NO. The default-on tier needs no variable to stay
+        # on, so an entry that never mentions the flag adds nothing to the
+        # environment -- the same "unconfigured fleets are unchanged" property
+        # `coverage_ledger` gets from the opposite polarity.
+        if not model.findings_ledger:
+            env[_ENV_FINDINGS_LEDGER] = "0"
         if model.extra_instructions:
             env[_ENV_INSTRUCTIONS] = model.extra_instructions
         if knowledge:
@@ -652,11 +667,15 @@ class AgenticBackend:
         tell from a dead channel, so a ``done`` receipt with no channels would read
         as a clean pass even if the one channel had failed.
 
-        The round is STATEFUL when a review-state store is configured (#156):
-        this seat's still-open findings from earlier rounds are rendered into the
-        prompt behind their own fence, the verdicts the agent returns on them are
-        applied, and this round's published findings become the next round's open
-        ledger. An entry that opts into ``coverage_ledger`` additionally carries
+        The round is STATEFUL when a review-state store is configured AND the
+        entry keeps ``findings_ledger`` on, which is its default (#156, gated per
+        entry by #159): this seat's still-open findings from earlier rounds are
+        rendered into the prompt behind their own fence, the verdicts the agent
+        returns on them are applied, and this round's published findings become
+        the next round's open ledger. An entry that turns the flag OFF is the
+        stateless arm of #159's A/B -- it reads nothing, settles nothing and
+        writes nothing, so its prompt matches the pre-ledger one exactly.
+        An entry that opts into ``coverage_ledger`` additionally carries
         the COVERAGE half (#157): the regions this seat's earlier rounds recorded
         as examined are rendered as advisory context, the coverage this round's
         delta invalidates is expired before that read, and what this round
@@ -761,6 +780,7 @@ class AgenticBackend:
         # seat rather than none -- see `DEFAULT_SEAT`.
         seat = env.get(ENV_SEAT, "").strip() or DEFAULT_SEAT
         coverage_ledger = env.get(_ENV_COVERAGE_LEDGER, "") == "1"
+        findings_ledger = env.get(_ENV_FINDINGS_LEDGER, "1") != "0"
         # Bound before the try so the settle pass below can read it on every path
         # that gets that far; an empty state is exactly what a first round (or an
         # unreachable ledger) carries.
@@ -844,6 +864,7 @@ class AgenticBackend:
                 ctx.head_sha,
                 touched_files=sorted(ctx.diff_files),
                 coverage_ledger=coverage_ledger,
+                findings_ledger=findings_ledger,
             )
             prompt = build_prompt(
                 ctx,
@@ -978,6 +999,7 @@ class AgenticBackend:
             findings=kept,
             examined=review.examined,
             coverage_ledger=coverage_ledger,
+            findings_ledger=findings_ledger,
         )
         if (
             carried.rows

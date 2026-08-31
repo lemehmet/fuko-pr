@@ -129,6 +129,37 @@ The rules that matter:
   a seat settling claims it has not verified, or a verdict that was never its
   own idea.
 
+### Turning it off per entry
+
+The findings ledger is **on by default** and switched off per entry:
+
+```toml
+[[review.models]]
+provider = "qwen-anthropic"
+name = "qwen3.8-max"
+backend = "agentic"
+findings_ledger = false   # default true
+```
+
+The polarity is the opposite of `coverage_ledger`'s on purpose. Tier 1 shipped
+unconditional, so an opt-in would silently strip carried state from every fleet
+that merely bumps its pinned fuko revision; an opt-*out* means an entry that
+never mentions the flag behaves exactly as it did, down to the harness
+environment (the backend emits `FUKO_AGENTIC_FINDINGS_LEDGER` only to say `0`).
+
+A seat with the flag off makes **no findings read, retires nothing, mints no
+ids, applies no verdicts and records nothing** — its prompt is byte-for-byte the
+pre-ledger one. That is what makes a genuinely stateless arm expressible, which
+is why the flag exists (#159): before it, both arms of a stateful-vs-stateless
+A/B carried findings. Turning it back on **self-heals**: the first flag-on round
+retires rows whose files the head no longer carries, against the checkout it
+already holds. That recoverability is also why the findings retirement is gated
+while the coverage expiry beside it is not — expiry consumes *this* round's
+delta, which no later round can reconstruct, whereas retirement is checked
+against a current tree every later round has. And a control that kept writing
+`stale` closures to the table it is meant to be ignoring would not be stateless
+in the first place.
+
 Storage is Postgres-only (`FUKO_DATABASE_URL`, `migrations/009_review_state.sql`)
 and entirely best-effort: with no store, an unreachable one, or a sqlite-vec
 deployment, every ledger call is a no-op and the round builds exactly the prompt
@@ -232,6 +263,31 @@ Evidence on a carried row is bounded per row (`MAX_PRIOR_EVIDENCE`) on both
 ledgers, and the coverage list is capped newest-round-first at
 `MAX_PRIOR_COVERAGE` with the cut stated in-band — including that absence from
 the list is not evidence a region is unexamined.
+
+## Scoring the state tiers: `scripts/ab_metrics.py`
+
+Whether carried state actually buys coverage is an empirical question, and it is
+scored from receipts rather than argued (#159). The numbers this file quotes
+above — 4.7% agreement, 86% one-shot, ~26% pool coverage, 64% on three paths —
+came out of throwaway scripts that no longer exist, which is why "did coverage
+improve?" was not answerable. `scripts/ab_metrics.py` replaces them, over the
+tested estimators in `sidecar/abmetrics.py`:
+
+```bash
+python scripts/ab_metrics.py lemehmet/fuko-pr 210 211 212 \
+    --arm control=fuko-dorian[bot] --arm treatment=fuko-gray[bot] \
+    --slot control=dorian --slot treatment=gray
+```
+
+Two things about it are load-bearing. **Claim identity is fixed** — the findings
+ledger's own `(file, casefolded title)` — so a rule cannot be quietly widened
+until the answer improves; regenerate the baselines under the *same* rule rather
+than comparing against the published figures. And **arms are named, never
+inferred**: the two trial seats share a provider, a model and a `role`, so the
+only thing distinguishing them on GitHub is which App posted — and the App names
+no longer describe the seats. Token and cost per run come from `review_runs`
+(#152) via the `--slot` mapping, and print as `n/a` with no database configured
+rather than as zero.
 
 ## Security model
 

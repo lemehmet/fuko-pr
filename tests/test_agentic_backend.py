@@ -2241,3 +2241,22 @@ def test_invoke_constructs_no_failure_result_by_hand():
     )
     # And the surviving one is the success path.
     assert 'channels={_CHANNEL: "done"}' in src
+
+
+def test_build_env_says_nothing_unless_the_findings_ledger_is_switched_off(monkeypatch):
+    """Opt-OUT polarity: the enabled form is an absent variable (#159)."""
+    monkeypatch.setenv("ANTHROPIC_KEY", "k")
+    preset = get_preset("anthropic")
+
+    assert "FUKO_AGENTIC_FINDINGS_LEDGER" not in AgenticBackend().build_env(
+        preset, _model(), "", ["review"]
+    )
+    assert "FUKO_AGENTIC_FINDINGS_LEDGER" not in AgenticBackend().build_env(
+        preset, _model(findings_ledger=True), "", ["review"]
+    )
+    assert (
+        AgenticBackend().build_env(preset, _model(findings_ledger=False), "", ["review"])[
+            "FUKO_AGENTIC_FINDINGS_LEDGER"
+        ]
+        == "0"
+    )

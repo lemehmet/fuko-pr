@@ -342,7 +342,7 @@ def _keyed(examined: Sequence[ExaminedRegion]) -> Sequence[ExaminedRegion]:
     ``qwen-anthropic/qwen3.8-max``, #157).
 
     Stripping is the whole normalisation on purpose. It is the same treatment
-    :func:`_anchor` already gives the findings ledger's matching key, and it
+    :func:`claim_anchor` already gives the findings ledger's matching key, and it
     cannot change which file an entry names. Anything richer -- resolving
     ``./``, symlinks, case -- would be guessing at a path the round chose, and
     guessing wrong would expire the coverage of a DIFFERENT file, which is the
@@ -426,7 +426,7 @@ def _carried_coverage(
     return [row for row in kept if row.file not in dead], hollow, retired
 
 
-def _anchor(file: str, title: str) -> tuple[str, str]:
+def claim_anchor(file: str, title: str) -> tuple[str, str]:
     """The key two claims are "the same finding" under.
 
     Deliberately coarse -- file plus case-folded title, not the body -- because
@@ -486,7 +486,7 @@ def _reopen_candidates(repo: str, pr: int, seat: str) -> dict[tuple[str, str], S
     """
     candidates: dict[tuple[str, str], SettledFinding] = {}
     for row in ledger_store.settled_findings(repo, pr, seat):
-        candidates.setdefault(_anchor(row.file, row.title), row)
+        candidates.setdefault(claim_anchor(row.file, row.title), row)
     return candidates
 
 
@@ -499,6 +499,7 @@ def carry_in(
     *,
     touched_files: Sequence[str] = (),
     coverage_ledger: bool = False,
+    findings_ledger: bool = True,
 ) -> CarriedState:
     """Load this seat's state and render the section the round carries.
 
@@ -512,6 +513,24 @@ def carry_in(
     INVALIDATES state, it never scopes the review. A round still reads the whole
     change; what it stops being told is that somebody already looked at a file
     the change has since moved under.
+
+    ``findings_ledger`` is the Tier 1 half of the same switch, defaulting ON
+    because Tier 1 shipped unconditional (#159). Off, this function makes NO
+    findings read, retires nothing, mints no ids and renders no findings, so a
+    round is offered nothing it could settle and :func:`settle` has nothing to
+    apply -- which is what makes a genuinely stateless arm expressible. The
+    coverage half of the call is untouched by it: the two tiers are separate
+    variables in the experiment, and a seat may legitimately want either alone.
+
+    Why the findings RETIREMENT is gated while coverage expiry below is not,
+    given both only ever remove an assurance: recoverability. Expiry consumes
+    THIS round's delta, which no later round can reconstruct -- a file touched
+    while the flag was off is not in a later round's diff, so the assurance it
+    should have killed would survive forever. Retirement is checked against the
+    CHECKOUT, a current state every later round holds, so the first flag-on
+    round after any gap retires exactly what a flag-on run would have. Nothing
+    is lost by skipping it, and running it would leave the "stateless" arm
+    writing closures to the very table it is supposed to be ignoring.
 
     Expiry runs BEFORE the coverage read (an entry the delta killed must not be
     rendered by the same call that killed it) and runs whether or not
@@ -580,8 +599,12 @@ def carry_in(
     among the rows in hand would produce a number describing neither state.
     """
     expired = ledger_store.expire_coverage(repo, pr, seat, _expiry_targets(touched_files))
-    opened = ledger_store.open_findings(repo, pr, seat)
-    live = _retire_missing(repo, pr, seat, opened.rows, checkout_root, head_sha)
+    if findings_ledger:
+        opened = ledger_store.open_findings(repo, pr, seat)
+        live = _retire_missing(repo, pr, seat, opened.rows, checkout_root, head_sha)
+        read_window, truncated = len(opened.rows) + opened.truncated, opened.truncated
+    else:
+        live, read_window, truncated = [], 0, 0
     coverage, hollow, retired = (
         _carried_coverage(repo, pr, seat, checkout_root) if coverage_ledger else ([], 0, 0)
     )
@@ -593,12 +616,12 @@ def carry_in(
     # second copy of the enumeration could.
     rows = {minted: row.id for minted, row in zip(state.ids, live)}
     round_ = ledger_store.next_round(repo, pr, seat)
-    if opened.truncated:
+    if truncated:
         print(
             f"fuko: review-state seat {seat} round {round_}: {repo}#{pr} held "
-            f"{len(opened.rows) + opened.truncated} open findings for this seat at read time, "
+            f"{read_window} open findings for this seat at read time, "
             f"over the {MAX_OPEN_FINDINGS}-row read cap -- "
-            f"the {opened.truncated} NEWEST "
+            f"the {truncated} NEWEST "
             "are not in this round's prompt and cannot be settled until earlier rows close",
             file=sys.stderr,
         )
@@ -619,7 +642,7 @@ def carry_in(
         state=state,
         rows=rows,
         round=round_,
-        truncated=opened.truncated,
+        truncated=truncated,
         # The renderer's cap, not the read's: see `CarriedState.coverage`.
         coverage=min(len(coverage), MAX_PRIOR_COVERAGE),
         expired=expired,
@@ -637,6 +660,7 @@ def settle(
     findings: Sequence[AgenticFinding] = (),
     examined: Sequence[ExaminedRegion] = (),
     coverage_ledger: bool = False,
+    findings_ledger: bool = True,
 ) -> Settlement:
     """Apply this round's verdicts on carried findings, then record its own.
 
@@ -743,6 +767,17 @@ def settle(
     switched on, be handed entries about heads no round in between could expire.
     A seat with the flag off therefore behaves exactly as it did before this
     tier: no read, no write, byte-identical prompt.
+
+    ``findings_ledger`` gates this function's OWN writes the same way and for the
+    same reason, one tier down (#159). It defaults ON because Tier 1 shipped
+    unconditional. Off, :func:`carry_in` handed this round nothing, so the
+    verdict pass and the dedup pass are already empty by construction; what the
+    flag adds is that the round's published findings are not recorded either.
+    Recording quietly for a later flip is the failure this avoids: those rows
+    would come back as carried claims on a flag-on round that could not have
+    settled them, asserted against heads no round in between examined. The
+    coverage half is independent -- a seat may run either tier alone, and #159's
+    control runs neither while its treatment runs both.
     """
     touch: list[str] = []
     closed = 0
@@ -761,7 +796,7 @@ def settle(
     # is excluded even if the write failed: the row is then still open, so the
     # worst case is recording the duplicate anyway -- the noise direction.
     still_open = {
-        _anchor(prior.file, prior.title): carried.rows[minted]
+        claim_anchor(prior.file, prior.title): carried.rows[minted]
         for minted, prior in carried.state.ids.items()
         if minted in carried.rows and minted not in settled
     }
@@ -769,9 +804,9 @@ def settle(
     deduped: list[str] = []
     reopened: list[str] = []
     # Only read the closed ledger when there is something that could re-raise it.
-    candidates = _reopen_candidates(repo, pr, seat) if findings else {}
+    candidates = _reopen_candidates(repo, pr, seat) if findings and findings_ledger else {}
     for finding in findings:
-        anchor = _anchor(finding.file, finding.title)
+        anchor = claim_anchor(finding.file, finding.title)
         row_id = still_open.get(anchor)
         if row_id is not None:
             deduped.append(f"{finding.file}: {finding.title}")
@@ -792,8 +827,11 @@ def settle(
             still_open[anchor] = closed_row.id
             continue
         fresh.append(finding)
-    ledger_store.touch_findings(repo, pr, seat, touch)
-    recorded = ledger_store.record_findings(repo, pr, seat, carried.round, head_sha, fresh)
+    if findings_ledger:
+        ledger_store.touch_findings(repo, pr, seat, touch)
+        recorded = ledger_store.record_findings(repo, pr, seat, carried.round, head_sha, fresh)
+    else:
+        recorded = 0
     coverage = (
         ledger_store.record_coverage(repo, pr, seat, carried.round, head_sha, _keyed(examined))
         if coverage_ledger
