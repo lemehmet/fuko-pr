@@ -291,11 +291,15 @@ def test_review_state_ledgers_roundtrip_on_a_live_server():
     # which is the stability the minted ``pN`` ids depend on.
     assert [s.id for s in R.open_findings(TEST_REPO, 1, "henry").rows] == [s.id for s in stored]
 
-    # str id against a uuid column, both shapes the store uses.
-    assert R.touch_findings([s.id for s in stored]) == 2
+    # str id against a uuid column, both shapes the store uses. The lane the
+    # id-addressed writes carry (#171) is matched in SQL, so a real server is
+    # also the only place the `(repo, pr, seat)` half of their WHERE is proved.
+    assert R.touch_findings(TEST_REPO, 1, "henry", [s.id for s in stored]) == 2
     settled = next(s for s in stored if s.prior.title == "a")
-    assert R.transition(settled.id, "fixed", "rewritten in this head") is True
-    assert R.transition(settled.id, "fixed", "replayed stale id") is False
+    assert (
+        R.transition(TEST_REPO, 1, "henry", settled.id, "fixed", "rewritten in this head") is True
+    )
+    assert R.transition(TEST_REPO, 1, "henry", settled.id, "fixed", "replayed stale id") is False
 
     assert [s.prior.title for s in R.open_findings(TEST_REPO, 1, "henry").rows] == ["b"]
 
@@ -310,12 +314,17 @@ def test_review_state_ledgers_roundtrip_on_a_live_server():
     assert [(c.id, c.status, c.title, c.reason) for c in closed] == [
         (settled.id, "fixed", "a", "rewritten in this head")
     ]
-    assert R.reopen(settled.id, "re-raised: an independent finding contradicts fixed") is True
+    assert (
+        R.reopen(
+            TEST_REPO, 1, "henry", settled.id, "re-raised: an independent finding contradicts fixed"
+        )
+        is True
+    )
     assert sorted(s.prior.title for s in R.open_findings(TEST_REPO, 1, "henry").rows) == ["a", "b"]
     # Open again, so the row is no longer the settled read's to offer and a
     # replayed reopen changes nothing -- the count cannot inflate on an open row.
     assert R.settled_findings(TEST_REPO, 1, "henry") == ()
-    assert R.reopen(settled.id, "replayed") is False
+    assert R.reopen(TEST_REPO, 1, "henry", settled.id, "replayed") is False
     with db() as conn:
         row = conn.execute(
             "SELECT reopened, status_reason FROM review_findings WHERE id = %s",

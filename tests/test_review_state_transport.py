@@ -56,6 +56,31 @@ def _fresh_latch(monkeypatch):
     monkeypatch.delenv("FUKO_TOKEN", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_database(monkeypatch):
+    """Unset the connection string for every test here, the other half of #171's
+    ambient-environment hazard.
+
+    ``conftest.py``'s ``_no_ambient_sidecar`` keeps a real ``FUKO_URL`` out of the
+    suite; this keeps a real ``FUKO_DATABASE_URL`` out of THIS one. Both ends of
+    the seam pick their target at call time, so whichever one is configured in the
+    ambient environment becomes part of the fixture -- and the local branch is the
+    end with no fake in front of it. Concretely, before this fixture existed
+    ``test_the_first_transport_failure_latches_the_run_offline`` latched and then
+    ran its remaining nine calls against whatever store was configured: on CI that
+    inserted a real ``o/r#9`` finding row into Postgres and returned ``1`` where
+    the test asserts the neutral ``0``, and on a developer box it would write that
+    junk into a live ledger.
+
+    The tests that fake ``sidecar.review_state`` (``local``, ``store``) are
+    unaffected -- they replace the module's functions, which never read
+    ``settings`` -- so this only ever decides what the UNFAKED local branch does,
+    which for every test here is "nothing". A test whose subject IS the empty
+    connection string still says so itself.
+    """
+    monkeypatch.setattr(review_state.settings, "database_url", "")
+
+
 @pytest.fixture
 def local(monkeypatch):
     """Record what the ledger asked of the LOCAL store, with no sidecar configured."""
