@@ -383,11 +383,19 @@ def _bounded_evidence(text: str, budget: int) -> str:
     a round reading a short citation list can tell "that is all they read" from
     "that is all that fit".
 
-    The result is never longer than ``budget``, because the announcement is
-    counted INSIDE it rather than appended after it: a marker that rides on top
-    of the limit makes the limit a lie, and the arithmetic that picks the
-    constant -- rows times budget -- would then understate every truncated row by
-    the marker's own length.
+    The result is never longer than ``max(budget, 0)`` -- for every budget,
+    including one below the announcement's own length -- because the
+    announcement is counted INSIDE the budget rather than appended after it: a
+    marker that rides on top of the limit makes the limit a lie, and the
+    arithmetic that picks the constant -- rows times budget -- would then
+    understate every truncated row by the marker's own length.
+
+    A negative budget clamps to zero rather than raising, the same way
+    :func:`render_prior_state` already clamps ``max_coverage``. This is a render
+    budget, not a validated input: refusing to render because a caller passed a
+    nonsense number would trade one over-long field for no prior state at all,
+    losing every carried finding -- the one-shot loss this ledger exists to
+    prevent. Clamping degrades one field of one row and says so in-band.
 
     Below a budget too small to hold the announcement, the announcement wins and
     the citation goes entirely. That is the safe direction: a clipped marker

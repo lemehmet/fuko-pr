@@ -103,10 +103,11 @@ The rules that matter:
   This is the one rule here with a **known false negative**, and it is worth
   stating rather than implying away: a genuinely new claim that names the same
   file under the same case-folded headline is not recorded, and the row that
-  survives keeps the earlier body. Widening the key to the body would remove
-  that, at the price of missing every reworded re-report — most of them — and
-  restoring the growth above, which loses claims outright rather than one
-  round's phrasing of a claim that is still open and still in the next prompt.
+  survives keeps the earlier body and the earlier evidence. Widening the key to
+  the body would remove that, at the price of missing every reworded re-report
+  — most of them — and restoring the growth above, which loses claims outright
+  rather than one round's phrasing of, and citations for, a claim that is still
+  open and still in the next prompt.
   Every suppression is logged by name (`re-asserted, not re-recorded: …`), so
   the trade is visible in the round's output rather than silent.
 
