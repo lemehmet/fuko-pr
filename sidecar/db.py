@@ -69,6 +69,7 @@ pays the probe once or twice, not once per minute of its wall clock.
 """
 
 _unreachable_until = 0.0
+_latch_gen = 0
 _latch_lock = threading.Lock()
 
 
@@ -261,10 +262,11 @@ def _latch(exc: Exception) -> None:
     guard. What an operator needs from this stream is the one line that says the
     ledger stopped being consulted, and when it will be tried again.
     """
-    global _unreachable_until
+    global _unreachable_until, _latch_gen
     with _latch_lock:
         already = bool(_unreachable_until) and time.monotonic() < _unreachable_until
         _unreachable_until = time.monotonic() + BEST_EFFORT_COOLDOWN_S
+        _latch_gen += 1
     if already:
         return
     print(
@@ -274,13 +276,61 @@ def _latch(exc: Exception) -> None:
     )
 
 
-def _unlatch() -> None:
-    """Reopen the latch after a probe found the store answering again."""
+def _unlatch(gen: int) -> None:
+    """Reopen the latch, unless a newer failure closed it while this probe ran.
+
+    ``gen`` is :data:`_latch_gen` as read before the probe started, and every
+    :func:`_latch` bumps it. A mismatch therefore means some concurrent call
+    recorded a connection failure that this probe's success says nothing about:
+    the two overlapped, and the later evidence is the failure. Clearing it
+    anyway would put every following best-effort call back on its own
+    :data:`BEST_EFFORT_TIMEOUT_S` against a store just found unreachable, which
+    is the per-call wait the latch exists to remove.
+
+    The comparison has to happen under the lock for the same reason the write
+    does -- reading the generation first and clearing afterwards would just move
+    the race rather than close it.
+    """
     global _unreachable_until
-    if not _unreachable_until:
-        return
     with _latch_lock:
+        if _latch_gen != gen:
+            return
         _unreachable_until = 0.0
+
+
+def _looks_saturated() -> bool:
+    """True when a :class:`~psycopg_pool.PoolTimeout` reads as a full pool, not a dead one.
+
+    A pool that holds connections and has none free was waited on because every
+    one of them was in use. The sidecar serves the whole fleet's ledger traffic
+    plus the knowledge base from a single ``max_size=10`` pool, so a burst can
+    exhaust it while Postgres answers normally; latching on that would take the
+    ledger away from every seat for :data:`BEST_EFFORT_COOLDOWN_S` on the
+    strength of a queue, and print an outage line about a healthy database.
+
+    The two misreadings are not symmetric, and that is what settles which way to
+    lean. Reading a dead store as merely busy costs one
+    :data:`BEST_EFFORT_TIMEOUT_S` per call -- still bounded, still an order of
+    magnitude better than the 30s of #170 -- and ends as soon as the pool
+    discards its stale connections. Reading a busy store as dead costs
+    fleet-wide ledger silence for a minute. So this deliberately keeps the latch
+    open in the ambiguous window right after a database dies with its
+    connections still checked out.
+
+    Reads the module global instead of calling :func:`get_pool`, because this
+    runs on the failure path where creating a pool is precisely the wait being
+    bounded; ``None`` (no pool, or one whose creation just failed) is not
+    saturation. Stats that cannot be read are treated the same way -- the latch
+    is the safe default once nothing supports the queue explanation.
+    """
+    pool = _pool
+    if pool is None:
+        return False
+    try:
+        stats = pool.get_stats()
+    except Exception:
+        return False
+    return stats.get("pool_size", 0) > 0 and stats.get("pool_available", 0) == 0
 
 
 @contextmanager
@@ -294,14 +344,26 @@ def db_best_effort():
     budget caps a single call; the latch caps the ROUND, since a budget alone
     still costs its own wait on every one of a degraded round's calls.
 
-    Latched by connection failures only -- :class:`~psycopg_pool.PoolTimeout` and
+    Latched by connection failures -- :class:`~psycopg_pool.PoolTimeout` and
     :class:`~psycopg.OperationalError`, either of which means "this database is
-    not answering". A query that fails for its own reasons (a constraint, a
-    column that is not there) raises something else and leaves the latch open,
+    not answering", including a connection lost part-way through a statement. An
+    error the statement itself earned arrives as a sibling class instead
+    (:class:`~psycopg.ProgrammingError` for a column that is not there,
+    :class:`~psycopg.IntegrityError` for a constraint) and leaves the latch open,
     for the same reason :func:`sidecar.review_state_client._mark_down` does not
     trip on an HTTP status: the latch exists to bound time, not to route around
-    errors. A successful acquisition after the cooldown expired reopens it, so
-    a database that comes back is used again without a restart.
+    errors. That boundary is psycopg's rather than ours, so it is not exact -- a
+    server-side cancellation (``statement_timeout``, an admin shutdown) is also
+    an :class:`~psycopg.OperationalError` and does latch. That is the right side
+    to be wrong on: those conditions mean the database is not usefully answering
+    either, and the cost of the latch is one minute of no-ops.
+
+    The one :class:`~psycopg_pool.PoolTimeout` that does NOT latch is a
+    saturated pool -- connections held, none free -- which is a queue behind a
+    healthy database rather than an outage; see :func:`_looks_saturated` for why
+    that asymmetry is deliberate. A successful acquisition after the cooldown
+    expired reopens the latch, so a database that comes back is used again
+    without a restart.
 
     Yields:
         A pooled connection with the pgvector adapter registered.
@@ -310,10 +372,15 @@ def db_best_effort():
         StoreUnavailable: The latch is closed; nothing was attempted.
     """
     _reject_while_latched()
+    gen = _latch_gen
     try:
         with db(timeout=BEST_EFFORT_TIMEOUT_S) as conn:
-            _unlatch()
+            _unlatch(gen)
             yield conn
-    except (PoolTimeout, OperationalError) as e:
+    except PoolTimeout as e:
+        if not _looks_saturated():
+            _latch(e)
+        raise
+    except OperationalError as e:
         _latch(e)
         raise

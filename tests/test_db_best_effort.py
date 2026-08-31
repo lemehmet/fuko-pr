@@ -12,11 +12,31 @@ from sidecar import review_state
 _UUID = "0f9d1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b"
 
 
-class _FakePool:
-    """Records every acquisition and its timeout; optionally refuses to connect."""
+class _FakeConn:
+    """A handed-out connection, optionally one that dies under ``execute``."""
 
     def __init__(self, error=None):
         self.error = error
+
+    def execute(self, *_a, **_k):
+        if self.error is not None:
+            raise self.error
+        return None
+
+
+class _FakePool:
+    """Records every acquisition and its timeout; optionally refuses to connect.
+
+    ``error`` fails the acquisition itself; ``conn_error`` lets the acquisition
+    succeed and fails the statement afterwards. The two are separate because the
+    latch has to treat both as "not answering" and only the first was reachable
+    through a pool that raises before it yields.
+    """
+
+    def __init__(self, error=None, conn_error=None, stats=None):
+        self.error = error
+        self.conn_error = conn_error
+        self.stats = stats
         self.timeouts: list[float | None] = []
 
     @contextlib.contextmanager
@@ -24,7 +44,13 @@ class _FakePool:
         self.timeouts.append(timeout)
         if self.error is not None:
             raise self.error
-        yield object()
+        yield _FakeConn(self.conn_error)
+
+    def get_stats(self) -> dict[str, int]:
+        return self.stats or {}
+
+    def close(self) -> None:
+        self.closed = True
 
     @property
     def attempts(self) -> int:
@@ -35,6 +61,8 @@ class _FakePool:
 def _open_latch(monkeypatch):
     """The latch is process state; no test may inherit or leak a closed one."""
     monkeypatch.setattr(db, "_unreachable_until", 0.0)
+    monkeypatch.setattr(db, "_latch_gen", 0)
+    monkeypatch.setattr(db, "_pool", None)
     monkeypatch.setattr(db, "register_vector", lambda conn: None)
 
 
@@ -42,10 +70,33 @@ def _open_latch(monkeypatch):
 def pool(monkeypatch):
     """Install a fake pool in place of the real one; return it for assertions."""
 
-    def install(error=None):
-        fake = _FakePool(error)
+    def install(error=None, conn_error=None):
+        fake = _FakePool(error, conn_error)
         monkeypatch.setattr(db, "get_pool", lambda *, timeout=None: fake)
         return fake
+
+    return install
+
+
+@pytest.fixture
+def creating_pool(monkeypatch):
+    """Let :func:`sidecar.db.get_pool` actually build a pool, with a fake class.
+
+    The other fixture replaces ``get_pool`` wholesale, which is what makes the
+    bound on pool CREATION -- the half the fix argues matters most, since a
+    process whose first database contact is best-effort spends the wait on the
+    migration connection -- invisible to those tests.
+    """
+
+    def install(error=None):
+        made = _FakePool(error)
+        made.closed = False
+        monkeypatch.setattr(db, "ConnectionPool", lambda **_k: made)
+        monkeypatch.setattr(db, "_resolve_embed_dim", lambda: 8)
+        monkeypatch.setattr(db, "_migration_sql", lambda dim: ())
+        monkeypatch.setattr(db, "_ensure_embed_dim", lambda conn, dim: None)
+        monkeypatch.setattr(db.atexit, "register", lambda fn: fn)
+        return made
 
     return install
 
@@ -82,11 +133,82 @@ def test_the_second_call_after_a_timeout_never_touches_the_pool(pool, capsys):
     assert capsys.readouterr().err.count("postgres unreachable") == 1
 
 
-def test_a_dead_connection_mid_query_latches_too(pool):
-    """``OperationalError`` is the other way "not answering" arrives."""
+def test_a_refused_connection_latches_too(pool):
+    """``OperationalError`` is the other way a failed ACQUISITION arrives."""
     fake = pool(OperationalError("connection failed"))
 
     with pytest.raises(OperationalError), db.db_best_effort():
+        pass  # pragma: no cover
+    with pytest.raises(db.StoreUnavailable), db.db_best_effort():
+        pass  # pragma: no cover
+
+    assert fake.attempts == 1
+
+
+def test_a_connection_lost_mid_statement_latches(pool):
+    """The store can also stop answering AFTER a connection is in hand.
+
+    Nothing above reaches this path: a pool that raises before it yields only
+    ever exercises acquisition. Here the acquisition succeeds and ``execute``
+    raises, which reaches the same guard through the generator.
+    """
+    fake = pool(conn_error=OperationalError("server closed the connection unexpectedly"))
+
+    with pytest.raises(OperationalError):
+        with db.db_best_effort() as conn:
+            conn.execute("SELECT 1")
+    with pytest.raises(db.StoreUnavailable), db.db_best_effort():
+        pass  # pragma: no cover
+
+    assert fake.attempts == 1
+
+
+def test_a_probe_does_not_clear_a_newer_failure(pool, monkeypatch):
+    """Overlapping success and failure: the later evidence is the failure.
+
+    Interleaved deterministically rather than with threads -- the race window is
+    between reading the generation and clearing the latch, so the test opens it
+    exactly, by latching from inside the unlatch call the probe is about to
+    make.
+    """
+    fake = pool()
+    unlatch = db._unlatch
+
+    def latch_then_unlatch(gen):
+        db._latch(PoolTimeout("a concurrent call found it down"))
+        unlatch(gen)
+
+    monkeypatch.setattr(db, "_unlatch", latch_then_unlatch)
+
+    with db.db_best_effort():
+        pass
+
+    assert db._unreachable_until != 0.0
+    with pytest.raises(db.StoreUnavailable), db.db_best_effort():
+        pass  # pragma: no cover
+    assert fake.attempts == 1
+
+
+def test_a_saturated_pool_does_not_latch(pool, monkeypatch, capsys):
+    """Connections held and none free is a queue, not an outage."""
+    fake = pool(PoolTimeout("couldn't get a connection after 2.00 sec"))
+    monkeypatch.setattr(db, "_pool", _FakePool(stats={"pool_size": 10, "pool_available": 0}))
+
+    for _ in range(2):
+        with pytest.raises(PoolTimeout), db.db_best_effort():
+            pass  # pragma: no cover
+
+    assert fake.attempts == 2
+    assert db._unreachable_until == 0.0
+    assert "postgres unreachable" not in capsys.readouterr().err
+
+
+def test_a_pool_holding_no_connections_latches(pool, monkeypatch):
+    """Nothing established means nothing to be queued behind: the store is down."""
+    fake = pool(PoolTimeout("couldn't get a connection after 2.00 sec"))
+    monkeypatch.setattr(db, "_pool", _FakePool(stats={"pool_size": 0, "pool_available": 0}))
+
+    with pytest.raises(PoolTimeout), db.db_best_effort():
         pass  # pragma: no cover
     with pytest.raises(db.StoreUnavailable), db.db_best_effort():
         pass  # pragma: no cover
@@ -146,6 +268,36 @@ def test_an_unreachable_postgres_costs_a_round_one_wait(pool, monkeypatch):
         assert review_state.transition("o/r", 7, "henry", _UUID, "fixed") is False
 
     assert fake.timeouts == [db.BEST_EFFORT_TIMEOUT_S]
+
+
+def test_pool_creation_bounds_the_migration_connection(creating_pool):
+    """The half of the bound that #170 actually turns on.
+
+    In a process whose first database contact is a best-effort call, the wait
+    happens on the migration connection inside pool creation -- a bound applied
+    only to the acquisition afterwards would never be reached. Both connections
+    must carry the budget, so dropping ``timeout=`` from either one fails here.
+    """
+    made = creating_pool()
+
+    with db.db_best_effort():
+        pass
+
+    assert made.timeouts == [db.BEST_EFFORT_TIMEOUT_S, db.BEST_EFFORT_TIMEOUT_S]
+
+
+def test_a_timeout_creating_the_pool_closes_it_and_latches(creating_pool):
+    """A failed creation must not publish a pool, and must still close the latch."""
+    made = creating_pool(PoolTimeout("couldn't get a connection after 2.00 sec"))
+
+    with pytest.raises(PoolTimeout), db.db_best_effort():
+        pass  # pragma: no cover
+
+    assert made.closed is True
+    assert db._pool is None
+    with pytest.raises(db.StoreUnavailable), db.db_best_effort():
+        pass  # pragma: no cover
+    assert made.attempts == 1
 
 
 def test_the_latch_is_announced_once_even_if_two_branches_trip_it(capsys):
