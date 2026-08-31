@@ -1,5 +1,9 @@
 """Tests for the mechanical file digests of #158."""
 
+import fnmatch
+
+import pytest
+
 from sidecar import digest as D
 from sidecar.models import SOURCES, check_source
 
@@ -175,6 +179,33 @@ def test_build_item_is_scoped_to_the_files_own_path():
     assert item.file_globs == ["src/capture.rs"]
     assert item.topic == D.topic_for("src/capture.rs", D.blob_hash(RUST))
     assert item.text == D.render("src/capture.rs", RUST)
+
+
+def test_build_item_escapes_a_path_that_reads_as_a_glob():
+    """Both backends match the stored glob with fnmatch, which reads `[...]`."""
+    path = "app/[slug]/page.tsx"
+    item = D.build_item(path, RUST)
+    assert item.file_globs != [path]
+    assert fnmatch.fnmatch(path, item.file_globs[0])
+    assert not fnmatch.fnmatch("app/x/page.tsx", item.file_globs[0])
+    assert D.topic_path(item.topic) == path
+
+
+def test_render_refuses_a_cap_it_cannot_honour():
+    """The header says what the index is and is not, so it is never truncated."""
+    with pytest.raises(ValueError, match="below the"):
+        D.render("src/capture.rs", RUST, max_chars=10)
+
+
+@pytest.mark.parametrize("cap", [300, 500, 900, 2000, 6000])
+def test_render_never_exceeds_the_cap(cap):
+    body = "".join(f"fn f{i}() {{}}\n" for i in range(300))
+    body += "fn enormous() {\n" + "    // body\n" * 400 + "}\n"
+    try:
+        out = D.render("src/some/long/path/to/big.rs", body, max_chars=cap)
+    except ValueError:
+        return
+    assert len(out) <= cap
 
 
 def test_digest_is_a_known_source_on_both_backends():

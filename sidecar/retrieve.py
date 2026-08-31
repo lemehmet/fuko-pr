@@ -129,6 +129,13 @@ def list_learnings(
     excluded by default, matching what retrieval would surface; ``include_expired``
     is the only way to see them. Embeddings are not returned. The second element
     is the total matching the filters, independent of ``limit``/``offset``.
+
+    The ordering carries ``id`` as a tie-breaker because ``created_at`` is not
+    unique: every row a single ``ingest`` call writes shares one transaction
+    timestamp, so a page boundary falling inside such a block would otherwise
+    return some rows twice and skip others across the separate page queries.
+    Callers that page to completion -- ``fuko digest``'s supersession sweep is
+    one -- would then silently leave rows behind.
     """
     where: list[str] = []
     params: list = []
@@ -149,7 +156,7 @@ def list_learnings(
         SELECT {_ROW_COLUMNS}
         FROM learnings
         WHERE {clause}
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, id DESC
         LIMIT %s OFFSET %s
     """
     with db() as conn:

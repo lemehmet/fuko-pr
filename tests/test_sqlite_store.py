@@ -567,6 +567,27 @@ def test_digests_are_dark_until_retrieval_is_enabled(store, monkeypatch):
     assert {r["source"] for r in lit} == {"remember", "digest"}
 
 
+def test_a_dark_digest_does_not_displace_a_learning_from_the_candidate_window(store, monkeypatch):
+    """Filtering digests after the KNN must not cost a real learning its slot.
+
+    ``vec_learnings`` has no ``source`` column, so the exclusion can only happen
+    post-KNN; the window is widened by the digest count to compensate. With a
+    candidate window of one and a digest scoring at least as well, the un-widened
+    query returned nothing at all.
+    """
+    monkeypatch.setattr(ss.settings, "candidate_k", 1)
+    store.ingest(
+        "o/r",
+        [
+            IngestItem(text="auth digest index", source="digest", file_globs=["src/auth/a.rs"]),
+            IngestItem(text="auth convention", source="remember", file_globs=["src/auth/a.rs"]),
+        ],
+    )
+
+    dark = store.query("o/r", ["src/auth/a.rs"], query_text="auth")
+    assert [r["source"] for r in dark] == ["remember"]
+
+
 def test_digest_survives_a_source_round_trip(store):
     store.ingest(
         "o/r",

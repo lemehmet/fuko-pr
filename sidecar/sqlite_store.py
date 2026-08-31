@@ -304,10 +304,14 @@ class SqliteVecStore:
         """Return the learnings most relevant to the given PR context.
 
         ``digest`` rows are excluded unless ``FUKO_DIGEST_RETRIEVAL`` is set,
-        matching the Postgres store. Here the exclusion happens after the KNN
-        rather than inside it -- ``vec_learnings`` carries no ``source`` column
-        — so a dark digest can still consume a candidate slot. That is the same
-        class of divergence this module already documents for the scoped pass.
+        matching the Postgres store. ``vec_learnings`` carries no ``source``
+        column, so the exclusion can only happen after the KNN -- which on its
+        own would let a dark digest consume a candidate slot and silently push a
+        real learning out of the window. The candidate window is therefore
+        widened by exactly the number of digest rows the repo holds, which is
+        the most that can be in it, so the pass still considers ``candidate_k``
+        non-digest rows. That restores the guarantee the Postgres store gets for
+        free from an ``AND`` inside its ``ORDER BY ... LIMIT``.
         """
         q = _build_query(files, pr_body, query_text)
         if not q:
@@ -319,10 +323,17 @@ class SqliteVecStore:
         now = datetime.now(timezone.utc).isoformat()
 
         def fn(conn: sqlite3.Connection) -> list[dict]:
+            cand_k = cand
+            if not digests:
+                (dark,) = conn.execute(
+                    "SELECT count(*) FROM learnings WHERE repo = ? AND source = ?",
+                    (repo, DIGEST_SOURCE),
+                ).fetchone()
+                cand_k += dark
             knn = conn.execute(
                 "SELECT lid, distance FROM vec_learnings "
                 "WHERE repo = ? AND embedding MATCH ? AND k = ?",
-                (repo, vec, cand),
+                (repo, vec, cand_k),
             ).fetchall()
             dist = {lid: d for lid, d in knn}
             if not dist:

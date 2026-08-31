@@ -154,7 +154,10 @@ Learnings come from four sources and live in your store:
   a map of what the file declares and at which lines, scoped to that file's own
   path and keyed on the hash of the blob it describes, so an edit supersedes its
   own index. The point is that a reviewer facing a 400 KB source file can read
-  the two hundred lines it needs instead of the whole thing.
+  the two hundred lines it needs instead of the whole thing. Paths are stored
+  relative to the working directory and anything outside it is skipped with a
+  warning — retrieval matches these against the repository-relative paths a pull
+  request reports, so an index keyed any other way could never be found.
 
   The index is extracted mechanically (Python via `ast`, everything else via a
   declaration scan) rather than written by a model, and it carries identifiers

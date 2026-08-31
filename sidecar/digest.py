@@ -35,6 +35,7 @@ as evidence the symbol does not exist.
 from __future__ import annotations
 
 import ast
+import glob
 import hashlib
 import re
 from dataclasses import dataclass
@@ -58,6 +59,19 @@ Bounds three things at once: the embedding call (a digest is one learning, one
 embed, and the default ``bge-m3`` has a finite context), the share of the
 ``top_k`` knowledge budget one digest can take, and the prompt itself.
 """
+
+_TAIL_RESERVE = 200
+"""Characters held back from ``max_chars`` for whichever trailing note applies.
+
+Every rendered index ends in at most one note -- either "no declarations
+recognised" or "N shorter declarations omitted" -- and both of those say
+something a reader must not miss, so they are reserved for rather than
+truncated. This reserve is also what makes the cap in :func:`render` a cap on
+the *whole* result: a limit too small to hold the header plus this reserve is
+rejected instead of quietly overshot.
+"""
+
+_NO_DECLARATIONS = "(no declarations recognised in this file)"
 
 _TOPIC_PREFIX = "file-index:"
 
@@ -271,14 +285,28 @@ def render(path: str, text: str, max_chars: int = MAX_CHARS) -> str:
         max_chars: Cap on the rendered result.
 
     Returns:
-        The rendered index. A file whose declarations do not all fit says so
-        explicitly rather than presenting a partial list as complete.
+        The rendered index, never longer than ``max_chars``. A file whose
+        declarations do not all fit says so explicitly rather than presenting a
+        partial list as complete.
+
+    Raises:
+        ValueError: ``max_chars`` is too small to hold the header plus a
+            trailing note. The header states what the index is and is not, so
+            it is never truncated to fit a cap -- an impossible cap is refused
+            instead, which is the only outcome that keeps the cap honest.
     """
     symbols, scanner = scan(path, text)
     head = _header(path, text, scanner)
+    head_text = "\n".join(head)
+    floor = len(head_text) + 1 + _TAIL_RESERVE
+    if max_chars < floor:
+        raise ValueError(
+            f"max_chars={max_chars} is below the {floor} characters the index of {path} "
+            "needs for its header and trailing note"
+        )
     if not symbols:
-        return "\n".join([*head, "(no declarations recognised in this file)"])
-    budget = max(0, max_chars - len("\n".join(head)) - 200)
+        return "\n".join([*head, _NO_DECLARATIONS])
+    budget = max(0, max_chars - len(head_text) - _TAIL_RESERVE)
     fitting, dropped = _fit(symbols, budget)
     lines = [*head, *(_entry(s) for s in fitting)]
     if dropped:
@@ -294,11 +322,16 @@ def build_item(path: str, text: str, max_chars: int = MAX_CHARS) -> IngestItem:
 
     ``file_globs`` is the file's own path, which is what makes the existing
     glob filter in :func:`sidecar.retrieve.query` surface the digest for exactly
-    the pull requests that touch that file and no others.
+    the pull requests that touch that file and no others. It is escaped first:
+    both retrieval backends match with :func:`fnmatch.fnmatch`, which reads
+    ``*``, ``?`` and ``[...]`` in the *stored* path as pattern syntax, so an
+    unescaped ``app/[slug]/page.tsx`` would not even match itself and its index
+    would be stored, embedded, and permanently unreachable. ``topic`` keeps the
+    literal path, so supersession still recognises the file by name.
     """
     return IngestItem(
         text=render(path, text, max_chars),
         source=DIGEST_SOURCE,
-        file_globs=[path],
+        file_globs=[glob.escape(path)],
         topic=topic_for(path, blob_hash(text)),
     )

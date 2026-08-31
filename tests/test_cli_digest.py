@@ -1,5 +1,6 @@
 """Tests for the `fuko digest` command and its supersede-on-write step."""
 
+import fnmatch
 from argparse import Namespace
 
 from sidecar import cli, digest
@@ -10,7 +11,7 @@ REPO = "owner/name"
 
 def _args(tmp_path, **over):
     base = {
-        "paths": [str(tmp_path)],
+        "paths": ["."],
         "repo": REPO,
         "min_bytes": 100,
         "max_chars": digest.MAX_CHARS,
@@ -49,7 +50,14 @@ class _DedupingStore(FakeStore):
         return len(fresh), len(items) - len(fresh)
 
 
-def _use(monkeypatch, store=None):
+def _use(monkeypatch, tmp_path, store=None):
+    """Point the CLI at a fake store and run the command from inside the checkout.
+
+    `fuko digest` indexes paths relative to the working directory and skips
+    anything outside it, so a test that exercises the command has to run from a
+    checkout root the way an operator does.
+    """
+    monkeypatch.chdir(tmp_path)
     store = store or _DedupingStore()
     monkeypatch.setattr(cli, "_store", lambda _config: store)
     return store
@@ -79,7 +87,7 @@ def test_candidates_survive_a_path_that_vanished_after_collection(monkeypatch, c
 
 def test_dry_run_prints_the_index_and_stores_nothing(tmp_path, monkeypatch, capsys):
     _big(tmp_path, "big.rs")
-    store = _use(monkeypatch)
+    store = _use(monkeypatch, tmp_path)
     cli._cmd_digest(_args(tmp_path, dry_run=True))
     out = capsys.readouterr()
     assert "Structural index of" in out.out
@@ -89,7 +97,7 @@ def test_dry_run_prints_the_index_and_stores_nothing(tmp_path, monkeypatch, caps
 
 def test_no_candidates_reports_and_stores_nothing(tmp_path, monkeypatch, capsys):
     (tmp_path / "tiny.rs").write_text("fn a() {}\n")
-    store = _use(monkeypatch)
+    store = _use(monkeypatch, tmp_path)
     cli._cmd_digest(_args(tmp_path))
     assert "nothing to index" in capsys.readouterr().err
     assert store.items == []
@@ -97,7 +105,7 @@ def test_no_candidates_reports_and_stores_nothing(tmp_path, monkeypatch, capsys)
 
 def test_binary_files_are_skipped_with_a_warning(tmp_path, monkeypatch, capsys):
     (tmp_path / "blob.bin").write_bytes(b"\xff\xfe" + b"\x00" * 400)
-    store = _use(monkeypatch)
+    store = _use(monkeypatch, tmp_path)
     cli._cmd_digest(_args(tmp_path))
     err = capsys.readouterr().err
     assert "could not read" in err and "nothing to index" in err
@@ -105,19 +113,19 @@ def test_binary_files_are_skipped_with_a_warning(tmp_path, monkeypatch, capsys):
 
 
 def test_digest_is_stored_scoped_to_its_own_path(tmp_path, monkeypatch, capsys):
-    path = _big(tmp_path, "big.rs")
-    store = _use(monkeypatch)
+    _big(tmp_path, "big.rs")
+    store = _use(monkeypatch, tmp_path)
     cli._cmd_digest(_args(tmp_path))
     assert "indexed 1 file(s): 1 new" in capsys.readouterr().out
     (row,) = store.items
     assert row["source"] == digest.DIGEST_SOURCE
-    assert row["file_globs"] == [str(path)]
-    assert digest.topic_path(row["topic"]) == str(path)
+    assert row["file_globs"] == ["big.rs"]
+    assert digest.topic_path(row["topic"]) == "big.rs"
 
 
 def test_a_changed_file_supersedes_its_previous_index(tmp_path, monkeypatch, capsys):
     path = _big(tmp_path, "big.rs")
-    store = _use(monkeypatch)
+    store = _use(monkeypatch, tmp_path)
     cli._cmd_digest(_args(tmp_path))
     stale_topic = store.items[0]["topic"]
 
@@ -132,7 +140,7 @@ def test_a_changed_file_supersedes_its_previous_index(tmp_path, monkeypatch, cap
 
 def test_an_unchanged_file_supersedes_nothing(tmp_path, monkeypatch, capsys):
     _big(tmp_path, "big.rs")
-    store = _use(monkeypatch)
+    store = _use(monkeypatch, tmp_path)
     cli._cmd_digest(_args(tmp_path))
     capsys.readouterr()
     cli._cmd_digest(_args(tmp_path))
@@ -143,8 +151,8 @@ def test_an_unchanged_file_supersedes_nothing(tmp_path, monkeypatch, capsys):
 
 def test_supersede_leaves_other_files_and_other_sources_alone(tmp_path, monkeypatch):
     path = _big(tmp_path, "big.rs")
-    other = _big(tmp_path, "other.rs")
-    store = _use(monkeypatch)
+    _big(tmp_path, "other.rs")
+    store = _use(monkeypatch, tmp_path)
     cli._cmd_digest(_args(tmp_path))
     store.items.append(
         {
@@ -153,7 +161,7 @@ def test_supersede_leaves_other_files_and_other_sources_alone(tmp_path, monkeypa
             "text": "a convention",
             "source": "review_thread",
             "topic": "review decision",
-            "file_globs": [str(path)],
+            "file_globs": ["big.rs"],
         }
     )
 
@@ -162,12 +170,12 @@ def test_supersede_leaves_other_files_and_other_sources_alone(tmp_path, monkeypa
 
     kept = {i["id"] for i in store.items}
     assert "keepme" in kept
-    assert len([i for i in store.items if i.get("file_globs") == [str(other)]]) == 1
+    assert len([i for i in store.items if i.get("file_globs") == ["other.rs"]]) == 1
 
 
 def test_supersede_pages_through_a_long_digest_backlog(tmp_path, monkeypatch):
-    path = _big(tmp_path, "big.rs")
-    store = _use(monkeypatch)
+    _big(tmp_path, "big.rs")
+    store = _use(monkeypatch, tmp_path)
     for n in range(250):
         store.items.append(
             {
@@ -185,8 +193,8 @@ def test_supersede_pages_through_a_long_digest_backlog(tmp_path, monkeypatch):
             "id": "old",
             "text": "x",
             "source": digest.DIGEST_SOURCE,
-            "topic": digest.topic_for(str(path), "f" * 12),
-            "file_globs": [str(path)],
+            "topic": digest.topic_for("big.rs", "f" * 12),
+            "file_globs": ["big.rs"],
         }
     )
     cli._cmd_digest(_args(tmp_path))
@@ -194,16 +202,67 @@ def test_supersede_pages_through_a_long_digest_backlog(tmp_path, monkeypatch):
     assert len([i for i in store.items if i["id"].startswith("filler-")]) == 250
 
 
-def test_absolute_paths_are_warned_about_as_unreachable(tmp_path, monkeypatch, capsys):
-    _big(tmp_path, "big.rs")
-    _use(monkeypatch)
-    cli._cmd_digest(_args(tmp_path))
-    assert "can never match a pull request" in capsys.readouterr().err
+def test_files_outside_the_checkout_are_skipped_with_a_warning(tmp_path, monkeypatch, capsys):
+    """An index of a file the working directory does not contain is unreachable.
+
+    Retrieval matches a stored glob against the repository-relative paths a pull
+    request reports, so such a row would embed, cost money, and never surface.
+    """
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    outside = tmp_path / "outside"
+    _big(outside, "big.rs")
+    store = _use(monkeypatch, checkout)
+    cli._cmd_digest(_args(tmp_path, paths=[str(outside)]))
+    err = capsys.readouterr().err
+    assert "outside the checkout" in err and "nothing to index" in err
+    assert store.items == []
 
 
 def test_relative_paths_draw_no_warning(tmp_path, monkeypatch, capsys):
     _big(tmp_path, "big.rs")
-    _use(monkeypatch)
-    monkeypatch.chdir(tmp_path)
-    cli._cmd_digest(_args(tmp_path, paths=["."]))
-    assert "can never match" not in capsys.readouterr().err
+    _use(monkeypatch, tmp_path)
+    cli._cmd_digest(_args(tmp_path))
+    assert "outside the checkout" not in capsys.readouterr().err
+
+
+def test_an_absolute_path_inside_the_checkout_is_stored_relative(tmp_path, monkeypatch):
+    """Where the operator points at the file is not how the index is keyed."""
+    _big(tmp_path, "src/big.rs")
+    store = _use(monkeypatch, tmp_path)
+    cli._cmd_digest(_args(tmp_path, paths=[str(tmp_path / "src")]))
+    (row,) = store.items
+    assert row["file_globs"] == ["src/big.rs"]
+    assert digest.topic_path(row["topic"]) == "src/big.rs"
+
+
+def test_a_path_with_glob_metacharacters_still_matches_itself(tmp_path, monkeypatch):
+    """`app/[slug]/page.tsx` is an ordinary route file, not a character class."""
+    _big(tmp_path, "app/[slug]/page.tsx")
+    store = _use(monkeypatch, tmp_path)
+    cli._cmd_digest(_args(tmp_path))
+    (row,) = store.items
+    assert fnmatch.fnmatch("app/[slug]/page.tsx", row["file_globs"][0])
+    assert digest.topic_path(row["topic"]) == "app/[slug]/page.tsx"
+
+
+def test_a_metacharacter_path_supersedes_its_own_previous_index(tmp_path, monkeypatch, capsys):
+    """Supersession keys on the literal path, so escaping the glob cannot break it."""
+    path = _big(tmp_path, "app/[slug]/page.tsx")
+    store = _use(monkeypatch, tmp_path)
+    cli._cmd_digest(_args(tmp_path))
+    path.write_text(path.read_text() + "pub fn extra() { /* padding padding */ }\n")
+    capsys.readouterr()
+    cli._cmd_digest(_args(tmp_path))
+    assert "1 superseded" in capsys.readouterr().out
+    assert len(store.items) == 1
+
+
+def test_a_cap_too_small_for_the_header_skips_the_file(tmp_path, monkeypatch, capsys):
+    """A cap the index cannot honour is refused, not silently overshot."""
+    _big(tmp_path, "big.rs")
+    store = _use(monkeypatch, tmp_path)
+    cli._cmd_digest(_args(tmp_path, max_chars=10))
+    err = capsys.readouterr().err
+    assert "cannot index big.rs" in err and "nothing to index" in err
+    assert store.items == []

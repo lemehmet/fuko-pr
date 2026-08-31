@@ -468,6 +468,23 @@ def _digest_candidates(patterns: list[str], min_bytes: int) -> list[str]:
     return out
 
 
+def _index_path(candidate: str, root: Path) -> str | None:
+    """Return ``candidate`` as a ``root``-relative POSIX path, or ``None`` if it escapes.
+
+    An index is retrieved by matching its glob against the paths GitHub reports
+    for a pull request, and those are repository-relative POSIX paths. Any other
+    spelling -- an absolute path, or a ``../`` one reached from the wrong
+    directory -- produces a row that is stored, embedded, and can never match
+    anything, so the path is canonicalised here and a file outside the checkout
+    is skipped rather than indexed unreachably.
+    """
+    try:
+        rel = Path(candidate).resolve().relative_to(root)
+    except (OSError, ValueError):
+        return None
+    return rel.as_posix()
+
+
 def _forget_superseded(store, repo: str, current: dict[str, str]) -> int:
     """Delete digests of ``current``'s paths that describe some older blob.
 
@@ -500,25 +517,33 @@ def _forget_superseded(store, repo: str, current: dict[str, str]) -> int:
 
 def _cmd_digest(args) -> None:
     items = []
+    paths: list[str] = []
+    root = Path.cwd().resolve()
     candidates = _digest_candidates(args.paths, args.min_bytes)
-    absolute = [p for p in candidates if Path(p).is_absolute()]
-    if absolute:
-        # An index is retrieved by matching its glob against the paths GitHub
-        # reports for a pull request, and those are repository-relative. An
-        # absolute one is storable, embeddable, and permanently unreachable.
+    outside = [p for p in candidates if _index_path(p, root) is None]
+    if outside:
         print(
-            f"fuko: warning: {len(absolute)} file(s) collected under an absolute path "
-            f"(e.g. {absolute[0]}); their indexes can never match a pull request's "
-            "changed files. Run `fuko digest` from the root of the checkout.",
+            f"fuko: warning: skipped {len(outside)} file(s) outside the checkout "
+            f"(e.g. {outside[0]}); an index is matched against the repository-relative "
+            "paths a pull request reports, so those could never be retrieved. Run "
+            "`fuko digest` from the root of the checkout.",
             file=sys.stderr,
         )
     for fp in candidates:
+        rel = _index_path(fp, root)
+        if rel is None:
+            continue
         try:
             text = Path(fp).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as e:
             print(f"warning: could not read {fp}: {e}; skipping", file=sys.stderr)
             continue
-        items.append(digest.build_item(fp, text, args.max_chars))
+        try:
+            items.append(digest.build_item(rel, text, args.max_chars))
+        except ValueError as e:
+            print(f"warning: cannot index {rel}: {e}; skipping", file=sys.stderr)
+            continue
+        paths.append(rel)
 
     if not items:
         print(
@@ -536,8 +561,10 @@ def _cmd_digest(args) -> None:
 
     store = _store(args.config)
     inserted, skipped = store.ingest(args.repo, items)
+    # Keyed on the literal path, not on ``file_globs`` -- the stored glob is
+    # escaped for fnmatch, while ``topic_path`` returns the path verbatim.
     superseded = _forget_superseded(
-        store, args.repo, {item.file_globs[0]: item.topic for item in items}
+        store, args.repo, {path: item.topic for path, item in zip(paths, items, strict=True)}
     )
     print(
         f"indexed {len(items)} file(s): {inserted} new, {skipped} unchanged, "
