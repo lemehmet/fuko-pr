@@ -155,12 +155,16 @@ class Settlement:
     module downgrades to them, and the rows a round re-reported as a new finding
     instead of settling. All three are the same outcome, so they are one number.
 
-    ``deduped`` names the published findings that were NOT recorded because they
-    restated such a row -- see :func:`settle`. It is the claims and not a count
-    because suppressing a write is the one thing this module does that a reader
-    cannot reconstruct from the store afterwards: the row that survived carries
-    the EARLIER body, so a silent count would leave "which claim did this round
-    decide it already had?" unanswerable. The caller logs them.
+    ``deduped`` names the published findings that were NOT recorded because the
+    claim already had a row this round left open -- one carried in and re-asserted
+    rather than settled, one re-raised from a closure, or one this round's own
+    earlier finding is about to write (#191). All three are the same outcome for a
+    reader -- the claim ends the round on one row, and this round published it
+    more than once -- so they are one tuple; see :func:`settle`. It is the claims
+    and not a count because suppressing a write is the one thing this module does
+    that a reader cannot reconstruct from the store afterwards: the row that
+    survived carries the EARLIER body, so a silent count would leave "which claim
+    did this round decide it already had?" unanswerable. The caller logs them.
 
     ``reopened`` names the published findings that re-raised a row an earlier
     round (or this one) had CLOSED by verdict -- #177's reversal. Named for the
@@ -700,6 +704,16 @@ def settle(
     is touched (a round did look at it against this head) and the finding is not
     recorded again.
 
+    The same collapse applies WITHIN one round's published set (#191). A round
+    that publishes one claim twice into a seat holding no row for it would
+    otherwise reach ``fresh`` twice and write two ``open`` rows for one claim,
+    which the next round carries as two prior ids and renders twice -- the same
+    compounding, arriving through the plain-record door rather than the carried or
+    the re-raise one. So the first publication of a claim wins the row and every
+    later one in the same list is deduped against it. Nothing is touched for such
+    a collapse: there is no row id yet to refresh, and the row the next line
+    writes already carries this head.
+
     ``(file, title)`` is therefore this module's DEFINITION of claim identity,
     not a guess at one: two findings naming the same file under the same headline
     are one claim here, and a round that means to record a distinct claim has to
@@ -824,7 +838,10 @@ def settle(
             for minted, prior in carried.state.ids.items()
             if minted in carried.rows and minted not in settled
         }
-        fresh: list[AgenticFinding] = []
+        # Keyed by claim so the round's own duplicates collapse onto the first
+        # publication of each, and insertion-ordered so what reaches the store is
+        # still the order the round published in.
+        fresh: dict[tuple[str, str], AgenticFinding] = {}
         # Only read the closed ledger when there is something that could re-raise it.
         candidates = _reopen_candidates(repo, pr, seat) if findings else {}
         for finding in findings:
@@ -834,6 +851,13 @@ def settle(
                 deduped.append(f"{finding.file}: {finding.title}")
                 if row_id not in touch:
                     touch.append(row_id)
+                continue
+            # Before the candidate pop, because the twin that claimed this anchor
+            # already consumed (or failed to reopen) any closed row for it: a
+            # second pop can only ever return None, and falling through would
+            # record the duplicate the pop was supposed to have prevented (#191).
+            if anchor in fresh:
+                deduped.append(f"{finding.file}: {finding.title}")
                 continue
             # `pop`, so two published findings on one claim re-raise ONE row --
             # and the re-raised row joins `still_open`, so the SECOND of them
@@ -849,9 +873,11 @@ def settle(
                 reopened.append(f"{finding.file}: {finding.title}")
                 still_open[anchor] = closed_row.id
                 continue
-            fresh.append(finding)
+            fresh[anchor] = finding
         ledger_store.touch_findings(repo, pr, seat, touch)
-        recorded = ledger_store.record_findings(repo, pr, seat, carried.round, head_sha, fresh)
+        recorded = ledger_store.record_findings(
+            repo, pr, seat, carried.round, head_sha, list(fresh.values())
+        )
     coverage = (
         ledger_store.record_coverage(repo, pr, seat, carried.round, head_sha, _keyed(examined))
         if coverage_ledger

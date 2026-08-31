@@ -467,10 +467,7 @@ def test_two_published_findings_on_one_claim_re_raise_one_row(store):
         pr=PR,
         seat=SEAT,
         head_sha="head1",
-        findings=[
-            _finding(file="src/a.py", title="leaks the handle"),
-            _finding(file="src/a.py", title="leaks the handle"),
-        ],
+        findings=[_finding(file="src/a.py", title="leaks the handle")],
     )
     carried = carry_in(REPO, PR, SEAT)
     settle(
@@ -479,10 +476,7 @@ def test_two_published_findings_on_one_claim_re_raise_one_row(store):
         pr=PR,
         seat=SEAT,
         head_sha="head2",
-        prior_status=[
-            PriorFindingStatus(id="p1", status="fixed", reason="one"),
-            PriorFindingStatus(id="p2", status="fixed", reason="two"),
-        ],
+        prior_status=[PriorFindingStatus(id="p1", status="fixed", reason="one")],
     )
 
     outcome = settle(
@@ -503,6 +497,46 @@ def test_two_published_findings_on_one_claim_re_raise_one_row(store):
     assert outcome.deduped == ("src/a.py: Leaks The Handle",)
     assert outcome.recorded == 0
     assert [row["status"] for row in store.rows.values()].count("open") == 1
+
+
+def test_a_round_publishing_one_claim_twice_records_one_row(store):
+    """The third door: no carried row, no closed row, still one row (#191).
+
+    The dedup pass had only ever read the CARRIED ledger, so a claim this seat
+    was holding nothing for reached ``fresh`` once per publication and was
+    written twice. The next round would then carry it as two prior ids, render
+    both, and need two verdicts to settle one claim -- the compounding #189 shut
+    on the reopen door, arriving through the plain-record one.
+
+    The case-varied title is the assertion that this path anchors on
+    ``claim_anchor`` -- the ledger's own definition of claim identity -- and not
+    on the model's capitalisation.
+    """
+    outcome = settle(
+        carry_in(REPO, PR, SEAT),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        findings=[
+            _finding(file="src/a.py", title="leaks the handle", body="the first body"),
+            _finding(file="src/a.py", title="Leaks The Handle", body="the second body"),
+            _finding(file="src/b.py", title="drops the error"),
+        ],
+    )
+
+    assert outcome.recorded == 2
+    assert outcome.deduped == ("src/a.py: Leaks The Handle",)
+    # Nothing to refresh: the collapsed claim's row is written by this very
+    # round, at this very head.
+    assert outcome.reasserted == 0
+    rows = store.open_findings(REPO, PR, SEAT).rows
+    assert [(f.prior.file, f.prior.title) for f in rows] == [
+        ("src/a.py", "leaks the handle"),
+        ("src/b.py", "drops the error"),
+    ]
+    # The row that survives carries the EARLIER body, as on the carried-row path.
+    assert rows[0].prior.body == "the first body"
 
 
 def test_a_reopen_the_store_refuses_records_the_claim_instead(store, monkeypatch):
