@@ -345,6 +345,41 @@ def test_coderabbit_stale_one_off_marker_is_not_content_for_head():
     assert s["reviewed_head_with_content"] is False
 
 
+def test_coderabbit_notice_body_review_on_head_is_not_content():
+    """The fifth door: `body_on_head` accepted a review body that IS a notice.
+
+    CR submits reviews whose body is the throttle notice -- the stale-notice tests
+    below are built on that shape, and a review is anchored to the head it was
+    submitted against, so the live form is a notice-body review on the CURRENT
+    head. Counting it as content satisfied the escape hatch, short-circuited the
+    demotion, and reported `done` with `reviewed_head_with_content` TRUE for a
+    commit CR never read -- #137's failure, through its own discriminator.
+    """
+    s = coderabbit_state(HEAD, [_cr(_FAIR_USAGE)], [_cr_review(HEAD, body=_FAIR_USAGE)])
+    assert s["state"] == "rate_limited"
+    assert s["reviewed_head_with_content"] is False
+
+
+def test_coderabbit_summary_quoting_notice_prose_is_not_a_notice():
+    """The false-demote half: notice prose QUOTED mid-line must not be decisional.
+
+    #137 promotes the notice patterns from "choose among transient states" to
+    "strip marker evidence and demote a completion", so an unanchored substring
+    hit could withhold a genuine review -- and re-withhold it on every push while
+    the quote persisted. CR renders the real notice as a heading in its warning
+    blockquote; a body discussing one quotes it mid-sentence. This is the same
+    false positive `_CR_DONE_MARKER` is line-anchored to avoid.
+    """
+    body = (
+        _walk(HEAD, posted=2)["body"]
+        + '\nThe matcher is taught the "Review limit reached" and "Rate limit '
+        'exceeded" wordings here.'
+    )
+    s = coderabbit_state(HEAD, [_cr(body)], [], [_check("completed", "success")])
+    assert s["state"] == "done"
+    assert s["reviewed_head_with_content"] is True
+
+
 def test_coderabbit_pause_notice_demotes_to_paused_not_rate_limited():
     """The two notices need different recoveries, so they keep different states.
 

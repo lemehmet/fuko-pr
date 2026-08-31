@@ -73,13 +73,28 @@ _CR_IN_PROGRESS = re.compile(r"review in progress|Currently processing new chang
 # while the visible prose differs per variant and is plainly subject to change.
 # Bodies are stored raw, so HTML comments are present in the blob. The prose
 # alternatives stay as belt-and-braces if CR ever drops the marker.
+#
+# Those prose alternatives are LINE-ANCHORED, for the reason `_CR_DONE_MARKER`
+# below already is. Unanchored they only chose among non-done transient states;
+# #137 makes them decisional over whole bodies -- stripping marker evidence and
+# demoting a completion -- so a body merely *quoting* the wording could withhold a
+# genuine review, and re-withhold it on every push while the quote persisted. The
+# prefix class is any run of non-letters rather than a fixed set, because CR
+# decorates the notice both as a blockquoted heading (`> ## Review limit reached`)
+# and with an emoji lead-in (`⚠️ Rate limit exceeded. Try again in 8 minutes`).
+# What it buys is that the phrase must be the FIRST alphabetic content on its
+# line, which a quotation mid-sentence never is. The machine marker stays
+# unanchored: CR emits it as a bare HTML comment, and it is not quotable prose.
 _CR_RATE_LIMIT = re.compile(
     r"auto-generated comment: rate limited by coderabbit\.ai"
-    r"|Rate limit exceeded"
-    r"|Review limit reached",
-    re.I,
+    r"|^[^A-Za-z\n]*Rate limit exceeded\b"
+    r"|^[^A-Za-z\n]*Review limit reached\b",
+    re.I | re.M,
 )
-_CR_PAUSED = re.compile(r"Reviews paused|review paused by coderabbit\.ai", re.I)
+_CR_PAUSED = re.compile(
+    r"review paused by coderabbit\.ai|^[^A-Za-z\n]*Reviews paused\b",
+    re.I | re.M,
+)
 _CR_DONE_ZERO = re.compile(r"(?im)^[>\s*_]*No actionable comments(?: were generated)?\b")
 _CR_DONE_MARKER = re.compile(
     r"(?im)^[>\s*_]*(?:Actionable comments posted:\s*\d+"
@@ -392,9 +407,19 @@ def coderabbit_state(
     )
     # A submitted review whose body has actual prose is independent evidence: CR
     # writes one when it reviewed, and the empty acknowledgement is precisely the
-    # artifact of a Fair-Usage round.
+    # artifact of a Fair-Usage round. The notice exclusion applies here for the
+    # same reason it applies to the marker above -- a body that IS a notice cannot
+    # also be evidence that CR read HEAD -- and this suite already establishes that
+    # CR submits reviews whose body is the throttle notice (the stale-notice tests
+    # below are built on exactly that shape). Anchored to HEAD at submission time,
+    # the live form of it is a notice-body review on the CURRENT head, which would
+    # otherwise satisfy `with_content`, short-circuit `_cr_demotion`, and report
+    # `done` for a commit CR never read -- through the hatch that is supposed to
+    # be the discriminator (agentic reviewer, round 2).
     body_on_head = any(
-        (r.get("body") or "").strip() for r in cr_reviews if r.get("commit_id") == head_sha
+        (r.get("body") or "").strip()
+        for r in cr_reviews
+        if r.get("commit_id") == head_sha and not _cr_is_notice_body(r.get("body") or "")
     )
     with_content = marker_on_head or body_on_head
     summary_blob = "\n".join(b for b in cr_issue_bodies if _CR_SUMMARY.search(b))
