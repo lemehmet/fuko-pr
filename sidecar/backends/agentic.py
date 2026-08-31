@@ -316,34 +316,37 @@ _GITHUB_CRED_VARS = (
     "GITHUB_ENTERPRISE_TOKEN",
 )
 
-# The sidecar's own credentials, stripped for the same reason and by the same
-# rule. Since #171 ``FUKO_TOKEN`` authorizes ledger WRITES -- including the
+# fuko's OWN environment namespace, none of which is inherited by the agent.
+#
+# The occasion was #171: it gave ``FUKO_TOKEN`` ledger-WRITE authority -- the
 # irreversible ``stale`` closure, on any ``(repo, pr, seat)`` lane, and rows
-# whose text is rendered into a later round's prompt -- and the boundary note in
-# :mod:`sidecar.main` accepts that widening on the grounds that model output
-# never holds the token. Inherited into the harness environment, that premise was
-# false: the review workflow exports both into the step this process runs in, and
-# `/proc/self/environ` is the reason :data:`sidecar.reviewer.harness.
+# whose text is rendered into a later round's prompt -- while the boundary note
+# in :mod:`sidecar.main` accepted that widening on the grounds that model output
+# never holds the token. That premise was false as deployed: the review workflow
+# exports ``FUKO_URL`` and ``FUKO_TOKEN`` into the step this process runs in, and
+# ``/proc/self/environ`` is the reason :data:`sidecar.reviewer.harness.
 # SENSITIVE_SYSTEM_DIRS` exists at all -- a denial its own docstring calls
-# reasoned rather than measured. Stripping them makes the claim true instead of
-# leaving it resting on a denylist.
+# reasoned rather than measured, closing the instance rather than the class.
 #
-# Nothing below this boundary reads them: the harness runs with
-# ``--strict-mcp-config`` and read-only tools, every ledger and knowledge call
-# happens in THIS process before and after ``run_review``, and the knowledge the
-# agent sees arrives as prompt text via ``FUKO_AGENTIC_KNOWLEDGE``, not as a
-# fetch it performs. If knowledge retrieval ever moves harness-side, this tuple
-# is where that decision has to be revisited.
+# So this strips the NAMESPACE rather than a list of names. A list is how the
+# same hole gets reopened one variable at a time: the first version of this
+# named ``FUKO_URL``/``FUKO_TOKEN``/``FUKO_DATABASE_URL`` and still missed
+# ``FUKO_AUTH_TOKEN`` -- the sidecar-side spelling of the very same bearer
+# secret, since :class:`sidecar.config.Settings` reads ``auth_token`` from the
+# ``FUKO_`` prefix -- and ``FUKO_EMBED_API_KEY`` behind it. Both were found by
+# reading the config rather than the diff. `FUKO_` is the whole surface, so
+# taking the whole surface is the only version that stays closed.
 #
-# ``FUKO_DATABASE_URL`` is here although the workflow does not export it: on a
-# sidecar-hosted runner or a laptop run it is ambient, and it is the heavier
-# credential of the two -- a raw Postgres connection string rather than a bearer
-# token scoped to one API. Raised by ``qwen-anthropic/qwen3.8-max`` on #171.
-_SIDECAR_CRED_VARS = (
-    "FUKO_URL",
-    "FUKO_TOKEN",
-    "FUKO_DATABASE_URL",
-)
+# It also fails in the safe direction. Nothing below this boundary reads any of
+# it: the harness runs ``--strict-mcp-config`` with read-only tools, every
+# ledger and knowledge call happens in THIS process around ``run_review``, and
+# the knowledge the agent sees arrives as PROMPT TEXT rather than as a fetch it
+# performs. What the harness legitimately needs is handed to it EXPLICITLY after
+# this comprehension -- today only ``FUKO_AMBIENT_CLAUDE_CONFIG_DIR``, which
+# `_permission_settings` needs to deny the runner's real config dir -- so a
+# future variable the agent must see has to be named at that point, and one
+# nobody remembered to name is absent rather than inherited.
+_FUKO_ENV_PREFIX = "FUKO_"
 
 
 #: How many completed-but-unclaimed reviews to retain. Generous next to any real
@@ -660,8 +663,7 @@ class AgenticBackend:
             k: v
             for k, v in os.environ.items()
             if k not in _GITHUB_CRED_VARS
-            and k not in _SIDECAR_CRED_VARS
-            and not k.startswith("FUKO_GITHUB_")
+            and not k.startswith(_FUKO_ENV_PREFIX)
             and k not in _ANTHROPIC_INHERITED_VARS
         }
         # Auth-mode-independent: the entry's context window rides along

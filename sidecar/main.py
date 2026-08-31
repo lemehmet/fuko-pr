@@ -318,13 +318,15 @@ def rh_observe_endpoint(req: models.ObserveHealthRequest) -> dict:
 # token reaches, not what a reviewed pull request can reach.
 #
 # "The model never holds the token" is the load-bearing half of that, and it is
-# now ENFORCED rather than assumed: ``FUKO_URL``, ``FUKO_TOKEN`` and
-# ``FUKO_DATABASE_URL`` are stripped from the agent's environment alongside the
-# GitHub credentials (:data:`sidecar.backends.agentic._SIDECAR_CRED_VARS`).
-# Before that they were inherited straight into the harness subprocess by the
-# review workflow's own exports, so the acceptance above rested on the agent
-# having no tool that reads its own environ -- which is a denylist, and the
-# denylist's own docstring says it closes the instance, not the class.
+# now ENFORCED rather than assumed: the whole ``FUKO_`` namespace is stripped
+# from the agent's environment alongside the GitHub credentials
+# (:data:`sidecar.backends.agentic._FUKO_ENV_PREFIX`), so ``FUKO_TOKEN`` and its
+# sidecar-side spelling ``FUKO_AUTH_TOKEN`` are both gone, along with
+# ``FUKO_DATABASE_URL`` and anything added to that namespace later. Before that
+# they were inherited straight into the harness subprocess by the review
+# workflow's own exports, so the acceptance above rested on the agent having no
+# tool that reads its own environ -- which is a denylist, and the denylist's own
+# docstring says it closes the instance, not the class.
 
 
 @app.post("/rs/findings", response_model=rs.LedgerCountResponse, dependencies=[Depends(_auth)])

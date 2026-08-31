@@ -172,13 +172,14 @@ SENSITIVE_HOME_FILES = (
 #: differs. No legitimate code review reads ``/proc``, ``/sys`` or ``/dev``, so
 #: this costs a real reviewer nothing.
 #:
-#: What that environment no longer holds is the SIDECAR's credentials: since
-#: #171 gave ``FUKO_TOKEN`` ledger-write authority, it is stripped before the
-#: spawn along with ``FUKO_URL`` and ``FUKO_DATABASE_URL``
-#: (:data:`sidecar.backends.agentic._SIDECAR_CRED_VARS`). The model credential
-#: below cannot be removed the same way -- the harness needs it to run at all --
-#: which is exactly why the two are handled differently and why this denial
-#: still matters.
+#: What that environment no longer holds is anything of fuko's own: since #171
+#: gave ``FUKO_TOKEN`` ledger-write authority, the entire ``FUKO_`` namespace is
+#: stripped before the spawn (:data:`sidecar.backends.agentic._FUKO_ENV_PREFIX`),
+#: and what the harness legitimately needs -- ``FUKO_AMBIENT_CLAUDE_CONFIG_DIR``
+#: below among them -- is set explicitly afterwards rather than inherited. The
+#: model credential CANNOT be removed the same way, because the harness needs it
+#: to run at all, which is exactly why the two are handled differently and why
+#: this denial still matters.
 #:
 #: NOT empirically verified: this was developed on darwin, which has no
 #: ``/proc``. The rules use the ``Read(//abs/**)`` spelling that WAS verified
