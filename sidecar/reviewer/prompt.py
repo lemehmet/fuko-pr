@@ -57,14 +57,19 @@ and dropping one re-creates the 86% one-shot loss the ledger exists to fix.
 MAX_PRIOR_EVIDENCE = 400
 """How much of a carried finding's evidence one prompt row may spend, in characters.
 
-Evidence is the longest field a finding carries -- stored bounded only by
-:data:`sidecar.review_state.MAX_TEXT` (4000) -- and open findings are
-deliberately uncapped in COUNT, so without a per-row bound the section's worst
-case is the store's read cap times the store's text cap: 200 rows x 4000
-characters of evidence alone. At 400 that worst case is 80k characters, and the
-typical case is untouched -- evidence is a list of paths and symbols, so 400
-characters holds roughly half a dozen of them and most rows are never cut at
-all.
+Evidence is the longest field carrying a finding forward ADDS to its row --
+stored bounded only by :data:`sidecar.review_state.MAX_TEXT` (4000) -- and open
+findings are deliberately uncapped in COUNT, so without a per-row bound evidence
+alone would contribute the store's read cap times the store's text cap: 200 rows
+x 4000 characters. At 400 that share is 80k characters, and the typical case is
+untouched -- evidence is a list of paths and symbols, so 400 characters holds
+roughly half a dozen of them and most rows are never cut at all.
+
+What this bounds is evidence's share, not the section. ``title`` and ``body``
+are stored under that same 4000-character cap and are still rendered whole, so
+they, not evidence, dominate the section's worst case. Their bounds are
+pre-existing scope -- #174 asked for a bound on what carrying evidence adds --
+and #187 tracks giving them the same treatment.
 
 Truncation rather than carrying evidence only for the highest-severity rows,
 which is the other bound #174 offered. Two reasons, both about what a round
@@ -364,6 +369,10 @@ def _one_line(text: str) -> str:
     return " ".join(str(text).splitlines())
 
 
+_EVIDENCE_TRUNCATED = "(... evidence truncated to fit this round's budget)"
+"""Stands in for the citations a row's budget could not hold."""
+
+
 def _bounded_evidence(text: str, budget: int) -> str:
     """Clip one carried finding's evidence to ``budget``, announcing any cut.
 
@@ -373,11 +382,27 @@ def _bounded_evidence(text: str, budget: int) -> str:
     assembled. The cut is stated in-band the way a dropped coverage entry is, so
     a round reading a short citation list can tell "that is all they read" from
     "that is all that fit".
+
+    The result is never longer than ``budget``, because the announcement is
+    counted INSIDE it rather than appended after it: a marker that rides on top
+    of the limit makes the limit a lie, and the arithmetic that picks the
+    constant -- rows times budget -- would then understate every truncated row by
+    the marker's own length.
+
+    Below a budget too small to hold the announcement, the announcement wins and
+    the citation goes entirely. That is the safe direction: a clipped marker
+    still reads as "something was cut", where a bare prefix of the citations
+    reads as the whole of what the predecessor examined -- exactly the misreading
+    the marker exists to prevent.
     """
     clipped = max(budget, 0)
     if len(text) <= clipped:
         return text
-    return f"{text[:clipped].rstrip()} (... evidence truncated to fit this round's budget)"
+    room = clipped - len(_EVIDENCE_TRUNCATED) - 1
+    kept = text[:room].rstrip() if room > 0 else ""
+    if not kept:
+        return _EVIDENCE_TRUNCATED[:clipped]
+    return f"{kept} {_EVIDENCE_TRUNCATED}"
 
 
 def render_prior_state(
@@ -400,9 +425,11 @@ def render_prior_state(
     * coverage is capped at ``max_coverage``, newest round first, with the cut
       stated in-band the way a truncated diff is;
     * a finding's evidence is capped PER ROW at ``max_evidence``
-      (:data:`MAX_PRIOR_EVIDENCE`), because it is the longest field a carried
-      row holds and the rows themselves are uncapped. Carrying it at all is
-      #174: the round that published a finding cited what it read, and the round
+      (:data:`MAX_PRIOR_EVIDENCE`), because it is the longest field carrying a
+      finding forward adds to a row and the rows themselves are uncapped in
+      count. It bounds evidence's share only -- ``title`` and ``body`` carry the
+      same store-side cap and are still rendered whole (#187). Carrying evidence
+      at all is #174: the round that published a finding cited what it read, and the round
       asked to re-verify that finding against a new head was being handed the
       claim with that citation stripped -- which is precisely the work the
       citation supports.
@@ -437,7 +464,8 @@ def render_prior_state(
                 lines.append(_indented(finding.body))
             if finding.evidence:
                 bounded = _bounded_evidence(finding.evidence, max_evidence)
-                lines.append(_indented(f"evidence: {bounded}"))
+                if bounded:
+                    lines.append(_indented(f"evidence: {bounded}"))
     ordered = sorted(coverage, key=lambda c: c.round, reverse=True)
     kept = ordered[: max(max_coverage, 0)]
     if kept:
