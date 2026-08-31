@@ -219,6 +219,13 @@ _FAIR_USAGE = (
     "<!-- end of auto-generated comment: rate limited by coderabbit.ai -->"
 )
 
+_PAUSE_NOTICE = (
+    "<!-- This is an auto-generated comment: summarize by coderabbit.ai -->\n"
+    "<!-- review paused by coderabbit.ai -->\n"
+    "> [!WARNING]\n> ## Reviews paused\n>\n"
+    "> Use the following command to resume: `@coderabbitai resume`"
+)
+
 
 def test_coderabbit_fair_usage_limit_with_head_walkthrough_is_rate_limited():
     """#19 + #86 together, from mepro #1584.
@@ -271,11 +278,304 @@ def test_coderabbit_earlier_rate_limit_does_not_mask_a_later_completed_scan():
     assert coderabbit_state(HEAD, [throttled, done], [])["state"] == "done"
 
 
-def test_coderabbit_completed_review_on_head_outranks_a_live_throttle_notice():
-    """A submitted review on HEAD is terminal even while a throttle notice sits above."""
+def test_coderabbit_empty_review_on_head_under_a_live_notice_is_demoted():
+    """#137 — INVERTS the old `a review on HEAD outranks a live throttle notice`.
+
+    Under Fair Usage CR still submits a review row on HEAD, with an empty body and
+    no walkthrough. That empty acknowledgement used to read as `done`, so the gate
+    opened on a commit CR never read. With a live notice in CR's in-place summary
+    and no review content anywhere on HEAD, the notice demotes it.
+    """
     throttled = _cr(_FAIR_USAGE)
     s = coderabbit_state(HEAD, [throttled], [_cr_review(HEAD, state="APPROVED")])
+    assert s["state"] == "rate_limited"
+    assert s["reviewed_head_with_content"] is False
+    assert escalation_needed([s]) is True
+
+
+def test_coderabbit_check_run_completed_under_a_live_notice_is_demoted():
+    """#137, the check-run door: PR #172 rounds 4/8 and PR #178 on this repo.
+
+    CR's check-run completes under Fair Usage just as it does after a real review,
+    so the authoritative-signal path (#17) reported `done` on heads CR never read.
+    """
+    s = coderabbit_state(HEAD, [_cr(_FAIR_USAGE)], [], [_check("completed", "success")])
+    assert s["state"] == "rate_limited"
+    assert s["state"] in DEGRADED_STATES
+    assert s["reviewed_head_with_content"] is False
+
+
+def test_coderabbit_check_run_completed_with_a_notice_naming_head_is_demoted():
+    """The observed field shape: the notice's range line is already bumped to HEAD."""
+    body = _walk(HEAD)["body"] + "\n" + _FAIR_USAGE
+    s = coderabbit_state(HEAD, [_cr(body)], [], [_check("completed", "success")])
+    assert s["state"] == "rate_limited"
+    assert s["head_reviewed"] == HEAD
+
+
+def test_coderabbit_stale_marker_in_a_bumped_notice_summary_is_not_evidence():
+    """The third door: one in-place-edited comment carrying all three artifacts.
+
+    CR rewrites its summary on every push, so a throttled round leaves a body whose
+    range line already names the NEW head while the terminal marker in it is the
+    PREVIOUS round's. Reading that marker as coverage vouches for a commit CR never
+    opened, so a body that is itself a notice cannot supply marker evidence.
+    """
+    body = _walk(HEAD, posted=2)["body"] + "\n" + _FAIR_USAGE
+    s = coderabbit_state(HEAD, [_cr(body)], [])
+    assert s["state"] == "rate_limited"
+    assert s["reviewed_head_with_content"] is False
+
+
+def test_coderabbit_stale_one_off_marker_is_not_content_for_head():
+    """The fourth door: a stale one-off comment feeding the `with_content` escape hatch.
+
+    A review on HEAD admits CR's live summary as describing HEAD. Admitting CR's
+    OTHER issue comments alongside it lets a one-off reply from an earlier round --
+    never rewritten, so permanently stale -- supply the terminal marker that cancels
+    the demotion, and the live limit notice in the summary is overruled by evidence
+    about a different commit (CodeRabbit finding, round 1).
+    """
+    stale_reply = _cr(
+        "<!-- This is an auto-generated reply by CodeRabbit -->\n**Actionable comments posted: 3**"
+    )
+    s = coderabbit_state(
+        HEAD, [_cr(_FAIR_USAGE), stale_reply], [_cr_review(HEAD, state="APPROVED")]
+    )
+    assert s["state"] == "rate_limited"
+    assert s["reviewed_head_with_content"] is False
+
+
+def test_coderabbit_notice_body_review_on_head_is_not_content():
+    """The fifth door: `body_on_head` accepted a review body that IS a notice.
+
+    CR submits reviews whose body is the throttle notice -- the stale-notice tests
+    below are built on that shape, and a review is anchored to the head it was
+    submitted against, so the live form is a notice-body review on the CURRENT
+    head. Counting it as content satisfied the escape hatch, short-circuited the
+    demotion, and reported `done` with `reviewed_head_with_content` TRUE for a
+    commit CR never read -- #137's failure, through its own discriminator.
+    """
+    s = coderabbit_state(HEAD, [_cr(_FAIR_USAGE)], [_cr_review(HEAD, body=_FAIR_USAGE)])
+    assert s["state"] == "rate_limited"
+    assert s["reviewed_head_with_content"] is False
+
+
+def test_coderabbit_summary_quoting_notice_prose_is_not_a_notice():
+    """The false-demote half: notice prose QUOTED mid-line must not be decisional.
+
+    #137 promotes the notice patterns from "choose among transient states" to
+    "strip marker evidence and demote a completion", so an unanchored substring
+    hit could withhold a genuine review -- and re-withhold it on every push while
+    the quote persisted. CR renders the real notice as a heading in its warning
+    blockquote; a body discussing one quotes it mid-sentence. This is the same
+    false positive `_CR_DONE_MARKER` is line-anchored to avoid.
+    """
+    body = (
+        _walk(HEAD, posted=2)["body"]
+        + '\nThe matcher is taught the "Review limit reached" and "Rate limit '
+        'exceeded" wordings here.'
+    )
+    s = coderabbit_state(HEAD, [_cr(body)], [], [_check("completed", "success")])
     assert s["state"] == "done"
+    assert s["reviewed_head_with_content"] is True
+
+
+def _summary(*, recent_range=None, recent_zero=False, notice="", extra=""):
+    """CR's in-place summary comment, with an optional delimited recent-review block.
+
+    Mirrors the real shape: the machine marker, then whatever notice is live, then
+    the ``recent_review`` block holding the LAST completed review's result.
+    """
+    body = "<!-- This is an auto-generated comment: summarize by coderabbit.ai -->\n"
+    if notice:
+        body += notice + "\n"
+    if recent_range is not None:
+        body += "<!-- recent_review_start -->\n"
+        if recent_zero:
+            body += "No actionable comments were generated in the recent review. \U0001f389\n"
+        body += (
+            "Reviewing files that changed from the base of the PR and between "
+            f"`abc1234` and `{recent_range}`.\n"
+        )
+        body += "<!-- recent_review_end -->\n"
+    return _cr(body + extra)
+
+
+_AUTO_PAUSE = (
+    "<!-- This is an auto-generated comment: review paused by coderabbit.ai -->\n"
+    "> [!NOTE]\n> ## Reviews paused\n>\n"
+    "> It looks like this branch is under active development. To avoid overwhelming "
+    "you with review comments due to an influx of new commits, CodeRabbit has "
+    "automatically paused this review."
+)
+
+
+def test_coderabbit_auto_pause_after_a_completed_review_of_head_stays_done():
+    """A pause CR posts AFTER reviewing HEAD must not demote that review (#137).
+
+    Observed on this PR: CR completed the review, reported zero actionable comments
+    for the current range, and then auto-paused to guard against FURTHER commits.
+    Both sit in the one in-place summary. Treating any notice-bearing body as
+    evidence-free reported `paused` for a head CR demonstrably read — a false
+    demote of exactly the kind the anti-stickiness rule exists to prevent.
+    """
+    summary = _summary(recent_range=HEAD, recent_zero=True, notice=_AUTO_PAUSE)
+    s = coderabbit_state(HEAD, [summary], [_cr_review(HEAD, state="COMMENTED", body="")])
+    assert s["state"] == "done"
+    assert s["reviewed_head_with_content"] is True
+
+
+def test_coderabbit_notice_whose_recent_review_names_the_previous_head_is_demoted():
+    """The same body shape, throttled: the delimited result is the PREVIOUS round's.
+
+    Also observed on this PR. Under Fair Usage the `recent_review` block still named
+    the previous head while the notice carried the range bumped to the new one, so
+    the marker inside it vouches for a commit CR never opened.
+    """
+    summary = _summary(
+        recent_range="0000aaa",
+        recent_zero=True,
+        notice=_FAIR_USAGE,
+        extra=(
+            "\nReviewing files that changed from the base of the PR and between "
+            f"`0000aaa` and `{HEAD}`."
+        ),
+    )
+    s = coderabbit_state(HEAD, [summary], [_cr_review(HEAD, state="APPROVED")])
+    assert s["state"] == "rate_limited"
+    assert s["reviewed_head_with_content"] is False
+
+
+def test_coderabbit_live_in_progress_summary_demotes_an_empty_head_review():
+    """An empty review row on HEAD while CR's summary says it is still scanning.
+
+    Replying to a review thread makes GitHub record a review event against the
+    current HEAD with an empty body, which `review_on_head` read as a completion —
+    so a CR that was visibly mid-scan reported `done`. Observed on this PR at
+    02:28Z. Same guard as the notice demotion: with no review content on HEAD, a
+    live signal in the in-place summary outranks the empty acknowledgement.
+    """
+    summary = _summary(
+        notice="> [!NOTE]\n> Currently processing new changes in this PR. "
+        "This may take a few minutes, please wait..."
+    )
+    s = coderabbit_state(HEAD, [summary], [_cr_review(HEAD, state="COMMENTED", body="")])
+    assert s["state"] == "in_progress"
+    assert s["reviewed_head_with_content"] is False
+
+
+def test_coderabbit_pause_notice_demotes_to_paused_not_rate_limited():
+    """The two notices need different recoveries, so they keep different states.
+
+    A pause clears with `@coderabbitai resume`; a Fair-Usage limit needs credits or
+    a wait. Collapsing both into one state costs the consumer that distinction.
+    """
+    s = coderabbit_state(HEAD, [_cr(_PAUSE_NOTICE)], [], [_check("completed", "success")])
+    assert s["state"] == "paused"
+
+
+def test_coderabbit_demote_falls_back_to_live_comments_without_a_summary():
+    """No in-place-edited anchor to scope to — trust the notice, the safe direction."""
+    s = coderabbit_state(
+        HEAD,
+        [_cr("<!-- This is an auto-generated comment: rate limited by coderabbit.ai -->")],
+        [],
+        [_check("completed")],
+    )
+    assert s["state"] == "rate_limited"
+
+
+def test_coderabbit_demotion_keys_on_the_marker_not_on_the_visible_prose():
+    """Only CR's machine marker may strip evidence or demote a completion (#137).
+
+    The bodies these decisions read include CR's own walkthrough of a diff that
+    edits the notice patterns, so any matcher over the visible wording is also a
+    matcher for a review TALKING about a notice. Three attempts to carve a safe
+    prefix out of the prose each admitted a new false positive — a bare heading,
+    then Markdown list and quote prefixes, then Unicode smart quotes. The marker is
+    not quotable by accident, so the decisional path keys on it alone; the prose
+    still selects among the non-done transient states, where an over-match is free.
+    """
+    for prose in (
+        "> ## Review limit reached",
+        "- Reviews paused",
+        '> "Review limit reached"',
+        "\u201cReviews paused\u201d",
+        "\u26a0\ufe0f Rate limit exceeded. Try again in 8 minutes.",
+        "`Review limit reached`",
+    ):
+        body = _walk(HEAD, posted=2)["body"] + "\n" + prose
+        s = coderabbit_state(HEAD, [_cr(body)], [], [_check("completed", "success")])
+        assert s["state"] == "done", prose
+        assert s["reviewed_head_with_content"] is True, prose
+
+
+def test_coderabbit_notice_in_a_one_off_reply_does_not_demote():
+    """The anti-stickiness scoping: only the in-place-edited summary may demote.
+
+    CR's one-off replies are never rewritten, so a notice in one describes a window
+    that closed at some point in the past, not the window now. Letting it demote
+    would leave the PR degraded for the rest of its life.
+    """
+    reply = _cr("<!-- This is an auto-generated reply by CodeRabbit -->\nRate limit exceeded")
+    summary = _cr(
+        "<!-- This is an auto-generated comment: summarize by coderabbit.ai -->\n📝 Walkthrough"
+    )
+    s = coderabbit_state(
+        HEAD, [summary, reply], [_cr_review(HEAD, state="APPROVED")], [_check("completed")]
+    )
+    assert s["state"] == "done"
+
+
+def test_coderabbit_real_post_review_summary_with_limit_details_is_done():
+    """Over-match regression, from PR #178's actual body after a genuine review.
+
+    A completed CR review reports its remaining allowance as a "Limit details:"
+    line inside the walkthrough. That is not a notice, and reading it as one would
+    demote every review CR performs while near its limit.
+    """
+    body = (
+        "<!-- This is an auto-generated comment: summarize by coderabbit.ai -->\n"
+        "<!-- recent_review_start -->\n\n"
+        "No actionable comments were generated in the recent review. 🎉\n\n"
+        "Reviewing files that changed from the base of the PR and between "
+        f"4a60100d921054f4cd58499bf0aede7bff11e730 and {HEAD}.\n\n"
+        "**Limit details:** You've used the included review currently available. "
+        "Your 93 included PR review attempts over the past 7 days set your current "
+        "allowance at 1 review per hour."
+    )
+    s = coderabbit_state(HEAD, [_cr(body)], [], [_check("completed", "success")])
+    assert s["state"] == "done"
+    assert s["reviewed_head_with_content"] is True
+
+
+def test_coderabbit_empty_approved_review_without_a_notice_stays_done():
+    """Issue #18 survives #137: only a live notice changes the STATE.
+
+    The new key still reports the ambiguity — CR acknowledged HEAD without leaving
+    anything that proves it read the diff — but with nothing saying the window was
+    closed, an empty APPROVED review remains a completion.
+    """
+    s = coderabbit_state(HEAD, [], [_cr_review(HEAD, state="APPROVED")])
+    assert s["state"] == "done"
+    assert s["reviewed_head_with_content"] is False
+
+
+def test_coderabbit_rows_always_carry_the_content_verdict():
+    """Every CodeRabbit row exposes the key, so a consumer can read it blind."""
+    assert coderabbit_state(HEAD, [], [])["reviewed_head_with_content"] is False
+    assert coderabbit_state(HEAD, [_walk(HEAD)], [])["reviewed_head_with_content"] is False
+    assert coderabbit_state(HEAD, [_walk(HEAD, posted=2)], [])["reviewed_head_with_content"] is True
+    with_body = _cr_review(HEAD, body="**Actionable comments posted: 1**")
+    assert coderabbit_state(HEAD, [], [with_body])["reviewed_head_with_content"] is True
+
+
+def test_reviewer_states_carries_the_content_verdict_on_the_coderabbit_row():
+    rows = reviewer_states(HEAD, [_cr(_FAIR_USAGE)], [], [_check("completed", "success")])
+    cr = next(r for r in rows if r["backend"] == "coderabbit")
+    assert cr["state"] == "rate_limited"
+    assert cr["reviewed_head_with_content"] is False
 
 
 @pytest.mark.parametrize(
