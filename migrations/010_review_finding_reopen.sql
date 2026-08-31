@@ -10,9 +10,13 @@
 -- fenced verdict channel, and it needs exactly one new column: the count of how
 -- many times a closed row was re-raised. The count is the audit trail #177 asks
 -- for -- a row at `reopened > 0` is one a round declared settled and a later
--- round contradicted, which is the anomaly an operator wants to see. WHO closed
--- it and why is already in `status`/`status_reason`, which the reopen carries
--- forward into its own reason line rather than discarding.
+-- round contradicted, which is the anomaly an operator wants to see. HOW it was
+-- closed and why is already in `status`/`status_reason`, which the reopen
+-- carries forward into its own reason line rather than discarding. WHICH round's
+-- verdict closed it is not kept and no column here adds it: `transition` writes
+-- no round, so the reopen's reason line names the round the finding was RECORDED
+-- in and says that is what it is, rather than implying a closure round the table
+-- never had.
 --
 -- No new index: the settled read filters on (repo, pr, seat, status), which is
 -- exactly what `review_findings_pr_seat_status_idx` from 009 already covers,

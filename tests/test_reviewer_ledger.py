@@ -317,7 +317,12 @@ def test_a_closed_finding_is_re_raised_by_a_later_round_that_finds_it_again(stor
     reason = store.rows[row_id]["reason"]
     # Round 2 closed a row and recorded none, so `next_round` -- max(round) + 1
     # over the rows this seat has WRITTEN -- labels the re-raising round 2.
-    assert "re-raised in round 2" in reason and "fixed in round 1" in reason
+    assert "re-raised in round 2" in reason
+    # Round 1 RECORDED the finding; round 2's verdict closed it. `transition`
+    # writes no round, so the closing round is persisted nowhere -- the line
+    # names the round it can actually account for, and says which one that is.
+    assert "contradicts fixed" in reason and "recorded in round 1" in reason
+    assert "fixed in round 1" not in reason
     assert "rewritten in 9f2a1c" in reason
     assert list(carry_in(REPO, PR, SEAT).rows.values()) == [row_id]
 
@@ -350,8 +355,15 @@ def test_a_stale_row_is_not_re_raised(store):
 
 
 def test_two_published_findings_on_one_claim_re_raise_one_row(store):
-    """A second reopen would leave two open rows for one claim -- the compounding
-    the dedup path exists to stop, arriving through the new door."""
+    """One claim, one open row -- however many times the round publishes it.
+
+    The re-raise has to close BOTH doors to the compounding the dedup path
+    exists to stop: popping the candidate stops a second reopen, and putting the
+    re-raised row into ``still_open`` stops the second finding being recorded
+    fresh alongside it. Without the second half the round ends with the reopened
+    row AND a duplicate of it, which is the two-rows-for-one-claim state the
+    dedup was written to prevent (CodeRabbit, #189).
+    """
     settle(
         carry_in(REPO, PR, SEAT),
         repo=REPO,
@@ -389,8 +401,11 @@ def test_two_published_findings_on_one_claim_re_raise_one_row(store):
     )
 
     assert outcome.reopened == ("src/a.py: leaks the handle",)
-    assert outcome.recorded == 1
-    assert [row["status"] for row in store.rows.values()].count("open") == 2
+    # The duplicate is deduped against the row its twin just re-raised, not
+    # recorded beside it: the claim ends the round on exactly one open row.
+    assert outcome.deduped == ("src/a.py: Leaks The Handle",)
+    assert outcome.recorded == 0
+    assert [row["status"] for row in store.rows.values()].count("open") == 1
 
 
 def test_a_reopen_the_store_refuses_records_the_claim_instead(store, monkeypatch):

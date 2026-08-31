@@ -242,15 +242,27 @@ def _reopen_reason(row: SettledFinding, round_: int) -> str:
     """The ``status_reason`` a re-raise leaves behind, carrying the closure it reverses.
 
     :func:`sidecar.review_state.reopen` overwrites the column, so the sequence --
-    settled how, by which round, on what stated reason, contradicted when -- has
-    to be composed into the one string or it is lost. The old reason is model
-    text and is included as such; it is stored, never rendered into a prompt, and
-    the store clips it.
+    settled how, on what stated reason, contradicted when -- has to be composed
+    into the one string or it is lost. The old reason is model text and is
+    included as such; it is stored, never rendered into a prompt, and the store
+    clips it.
+
+    The round this names for the row is the round that RECORDED it, and it says
+    so, because that is the only round the table keeps:
+    :func:`sidecar.review_state.transition` writes status, reason and
+    ``updated_at`` and no round, so the round whose verdict closed the row is
+    persisted nowhere. Reading ``row.round`` as the closure round would be wrong
+    in every case rather than some -- a verdict can only close a row carried in
+    from an earlier round, so the closing round is always strictly later than the
+    one the row was recorded in (qwen3.8-max on #189).
     """
-    closure = f"{row.status} in round {row.round}"
+    closure = row.status
     if row.reason.strip():
         closure = f"{closure} ({row.reason.strip()})"
-    return f"re-raised in round {round_}: an independent finding contradicts {closure}"
+    return (
+        f"re-raised in round {round_}: an independent finding contradicts "
+        f"{closure}, on a finding recorded in round {row.round}"
+    )
 
 
 def _reopen_candidates(repo: str, pr: int, seat: str) -> dict[tuple[str, str], SettledFinding]:
@@ -463,14 +475,18 @@ def settle(
             if row_id not in touch:
                 touch.append(row_id)
             continue
-        # `pop`, so two published findings on one claim re-raise ONE row: a
-        # second reopen would leave two open rows for one claim, which is the
-        # compounding the dedup above exists to stop, arriving by the new door.
+        # `pop`, so two published findings on one claim re-raise ONE row -- and
+        # the re-raised row joins `still_open`, so the SECOND of them takes the
+        # dedup path above rather than being recorded fresh. Either half alone
+        # still leaves two open rows for one claim, which is the compounding the
+        # dedup exists to stop, arriving by the new door: a reopened row is an
+        # open row, and the rest of this round has to see it as one.
         closed_row = candidates.pop(anchor, None)
         if closed_row is not None and review_state.reopen(
             closed_row.id, _reopen_reason(closed_row, carried.round)
         ):
             reopened.append(f"{finding.file}: {finding.title}")
+            still_open[anchor] = closed_row.id
             continue
         fresh.append(finding)
     review_state.touch_findings(touch)

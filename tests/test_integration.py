@@ -251,6 +251,7 @@ def test_review_state_ledgers_roundtrip_on_a_live_server():
     disagree with the rows it accompanies.
     """
     from sidecar import review_state as R
+    from sidecar.db import db
     from sidecar.reviewer.prompt import AgenticFinding, ExaminedRegion
 
     head = "0" * 40
@@ -297,6 +298,30 @@ def test_review_state_ledgers_roundtrip_on_a_live_server():
     assert R.transition(settled.id, "fixed", "replayed stale id") is False
 
     assert [s.prior.title for s in R.open_findings(TEST_REPO, 1, "henry").rows] == ["b"]
+
+    # #177's reversal, on the row the transition above actually closed. Both
+    # halves are SQL a recording connection cannot demonstrate: a status list
+    # bound with `= ANY(%s)`, and an increment of the column migration 010 adds
+    # -- the one genuinely new write here. A binding failure in either is
+    # swallowed by `_best_effort` and reads as its neutral value (`()`, `False`),
+    # i.e. "no closure to re-raise", so the feature would be silently off while
+    # every unit test stayed green (qwen3.8-max on #189, the #169 shape).
+    closed = R.settled_findings(TEST_REPO, 1, "henry")
+    assert [(c.id, c.status, c.title, c.reason) for c in closed] == [
+        (settled.id, "fixed", "a", "rewritten in this head")
+    ]
+    assert R.reopen(settled.id, "re-raised: an independent finding contradicts fixed") is True
+    assert sorted(s.prior.title for s in R.open_findings(TEST_REPO, 1, "henry").rows) == ["a", "b"]
+    # Open again, so the row is no longer the settled read's to offer and a
+    # replayed reopen changes nothing -- the count cannot inflate on an open row.
+    assert R.settled_findings(TEST_REPO, 1, "henry") == ()
+    assert R.reopen(settled.id, "replayed") is False
+    with db() as conn:
+        row = conn.execute(
+            "SELECT reopened, status_reason FROM review_findings WHERE id = %s",
+            (settled.id,),
+        ).fetchone()
+    assert row == (1, "re-raised: an independent finding contradicts fixed")
 
     region = ExaminedRegion(
         file="src/app.py",

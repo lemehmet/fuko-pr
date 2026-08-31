@@ -783,7 +783,8 @@ def test_a_re_raised_closed_finding_is_named_on_its_own_log_line(monkeypatch, ca
     )
 
     assert written["reopened"][0][0] == "row-9"
-    assert "fixed in round 2" in written["reopened"][0][1]
+    assert "contradicts fixed" in written["reopened"][0][1]
+    assert "recorded in round 2" in written["reopened"][0][1]
     # Re-raised, not re-recorded: one row for the claim, carrying its history.
     assert [titles for *_, titles in written["recorded"]] == [[]]
     err = capsys.readouterr().err
