@@ -17,6 +17,7 @@ from sidecar.reviewer.ledger import CarriedState, carry_in, settle
 from sidecar.reviewer.prompt import (
     COVERAGE_ADVISORY,
     EXAMINED_REQUIRED_FIELDS,
+    MAX_PRIOR_COVERAGE,
     AgenticFinding,
     ExaminedRegion,
     PriorCoverage,
@@ -1053,6 +1054,81 @@ def test_a_hollow_coverage_entry_is_dropped_rather_than_injected(store, capsys):
     logged = [line for line in capsys.readouterr().err.splitlines() if "review-state" in line]
     assert len(logged) == 1 and "dropped 2 coverage entries" in logged[0]
     assert "/".join(EXAMINED_REQUIRED_FIELDS) in logged[0]
+
+
+@pytest.mark.parametrize("padded", [" src/util.py", "src/util.py ", "\tsrc/util.py\n"])
+def test_a_padded_coverage_path_is_stripped_so_a_delta_can_still_expire_it(store, padded):
+    """`file` is the expiry MATCHING KEY, so a padded path is a permanent assurance.
+
+    The delta arrives stripped from the diff parser and the store's `_clip`
+    truncates without stripping, so an unnormalised path is recorded, rendered
+    into later prompts, and matched by no delta that ever touches that file
+    again -- the stale-assurance direction reached through the key rather than
+    through the documented revert gap (CodeRabbit and `qwen-anthropic/qwen3.8-max`).
+    """
+    settle(
+        carry_in(REPO, PR, SEAT, coverage_ledger=True),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        examined=[_examined(file=padded)],
+        coverage_ledger=True,
+    )
+
+    second = carry_in(REPO, PR, SEAT, touched_files=["src/util.py"], coverage_ledger=True)
+
+    assert second.expired == 1 and second.coverage == 0
+
+
+def test_a_coverage_entry_naming_no_file_is_dropped_rather_than_carried_forever(store, capsys):
+    """A blank `file` is not merely unretraceable -- no delta can ever retire it.
+
+    It is why `file` is one of `EXAMINED_REQUIRED_FIELDS`: the other three make an
+    entry checkable, this one makes it mortal.
+    """
+    settle(
+        carry_in(REPO, PR, SEAT, coverage_ledger=True),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        examined=[_examined(file="   "), _examined(file="src/c.py")],
+        coverage_ledger=True,
+    )
+    capsys.readouterr()
+
+    second = carry_in(REPO, PR, SEAT, coverage_ledger=True)
+
+    assert second.coverage == 1 and "src/c.py" in second.text
+    logged = [line for line in capsys.readouterr().err.splitlines() if "review-state" in line]
+    assert len(logged) == 1 and "dropped 1 coverage entry" in logged[0]
+
+
+def test_the_receipt_counts_the_coverage_shown_not_the_rows_the_read_returned(store):
+    """`carried.coverage` is what reached the prompt, and the renderer caps that.
+
+    #157's rollout is scored on this receipt, so a seat holding more live entries
+    than `MAX_PRIOR_COVERAGE` must not have its receipt claim a number the round
+    never saw (`qwen-anthropic/qwen3.8-max`).
+    """
+    over = MAX_PRIOR_COVERAGE + 3
+    settle(
+        carry_in(REPO, PR, SEAT, coverage_ledger=True),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        examined=[
+            _examined(file=f"src/m{n}.py", evidence=f"src/m{n}.py:1-20") for n in range(over)
+        ],
+        coverage_ledger=True,
+    )
+
+    second = carry_in(REPO, PR, SEAT, coverage_ledger=True)
+
+    assert second.coverage == MAX_PRIOR_COVERAGE
+    assert f"{over - MAX_PRIOR_COVERAGE} older coverage entries were dropped" in second.text
 
 
 def test_two_seats_on_one_pr_never_read_each_others_coverage(store):

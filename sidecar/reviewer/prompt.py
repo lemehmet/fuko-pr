@@ -187,7 +187,14 @@ class ExaminedRegion(BaseModel):
     and the fact that the fault is the reviewer's rather than the diff's (#166).
     """
 
-    file: str
+    file: str = Field(
+        description=(
+            "Repo-relative path, spelled exactly as the diff spells it. Unlike "
+            "the other fields this one is not free text: it is the key a later "
+            "round's delta is matched against to expire this entry, so a path "
+            "that does not match the diff's is an assurance nothing can retire."
+        ),
+    )
     region: str = Field(
         default="",
         description=(
@@ -789,15 +796,25 @@ def build_prompt(
     return "\n".join(parts)
 
 
-EXAMINED_REQUIRED_FIELDS = ("checked", "conclusion", "evidence")
-"""The three fields that make a coverage entry retraceable rather than a verdict.
+EXAMINED_REQUIRED_FIELDS = ("file", "checked", "conclusion", "evidence")
+"""The fields that make a coverage entry retraceable and invalidatable, not a verdict.
 
-Public because the same three are load-bearing at two ends of the ledger and must
+Public because the same set is load-bearing at two ends of the ledger and must
 not drift apart: :func:`_hollow_examined_runbook` fails a ROUND whose entry omits
 one (#166), and :func:`sidecar.reviewer.ledger.carry_in` drops an ENTRY whose
 stored value is blank before it can reach a later prompt (#157). The schema can
 only require the keys -- ``""`` satisfies a required ``str`` -- so the emptiness
 half of the same rule is enforced on the way out of the store.
+
+``file`` belongs here for a reason the other three do not share, and it is the
+one that makes a blank value dangerous rather than merely useless: it is the key
+:func:`sidecar.review_state.expire_coverage` MATCHES a round's delta against. An
+entry naming no file is not just unretraceable, it is an assurance no future
+delta can ever invalidate -- a permanent one, which is the single outcome this
+tier exists to prevent (CodeRabbit and ``qwen-anthropic/qwen3.8-max``, #157). The
+matching-key half of the same rule is enforced at record time, where
+:func:`sidecar.reviewer.ledger.settle` strips the path so a value the model
+padded still matches the diff's own spelling of it.
 """
 
 # `_failure_result` caps a receipt detail at 460 characters and truncates from

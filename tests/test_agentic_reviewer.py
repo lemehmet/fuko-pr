@@ -867,7 +867,7 @@ def test_hollow_examined_runbook_covers_an_entry_that_is_not_an_object():
     message = str(excinfo.value)
 
     assert "examined[0] (entry is not an object)" in message
-    assert "invalid checked, conclusion, evidence" in message
+    assert "invalid file, checked, conclusion, evidence" in message
     assert "1 finding(s) in the rejected output" in message
     assert "merge without this seat's coverage" in message
 

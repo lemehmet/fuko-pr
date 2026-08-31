@@ -158,8 +158,11 @@ coverage_ledger = true    # default false
 
 Staged deliberately: coverage state changes *what the reviewer looks at*, so it
 is scored on a non-gating (`role = "trial"`) seat's receipts before it reaches a
-gating one. A seat with the flag off neither reads nor writes coverage and builds
-exactly the prompt it built before.
+gating one. A seat with the flag off neither reads nor records coverage and
+builds exactly the prompt it built before. It does still *expire* coverage its
+delta invalidates — expiry is the one half that runs on every seat, for the
+reason given under "Coverage expires; findings survive" below — so a flag-off
+seat writes `review_coverage.expired_at` and nothing else.
 
 Coverage is the ledger with the real carry-forward hazard — a wrong recorded
 conclusion does not merely mislead the next round, it *suppresses the
@@ -170,9 +173,11 @@ rather than stylistic:
   records the question a round asked of the code (`checked`) and what reading it
   established (`conclusion`), and the strategy forbids a clean bill of health
   outright. The schema can only require the *keys* — `""` satisfies a required
-  string — so an entry whose `checked`, `conclusion` or `evidence` is blank is
-  **dropped on the way back out** and logged, rather than rendered as though a
-  round had established it. That shape (a conclusion, no question, no citation)
+  string — so an entry whose `file`, `checked`, `conclusion` or `evidence` is
+  blank is **dropped on the way back out** and logged, rather than rendered as
+  though a round had established it. `file` is in that set because it is the key
+  expiry matches on: an entry naming no file is one no delta can ever
+  invalidate. That shape (a conclusion, no question, no citation)
   is precisely the unfalsifiable clean bill the epic prohibits.
 - **Coverage expires; findings survive.** A finding is a *claim* and stays open
   until a round settles it with a reason. A coverage entry is an *assurance*: the

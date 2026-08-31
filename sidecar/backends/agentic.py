@@ -926,7 +926,18 @@ class AgenticBackend:
             examined=review.examined,
             coverage_ledger=coverage_ledger,
         )
-        if carried.rows or settlement.recorded or settlement.reopened or settlement.coverage:
+        if (
+            carried.rows
+            or settlement.recorded
+            or settlement.reopened
+            or settlement.coverage
+            # `expired` earns its place in the gate rather than riding along:
+            # expiry runs on EVERY seat, flag or no flag, so a flag-off seat
+            # whose delta retired a flag-on seat's entries writes to the ledger
+            # and is otherwise silent on stderr -- a store write with no receipt
+            # at all (`qwen-anthropic/qwen3.8-max`, #157).
+            or carried.expired
+        ):
             print(
                 f"fuko: review-state seat {seat} round {carried.round}: carried "
                 f"{len(carried.rows)}, closed {settlement.closed}, re-asserted "

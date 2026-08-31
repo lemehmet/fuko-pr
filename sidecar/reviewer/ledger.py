@@ -54,6 +54,7 @@ from .. import review_state
 from ..review_state import SettledFinding, StoredFinding
 from .prompt import (
     EXAMINED_REQUIRED_FIELDS,
+    MAX_PRIOR_COVERAGE,
     AgenticFinding,
     ExaminedRegion,
     PriorCoverage,
@@ -105,11 +106,20 @@ class CarriedState:
     the table, and nothing in this round's output mentions them (#173).
 
     ``coverage`` and ``expired`` are the coverage ledger's two counts, kept for
-    the caller's one-line round summary: how many live entries this round was
-    shown, and how many the delta invalidated on the way in. They are counts and
+    the caller's one-line round summary: how many entries this round was actually
+    SHOWN, and how many the delta invalidated on the way in. They are counts and
     not entries because, unlike a suppressed finding, both are fully recoverable
     from the store afterwards -- ``expired_at`` records exactly which rows died
     and when.
+
+    ``coverage`` counts the RENDERED entries, not the live ones the read
+    returned: the renderer caps the block at
+    :data:`sidecar.reviewer.prompt.MAX_PRIOR_COVERAGE` and announces the cut only
+    in-band inside the prompt, so a seat holding more live entries than that
+    would otherwise have its receipt claim a number the round never saw. #157's
+    rollout is scored on exactly these receipts, which is what makes the
+    difference matter rather than merely being imprecise
+    (``qwen-anthropic/qwen3.8-max``, #157).
     """
 
     state: PriorState = field(default_factory=PriorState)
@@ -279,6 +289,41 @@ def _expiry_targets(files: Sequence[str]) -> Sequence[str]:
     return sorted(set(files))
 
 
+def _keyed(examined: Sequence[ExaminedRegion]) -> Sequence[ExaminedRegion]:
+    """This round's examined regions with the one NON-free-text field normalised.
+
+    Every other field on an :class:`sidecar.reviewer.prompt.ExaminedRegion` is
+    read by a model and nothing else, so what a round wrote is what should be
+    stored. ``file`` is the exception and the docstring on
+    :func:`sidecar.review_state.expire_coverage` says why: it is a MATCHING KEY.
+    The delta arrives already stripped from the diff parser, the store's
+    ``_clip`` truncates and does not strip, and the comparison is exact -- so a
+    path the model padded with a space is recorded, rendered into later prompts,
+    and matched by no delta that ever touches that file again. That is the
+    stale-assurance direction this tier must not fail in, reached through the key
+    rather than through the documented revert gap (CodeRabbit and
+    ``qwen-anthropic/qwen3.8-max``, #157).
+
+    Stripping is the whole normalisation on purpose. It is the same treatment
+    :func:`_anchor` already gives the findings ledger's matching key, and it
+    cannot change which file an entry names. Anything richer -- resolving
+    ``./``, symlinks, case -- would be guessing at a path the round chose, and
+    guessing wrong would expire the coverage of a DIFFERENT file, which is the
+    one error direction stripping cannot produce.
+
+    A blank ``file`` is deliberately NOT dropped here: the table records what the
+    round said, and the judgement is applied on the way back out, where
+    :data:`sidecar.reviewer.prompt.EXAMINED_REQUIRED_FIELDS` now includes
+    ``file`` and :func:`_carried_coverage` drops and logs it.
+    """
+    return [
+        entry.model_copy(update={"file": entry.file.strip()})
+        if entry.file != entry.file.strip()
+        else entry
+        for entry in examined
+    ]
+
+
 def _carried_coverage(repo: str, pr: int, seat: str) -> tuple[list[PriorCoverage], int]:
     """This seat's live coverage minus the entries too hollow to carry, and the count dropped.
 
@@ -293,9 +338,12 @@ def _carried_coverage(repo: str, pr: int, seat: str) -> tuple[list[PriorCoverage
     bill of health, unfalsifiable and permanent, rendered as though a round had
     established it.
 
-    All three of :data:`sidecar.reviewer.prompt.EXAMINED_REQUIRED_FIELDS` are
-    required to be non-blank, the same three #166 fails a whole round for
-    omitting. Dropping such an entry costs one advisory line in one prompt;
+    Every one of :data:`sidecar.reviewer.prompt.EXAMINED_REQUIRED_FIELDS` is
+    required to be non-blank, the same set #166 fails a whole round for omitting.
+    ``file`` is in that set for a second reason on top of retraceability: it is
+    the key expiry matches the delta against, so an entry with a blank one is an
+    assurance no future change can ever retire. Dropping such an entry costs one
+    advisory line in one prompt;
     carrying it spends budget on a claim no later round can check, which is the
     one direction this tier must not fail in.
     """
@@ -491,7 +539,8 @@ def carry_in(
         rows=rows,
         round=round_,
         truncated=opened.truncated,
-        coverage=len(coverage),
+        # The renderer's cap, not the read's: see `CarriedState.coverage`.
+        coverage=min(len(coverage), MAX_PRIOR_COVERAGE),
         expired=expired,
     )
 
@@ -665,7 +714,7 @@ def settle(
     review_state.touch_findings(touch)
     recorded = review_state.record_findings(repo, pr, seat, carried.round, head_sha, fresh)
     coverage = (
-        review_state.record_coverage(repo, pr, seat, carried.round, head_sha, examined)
+        review_state.record_coverage(repo, pr, seat, carried.round, head_sha, _keyed(examined))
         if coverage_ledger
         else 0
     )
