@@ -221,6 +221,7 @@ _FAIR_USAGE = (
 
 _PAUSE_NOTICE = (
     "<!-- This is an auto-generated comment: summarize by coderabbit.ai -->\n"
+    "<!-- review paused by coderabbit.ai -->\n"
     "> [!WARNING]\n> ## Reviews paused\n>\n"
     "> Use the following command to resume: `@coderabbitai resume`"
 )
@@ -380,49 +381,6 @@ def test_coderabbit_summary_quoting_notice_prose_is_not_a_notice():
     assert s["reviewed_head_with_content"] is True
 
 
-@pytest.mark.parametrize(
-    "phrase", ["Review limit reached", "Rate limit exceeded", "Reviews paused"]
-)
-@pytest.mark.parametrize("prose", ["- {p}", "* {p}", '> "{p}"', "1. {p}", "`{p}`"])
-def test_coderabbit_notice_wording_in_a_list_or_quote_is_not_a_notice(phrase, prose):
-    """Prose ABOUT the notice must not read as the notice (CodeRabbit, round 2).
-
-    The prefix accepted before the phrase is the decoration CR emits around it --
-    blockquote, heading, whitespace, a non-ASCII lead-in. Markdown list markers and
-    quote characters are not that, and a diff touching these patterns is exactly
-    where a walkthrough writes the wording as a bullet or a quotation. Admitting
-    those made `_cr_is_notice_body` strip a whole body from marker evidence and
-    demote a completed check-run to `rate_limited`/`paused`.
-    """
-    body = _walk(HEAD, posted=2)["body"] + "\n" + prose.format(p=phrase)
-    s = coderabbit_state(HEAD, [_cr(body)], [], [_check("completed", "success")])
-    assert s["state"] == "done"
-    assert s["reviewed_head_with_content"] is True
-
-
-@pytest.mark.parametrize(
-    "line,label",
-    [
-        ("> ## Review limit reached", "rate_limited"),
-        ("## Reviews paused", "paused"),
-        ("\u26a0\ufe0f Rate limit exceeded. Try again in 8 minutes.", "rate_limited"),
-        ("Reviews paused", "paused"),
-    ],
-)
-def test_coderabbit_emitted_notice_layouts_still_match(line, label):
-    """The layouts CR actually emits must keep matching after the prefix tightening."""
-    assert (
-        coderabbit_state(
-            HEAD,
-            [
-                _cr(_walk("0000aaa")["body"] + "\n" + line),
-            ],
-            [],
-        )["state"]
-        == label
-    )
-
-
 def test_coderabbit_pause_notice_demotes_to_paused_not_rate_limited():
     """The two notices need different recoveries, so they keep different states.
 
@@ -435,8 +393,38 @@ def test_coderabbit_pause_notice_demotes_to_paused_not_rate_limited():
 
 def test_coderabbit_demote_falls_back_to_live_comments_without_a_summary():
     """No in-place-edited anchor to scope to — trust the notice, the safe direction."""
-    s = coderabbit_state(HEAD, [_cr("Rate limit exceeded")], [], [_check("completed")])
+    s = coderabbit_state(
+        HEAD,
+        [_cr("<!-- This is an auto-generated comment: rate limited by coderabbit.ai -->")],
+        [],
+        [_check("completed")],
+    )
     assert s["state"] == "rate_limited"
+
+
+def test_coderabbit_demotion_keys_on_the_marker_not_on_the_visible_prose():
+    """Only CR's machine marker may strip evidence or demote a completion (#137).
+
+    The bodies these decisions read include CR's own walkthrough of a diff that
+    edits the notice patterns, so any matcher over the visible wording is also a
+    matcher for a review TALKING about a notice. Three attempts to carve a safe
+    prefix out of the prose each admitted a new false positive — a bare heading,
+    then Markdown list and quote prefixes, then Unicode smart quotes. The marker is
+    not quotable by accident, so the decisional path keys on it alone; the prose
+    still selects among the non-done transient states, where an over-match is free.
+    """
+    for prose in (
+        "> ## Review limit reached",
+        "- Reviews paused",
+        '> "Review limit reached"',
+        "\u201cReviews paused\u201d",
+        "\u26a0\ufe0f Rate limit exceeded. Try again in 8 minutes.",
+        "`Review limit reached`",
+    ):
+        body = _walk(HEAD, posted=2)["body"] + "\n" + prose
+        s = coderabbit_state(HEAD, [_cr(body)], [], [_check("completed", "success")])
+        assert s["state"] == "done", prose
+        assert s["reviewed_head_with_content"] is True, prose
 
 
 def test_coderabbit_notice_in_a_one_off_reply_does_not_demote():

@@ -67,37 +67,41 @@ _CR_IN_PROGRESS = re.compile(r"review in progress|Currently processing new chang
 # says "Review limit reached" and never contains the hourly wording. Matching only
 # the hourly text read a throttled CR as `pending` for the whole window.
 #
-# The machine-emitted HTML marker is listed FIRST because it is the stable anchor:
-# CR emits `<!-- ... rate limited by coderabbit.ai -->` around BOTH variants (the
-# same class of anchor the code already trusts for "summarize by coderabbit.ai"),
-# while the visible prose differs per variant and is plainly subject to change.
-# Bodies are stored raw, so HTML comments are present in the blob. The prose
-# alternatives stay as belt-and-braces if CR ever drops the marker.
+# The machine-emitted HTML marker is the stable anchor: CR emits
+# `<!-- ... rate limited by coderabbit.ai -->` around BOTH variants (the same class
+# of anchor the code already trusts for "summarize by coderabbit.ai"), while the
+# visible prose differs per variant and is plainly subject to change. Bodies are
+# stored raw, so HTML comments are present in the blob. The prose alternatives are
+# belt-and-braces if CR ever drops the marker.
 #
-# Those prose alternatives are LINE-ANCHORED, for the reason `_CR_DONE_MARKER`
-# below already is. Unanchored they only chose among non-done transient states;
-# #137 makes them decisional over whole bodies -- stripping marker evidence and
-# demoting a completion -- so a body merely *quoting* the wording could withhold a
-# genuine review, and re-withhold it on every push while the quote persisted. The
-# accepted prefix is the set of decorations CR actually emits around the phrase --
-# blockquote and heading marks, whitespace, and a non-ASCII lead-in -- and nothing
-# else. The recorded layouts are `> ## Review limit reached`, `## Reviews paused`,
-# `⚠️ Rate limit exceeded. Try again in 8 minutes`, and the bare phrase. Markdown
-# LIST markers and quote characters are excluded on purpose, so a line of prose
-# *about* the notice (`- Reviews paused`, `> "Review limit reached"`) is not read
-# as one -- which a diff touching these very patterns invites. The machine marker
-# stays unanchored: CR emits it as a bare HTML comment, not as quotable prose.
+# These prose alternatives select among NON-DONE transient states only, which is
+# why they can stay loose: every branch that consults them returns `pending`,
+# `rate_limited` or `paused`, all of which hold the consumer's gate closed, so an
+# over-match costs a less precise label and nothing else.
 _CR_RATE_LIMIT = re.compile(
     r"auto-generated comment: rate limited by coderabbit\.ai"
-    r"|^(?:[>#\s]|[^\x00-\x7f])*Rate limit exceeded\b"
-    r"|^(?:[>#\s]|[^\x00-\x7f])*Review limit reached\b",
-    re.I | re.M,
+    r"|Rate limit exceeded"
+    r"|Review limit reached",
+    re.I,
 )
-_CR_PAUSED = re.compile(
-    r"review paused by coderabbit\.ai"
-    r"|^(?:[>#\s]|[^\x00-\x7f])*Reviews paused\b",
-    re.I | re.M,
-)
+_CR_PAUSED = re.compile(r"Reviews paused|review paused by coderabbit\.ai", re.I)
+# The DECISIONAL matchers (#137). Where a notice may strip a body of its marker
+# evidence or demote a completion, only CodeRabbit's machine-emitted marker counts
+# -- never the visible prose. Prose is quotable, and the bodies these are asked
+# about include CR's own walkthrough of a diff that edits these very patterns, so
+# any prose matcher is also a matcher for a review TALKING about a notice. Three
+# successive attempts to carve a safe prefix out of the visible wording each
+# admitted a new false positive (a bare-heading form, then Markdown list and quote
+# prefixes, then Unicode smart quotes); the marker has no such surface, because CR
+# writes it as an HTML comment and nothing quotes it by accident.
+#
+# The cost is the belt-and-braces: a notice whose marker CR someday drops stops
+# demoting, and reports through the transient paths above instead. That is the
+# safe direction -- it degrades to the pre-#137 behaviour rather than to a
+# false `done` -- and it is bounded by an observable fact rather than by a
+# prediction about future prose.
+_CR_RATE_LIMIT_MARK = re.compile(r"auto-generated comment: rate limited by coderabbit\.ai", re.I)
+_CR_PAUSE_MARK = re.compile(r"review paused by coderabbit\.ai", re.I)
 _CR_DONE_ZERO = re.compile(r"(?im)^[>\s*_]*No actionable comments(?: were generated)?\b")
 _CR_DONE_MARKER = re.compile(
     r"(?im)^[>\s*_]*(?:Actionable comments posted:\s*\d+"
@@ -223,7 +227,7 @@ def _cr_row(state: State, head_reviewed: str | None, detail: str, with_content: 
 
 def _cr_is_notice_body(body: str) -> bool:
     """Whether ``body`` is one of CodeRabbit's throttle notices rather than a review."""
-    return bool(_CR_RATE_LIMIT.search(body) or _CR_PAUSED.search(body))
+    return bool(_CR_RATE_LIMIT_MARK.search(body) or _CR_PAUSE_MARK.search(body))
 
 
 def _cr_demotion(notice_blob: str, head_reviewed: str | None, with_content: bool) -> dict | None:
@@ -246,7 +250,7 @@ def _cr_demotion(notice_blob: str, head_reviewed: str | None, with_content: bool
     """
     if with_content:
         return None
-    if _CR_RATE_LIMIT.search(notice_blob):
+    if _CR_RATE_LIMIT_MARK.search(notice_blob):
         return _cr_row(
             "rate_limited",
             head_reviewed,
@@ -254,7 +258,7 @@ def _cr_demotion(notice_blob: str, head_reviewed: str | None, with_content: bool
             "limit notice and nothing on HEAD carries review content",
             with_content,
         )
-    if _CR_PAUSED.search(notice_blob):
+    if _CR_PAUSE_MARK.search(notice_blob):
         return _cr_row(
             "paused",
             head_reviewed,
