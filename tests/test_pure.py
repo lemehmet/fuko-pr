@@ -131,3 +131,48 @@ def test_configured_seat_labels_fails_safe_on_a_blank_provider(tmp_path, capsys)
     cfg.write_text('[[review.models]]\nprovider = ""\nname = "x"\nrole = "active"\n')
     assert _configured_seat_labels(str(cfg)) is None
     assert "could not load" in capsys.readouterr().err
+
+
+def _result(**over):
+    base = {
+        "text": "rule",
+        "source": "remember",
+        "source_url": None,
+        "file_globs": [],
+        "topic": None,
+        "score": 0.5,
+    }
+    base.update(over)
+    return base
+
+
+def test_format_extra_instructions_gives_digests_their_own_section():
+    md = format_extra_instructions(
+        [
+            _result(text="a convention"),
+            _result(
+                text="Structural index of src/big.rs\nL1-L9  fn a",
+                source="digest",
+                file_globs=["src/big.rs"],
+                topic="file-index:src/big.rs@0011aabbccdd",
+            ),
+        ]
+    )
+    assert "## Repository knowledge (from fuko-pr)" in md
+    assert "## File structure index (from fuko-pr)" in md
+    # The index keeps its own lines rather than being flattened into a bullet.
+    assert "\nL1-L9  fn a" in md
+    assert "- Structural index" not in md
+
+
+def test_format_extra_instructions_does_not_present_a_digest_as_a_conclusion():
+    md = format_extra_instructions([_result(text="index", source="digest")])
+    assert "NOT review conclusions" in md
+    assert "Repository knowledge" not in md
+
+
+def test_format_extra_instructions_unchanged_without_digests():
+    md = format_extra_instructions([_result(text="rule", file_globs=["src/**"])])
+    assert md.startswith("## Repository knowledge (from fuko-pr)")
+    assert "File structure index" not in md
+    assert md.endswith("\n")

@@ -5,6 +5,7 @@ from uuid import UUID
 
 from .config import settings
 from .db import db, vector_literal
+from .digest import DIGEST_SOURCE
 from .embed import get_embedder
 
 
@@ -30,6 +31,10 @@ def query(
 
     Combines a semantic cosine pass with explicitly file-scoped learnings, then
     keeps scoped learnings only where their globs match a changed path.
+
+    ``digest`` rows are excluded unless ``FUKO_DIGEST_RETRIEVAL`` is set: file
+    digests (#158) ship dark, so a populated store reaches no review until a
+    deployment opts in.
     """
     q = _build_query(files, pr_body, query_text)
     if not q:
@@ -37,19 +42,24 @@ def query(
     vec = vector_literal(get_embedder().embed_one(q))
     k = top_k or settings.top_k
     cand_k = settings.candidate_k
+    # Excluded in SQL rather than filtered afterwards: a disabled source that
+    # still competes for the candidate window would quietly degrade what a
+    # review sees, which is exactly what shipping dark must not do.
+    digests = bool(settings.digest_retrieval)
 
     sql = """
         SELECT id, text, source, source_url, file_globs, topic,
                1 - (embedding <=> %s::vector) AS score
         FROM learnings
         WHERE repo = %s AND (expires_at IS NULL OR expires_at > now())
+              AND (%s OR source <> %s)
         ORDER BY embedding <=> %s::vector
         LIMIT %s
     """
 
     with db() as conn:
-        semantic = conn.execute(sql, (vec, repo, vec, cand_k)).fetchall()
-        scoped = _fetch_scoped(conn, vec, repo, cand_k)
+        semantic = conn.execute(sql, (vec, repo, digests, DIGEST_SOURCE, vec, cand_k)).fetchall()
+        scoped = _fetch_scoped(conn, vec, repo, cand_k, digests)
 
     seen: dict[str, tuple] = {}
     for row in (*semantic, *scoped):
@@ -196,14 +206,15 @@ def fold_repo_counts(rows: list[tuple]) -> list[dict]:
     return [summaries[key] for key in sorted(summaries)]
 
 
-def _fetch_scoped(conn, vec: str, repo: str, cand_k: int) -> list[tuple]:
+def _fetch_scoped(conn, vec: str, repo: str, cand_k: int, digests: bool) -> list[tuple]:
     sql = """
         SELECT id, text, source, source_url, file_globs, topic,
                1 - (embedding <=> %s::vector) AS score
         FROM learnings
         WHERE repo = %s AND file_globs <> '{}'
               AND (expires_at IS NULL OR expires_at > now())
+              AND (%s OR source <> %s)
         ORDER BY embedding <=> %s::vector
         LIMIT %s
     """
-    return conn.execute(sql, (vec, repo, vec, cand_k)).fetchall()
+    return conn.execute(sql, (vec, repo, digests, DIGEST_SOURCE, vec, cand_k)).fetchall()

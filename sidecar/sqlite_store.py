@@ -33,6 +33,7 @@ from pathlib import Path
 
 from .config import settings
 from .dedup import partition
+from .digest import DIGEST_SOURCE
 from .embed import get_embedder
 from .fukoconfig import KnowledgeConfig
 from .ingest import _UPDATABLE, _parse_dt, checked_expires
@@ -300,13 +301,21 @@ class SqliteVecStore:
         query_text: str | None = None,
         top_k: int | None = None,
     ) -> list[dict]:
-        """Return the learnings most relevant to the given PR context."""
+        """Return the learnings most relevant to the given PR context.
+
+        ``digest`` rows are excluded unless ``FUKO_DIGEST_RETRIEVAL`` is set,
+        matching the Postgres store. Here the exclusion happens after the KNN
+        rather than inside it -- ``vec_learnings`` carries no ``source`` column
+        — so a dark digest can still consume a candidate slot. That is the same
+        class of divergence this module already documents for the scoped pass.
+        """
         q = _build_query(files, pr_body, query_text)
         if not q:
             return []
         vec = _pack(get_embedder().embed_one(q))
         k = top_k or settings.top_k
         cand = settings.candidate_k
+        digests = bool(settings.digest_retrieval)
         now = datetime.now(timezone.utc).isoformat()
 
         def fn(conn: sqlite3.Connection) -> list[dict]:
@@ -326,6 +335,8 @@ class SqliteVecStore:
             ).fetchall()
             results: list[dict] = []
             for lid, text, source, source_url, file_globs, topic in rows:
+                if source == DIGEST_SOURCE and not digests:
+                    continue
                 globs = json.loads(file_globs) if file_globs else []
                 if globs and not any(fnmatch.fnmatch(f, p) for f in files for p in globs):
                     continue

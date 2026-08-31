@@ -11,12 +11,13 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-SOURCES: tuple[str, ...] = ("remember", "review_thread", "docs")
+SOURCES: tuple[str, ...] = ("remember", "review_thread", "docs", "digest")
 """Where a learning came from.
 
-The same three values are pinned by the ``learnings_source_check`` CHECK
-constraint (``migrations/005_review_thread_source.sql``); changing one means
-changing both.
+The same four values are pinned by the ``learnings_source_check`` CHECK
+constraint (``migrations/011_digest_source.sql``); changing one means changing
+both. sqlite-vec has no CHECK constraint, so :func:`check_source` is what keeps
+the two backends from accepting different vocabularies.
 """
 
 

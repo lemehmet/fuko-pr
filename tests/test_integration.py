@@ -388,3 +388,64 @@ def test_review_state_ledgers_roundtrip_on_a_live_server():
     # has since been invalidated is the same collision.
     assert R.expire_coverage(TEST_REPO, 1, "henry") == 1
     assert R.next_round(TEST_REPO, 1, "henry") == 6
+
+
+def test_digest_source_is_accepted_and_gated(monkeypatch):
+    """The CHECK constraint admits 'digest' and retrieval hides it while dark (#158)."""
+    from sidecar import ingest as I
+    from sidecar import retrieve
+    from sidecar.digest import DIGEST_SOURCE, build_item
+    from sidecar.models import IngestItem
+
+    path = "src/big/module.py"
+    body = "".join(f"def helper_{i}(x):\n    return x\n" for i in range(40))
+    inserted, _ = I.ingest(
+        TEST_REPO,
+        [
+            IngestItem(
+                text="Prefer absolute imports in this module.",
+                source="remember",
+                file_globs=[path],
+            ),
+            build_item(path, body),
+        ],
+    )
+    assert inserted == 2
+
+    monkeypatch.setattr(settings, "digest_retrieval", False)
+    dark = retrieve.query(TEST_REPO, [path], query_text="imports")
+    assert dark and all(r["source"] != DIGEST_SOURCE for r in dark)
+
+    monkeypatch.setattr(settings, "digest_retrieval", True)
+    lit = retrieve.query(TEST_REPO, [path], query_text="imports")
+    assert any(r["source"] == DIGEST_SOURCE for r in lit)
+
+
+def test_digest_is_not_surfaced_for_a_pr_that_does_not_touch_the_file(monkeypatch):
+    """file_globs scoping is what keeps an index off unrelated pull requests (#158)."""
+    from sidecar import ingest as I
+    from sidecar import retrieve
+    from sidecar.digest import DIGEST_SOURCE, build_item
+
+    path = "src/big/module.py"
+    body = "".join(f"def helper_{i}(x):\n    return x\n" for i in range(40))
+    I.ingest(TEST_REPO, [build_item(path, body)])
+
+    monkeypatch.setattr(settings, "digest_retrieval", True)
+    other = retrieve.query(TEST_REPO, ["docs/readme.md"], query_text="helper")
+    assert all(r["source"] != DIGEST_SOURCE for r in other)
+
+
+def test_migrations_replay_cleanly_with_a_digest_row_present():
+    """A restart re-runs every migration; a stored digest must not break that (#158)."""
+    from sidecar import ingest as I
+    from sidecar.db import _migration_sql, _resolve_embed_dim, db
+    from sidecar.digest import build_item
+
+    body = "".join(f"def helper_{i}(x):\n    return x\n" for i in range(40))
+    I.ingest(TEST_REPO, [build_item("src/big/module.py", body)])
+
+    # Exactly what get_pool() does on the next process start.
+    with db() as conn:
+        for stmt in _migration_sql(_resolve_embed_dim()):
+            conn.execute(stmt)

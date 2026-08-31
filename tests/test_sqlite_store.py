@@ -540,3 +540,37 @@ def test_search_is_case_insensitive_beyond_ascii(store):
     hits, total = store.list_learnings(repo="o/r", q="äpfel")
     assert total == 1 and "ÄPFEL" in hits[0]["text"]
     assert store.list_learnings(repo="o/r", q="ÄPFEL")[1] == 1
+
+
+def test_digests_are_dark_until_retrieval_is_enabled(store, monkeypatch):
+    """A populated digest reaches no review until the deployment opts in (#158)."""
+    store.ingest(
+        "o/r",
+        [
+            IngestItem(
+                text="auth login flow notes", source="remember", file_globs=["src/auth/a.rs"]
+            ),
+            IngestItem(
+                text="Structural index of src/auth/a.rs -- auth",
+                source="digest",
+                file_globs=["src/auth/a.rs"],
+                topic="file-index:src/auth/a.rs@abc123abc123",
+            ),
+        ],
+    )
+
+    dark = store.query("o/r", ["src/auth/a.rs"], query_text="auth")
+    assert {r["source"] for r in dark} == {"remember"}
+
+    monkeypatch.setattr(ss.settings, "digest_retrieval", True)
+    lit = store.query("o/r", ["src/auth/a.rs"], query_text="auth")
+    assert {r["source"] for r in lit} == {"remember", "digest"}
+
+
+def test_digest_survives_a_source_round_trip(store):
+    store.ingest(
+        "o/r",
+        [IngestItem(text="auth index", source="digest", file_globs=["src/auth/a.rs"])],
+    )
+    rows, total = store.list_learnings(repo="o/r", source="digest")
+    assert total == 1 and rows[0]["source"] == "digest"

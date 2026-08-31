@@ -6,7 +6,9 @@ import os
 import sys
 from pathlib import Path
 
+from . import digest
 from .chunking import chunk_markdown
+from .digest import DIGEST_SOURCE
 
 
 def main() -> None:
@@ -53,6 +55,35 @@ def main() -> None:
     p_docs.add_argument("--source-url", default=None)
     p_docs.add_argument("--config", default=".fuko.toml", help="path to .fuko.toml")
 
+    p_digest = sub.add_parser(
+        "digest",
+        help="index large files in a checkout as 'digest' learnings",
+        description="Run this from the root of a checkout. Each index is scoped to the "
+        "path it was collected under, and retrieval matches those paths against the "
+        "files a pull request changes, so an index collected under an absolute path "
+        "can never be retrieved.",
+    )
+    p_digest.add_argument(
+        "paths", nargs="*", default=["."], help="files, globs, or directories (default: .)"
+    )
+    p_digest.add_argument("--repo", required=True)
+    p_digest.add_argument(
+        "--min-bytes",
+        type=int,
+        default=digest.MIN_BYTES,
+        help="only index files at least this large (default: %(default)s)",
+    )
+    p_digest.add_argument(
+        "--max-chars",
+        type=int,
+        default=digest.MAX_CHARS,
+        help="cap on one rendered index (default: %(default)s)",
+    )
+    p_digest.add_argument(
+        "--dry-run", action="store_true", help="print the indexes instead of storing them"
+    )
+    p_digest.add_argument("--config", default=".fuko.toml", help="path to .fuko.toml")
+
     p_forget = sub.add_parser("forget", help="remove learnings")
     p_forget.add_argument("--repo", required=True)
     p_forget.add_argument("--id", default=None)
@@ -81,6 +112,7 @@ def main() -> None:
         "status": _cmd_status,
         "query": _cmd_query,
         "ingest-docs": _cmd_ingest_docs,
+        "digest": _cmd_digest,
         "forget": _cmd_forget,
         "retrieve": _cmd_retrieve,
         "kb": kbcli.dispatch,
@@ -394,6 +426,125 @@ def _cmd_ingest_docs(args) -> None:
     print(f"ingested {inserted} chunks (skipped {skipped}) from {len(files)} file(s)")
 
 
+_DIGEST_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        ".venv",
+        "venv",
+        "node_modules",
+        "target",
+        "dist",
+        "build",
+        "vendor",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".next",
+    }
+)
+
+
+def _digest_candidates(patterns: list[str], min_bytes: int) -> list[str]:
+    """Return the readable files under ``patterns`` that are at least ``min_bytes``.
+
+    Generated and vendored trees are skipped: an index of a checked-in bundle
+    would displace real knowledge from a review's ``top_k`` budget while
+    describing code nobody reviews.
+    """
+    out: list[str] = []
+    for candidate in _collect_files(patterns):
+        parts = set(Path(candidate).parts)
+        if parts & _DIGEST_SKIP_DIRS:
+            continue
+        try:
+            if Path(candidate).stat().st_size < min_bytes:
+                continue
+        except OSError as e:
+            print(f"warning: could not stat {candidate}: {e}; skipping", file=sys.stderr)
+            continue
+        out.append(candidate)
+    return out
+
+
+def _forget_superseded(store, repo: str, current: dict[str, str]) -> int:
+    """Delete digests of ``current``'s paths that describe some older blob.
+
+    Called *after* the new digests are inserted, not before: the current topic
+    is then already stored, so the predicate below cannot delete it, and there
+    is never a moment when an indexed file has no index at all. The cost of the
+    other order -- a failed insert leaving the file unindexed -- is worse than
+    this order's cost, which is a few seconds with two indexes of one file in a
+    store nothing reads mid-command.
+    """
+    stale: list[str] = []
+    offset = 0
+    while True:
+        rows, total = store.list_learnings(
+            repo=repo, source=DIGEST_SOURCE, limit=200, offset=offset, include_expired=True
+        )
+        if not rows:
+            break
+        for row in rows:
+            path = digest.topic_path(row.get("topic"))
+            if path in current and row.get("topic") != current[path]:
+                stale.append(row["id"])
+        offset += len(rows)
+        if offset >= total:
+            break
+    for learning_id in stale:
+        store.forget(repo, id=learning_id)
+    return len(stale)
+
+
+def _cmd_digest(args) -> None:
+    items = []
+    candidates = _digest_candidates(args.paths, args.min_bytes)
+    absolute = [p for p in candidates if Path(p).is_absolute()]
+    if absolute:
+        # An index is retrieved by matching its glob against the paths GitHub
+        # reports for a pull request, and those are repository-relative. An
+        # absolute one is storable, embeddable, and permanently unreachable.
+        print(
+            f"fuko: warning: {len(absolute)} file(s) collected under an absolute path "
+            f"(e.g. {absolute[0]}); their indexes can never match a pull request's "
+            "changed files. Run `fuko digest` from the root of the checkout.",
+            file=sys.stderr,
+        )
+    for fp in candidates:
+        try:
+            text = Path(fp).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            print(f"warning: could not read {fp}: {e}; skipping", file=sys.stderr)
+            continue
+        items.append(digest.build_item(fp, text, args.max_chars))
+
+    if not items:
+        print(
+            f"no readable files at or above {args.min_bytes} bytes; nothing to index",
+            file=sys.stderr,
+        )
+        return
+
+    if args.dry_run:
+        for item in items:
+            print(item.text)
+            print()
+        print(f"(dry run: {len(items)} index(es), nothing stored)", file=sys.stderr)
+        return
+
+    store = _store(args.config)
+    inserted, skipped = store.ingest(args.repo, items)
+    superseded = _forget_superseded(
+        store, args.repo, {item.file_globs[0]: item.topic for item in items}
+    )
+    print(
+        f"indexed {len(items)} file(s): {inserted} new, {skipped} unchanged, "
+        f"{superseded} superseded"
+    )
+
+
 def _cmd_forget(args) -> None:
     if not (args.id or args.source or args.all):
         print("provide --id, --source, or --all", file=sys.stderr)
@@ -417,22 +568,55 @@ def _cmd_retrieve(args) -> None:
 
 
 def format_extra_instructions(results: list[dict]) -> str:
-    """Render retrieved learnings as a PR-Agent ``extra_instructions`` markdown block."""
+    """Render retrieved learnings as a PR-Agent ``extra_instructions`` markdown block.
+
+    File digests (#158) get their own section rather than a bullet in the
+    learnings list. Two reasons, both about not misrepresenting them: a digest
+    is a multi-line table that would be unreadable as a list item, and the
+    learnings section presents its entries as conventions to apply, which a
+    structural index is not.
+    """
+    digests = [r for r in results if r["source"] == DIGEST_SOURCE]
+    learnings = [r for r in results if r["source"] != DIGEST_SOURCE]
     if not results:
         return ""
-    lines = [
-        "## Repository knowledge (from fuko-pr)",
-        (
-            "Apply the following repo-specific learnings where relevant to this PR. "
-            "Cite the source link when acting on a learning."
-        ),
-        "",
-    ]
-    for r in results:
-        cite = f" (source: {r['source_url']})" if r["source_url"] else f" (source: {r['source']})"
-        globs = f" [applies to: {', '.join(r['file_globs'])}]" if r["file_globs"] else ""
-        lines.append(f"- {r['text']}{cite}{globs}")
-    return "\n".join(lines) + "\n"
+    lines: list[str] = []
+    if learnings:
+        lines += [
+            "## Repository knowledge (from fuko-pr)",
+            (
+                "Apply the following repo-specific learnings where relevant to this PR. "
+                "Cite the source link when acting on a learning."
+            ),
+            "",
+        ]
+        for r in learnings:
+            cite = (
+                f" (source: {r['source_url']})" if r["source_url"] else f" (source: {r['source']})"
+            )
+            globs = f" [applies to: {', '.join(r['file_globs'])}]" if r["file_globs"] else ""
+            lines.append(f"- {r['text']}{cite}{globs}")
+    if digests:
+        if lines:
+            lines.append("")
+        lines += [
+            "## File structure index (from fuko-pr)",
+            (
+                "Mechanically extracted maps of large files this PR touches: what "
+                "each file declares and at which lines. Use them to read the "
+                "specific ranges you need instead of whole files. They are "
+                "navigation aids, NOT review conclusions -- they say nothing "
+                "about whether any of this code is correct, an index may lag the "
+                "checkout (each names the blob hash it was built from), and a "
+                "declaration missing from an index is not a declaration missing "
+                "from the file."
+            ),
+            "",
+        ]
+        for r in digests:
+            lines.append(r["text"])
+            lines.append("")
+    return "\n".join(lines).rstrip("\n") + "\n"
 
 
 if __name__ == "__main__":
