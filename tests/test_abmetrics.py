@@ -15,8 +15,8 @@ from sidecar.abmetrics import (
 )
 
 
-def _c(arm, round_key, file, title):
-    return Claim(arm=arm, round_key=round_key, file=file, title=title)
+def _c(arm, round_key, file, title, scope=""):
+    return Claim(arm=arm, round_key=round_key, file=file, title=title, scope=scope)
 
 
 def test_claim_identity_is_the_ledgers_own_rule():
@@ -229,11 +229,65 @@ def test_collect_claims_drops_a_body_carried_finding_that_carries_no_title():
     assert receipts == {("treatment", "7@head1")}
 
 
-def test_collect_claims_drops_a_signal_whose_thread_never_matched_a_fetched_receipt():
-    """A join miss must not silently attribute the claim to an arm."""
-    orphan = _comment("fuko-dorian[bot]", "u1", "orphan")
-    signal_only = dict(orphan, html_url="somewhere-else")
-
-    claims, _, _ = collect_claims([signal_only], [], {"control": "someone-else[bot]"}, 7)
+def test_collect_claims_drops_a_signal_whose_author_is_not_a_named_arm():
+    """The author filter, not the join -- CodeRabbit reviews the same PRs."""
+    claims, _, _ = collect_claims(
+        [_comment("fuko-dorian[bot]", "u1", "orphan")], [], {"control": "someone-else[bot]"}, 7
+    )
 
     assert claims == []
+
+
+def test_collect_claims_drops_a_signal_whose_thread_matches_no_fetched_receipt():
+    """The join-miss branch, exercised with the author deliberately IN the arms map.
+
+    A marker that carries its own ``thread_url`` keeps it -- the review stamp only
+    fills an empty one -- so a posting-side change that started setting the field
+    would route signals past the join and shrink an arm's claim set with nothing
+    counting the loss. That is the silent undercount this tool exists to prevent,
+    so it gets a test even though no current path produces it.
+    """
+    marker = (
+        '<!-- fuko-signal:v1 {"v":1,"id":"fk_9","file":"src/z.py","line":1,'
+        '"severity":"high","severity_source":"declared","category":"bug",'
+        '"suggestion":false,"suppressed":false,'
+        '"thread_url":"https://elsewhere/#discussion_r1",'
+        '"backend":"agentic","model":"m","role":"active","kb_refs":[]} -->'
+    )
+    reviews = [
+        {
+            "html_url": "r1",
+            "user": {"login": "fuko-gray[bot]"},
+            "commit_id": "head1",
+            "body": f"**a real title**\n\n{marker}",
+        }
+    ]
+
+    claims, receipts, untitled = collect_claims([], reviews, ARMS, 7)
+
+    # The arm IS mapped and the finding IS titled, so only the join can drop it.
+    assert claims == [] and untitled == 0
+    assert receipts == {("treatment", "7@head1")}
+
+
+def test_one_headline_recurring_on_two_prs_is_not_a_re_report():
+    """`claim_anchor` carries no PR; a multi-PR window must not merge across them."""
+    claims = [
+        _c("a", "7@h1", "src/app.py", "leak", scope="7"),
+        _c("a", "8@h1", "src/app.py", "leak", scope="8"),
+    ]
+
+    m = arm_metrics("a", claims)
+
+    assert m.re_reported == 0 and m.distinct_claims == 2 and m.one_shot_rate == 1.0
+
+
+def test_the_same_claim_in_two_rounds_of_one_pr_is_a_re_report():
+    claims = [
+        _c("a", "7@h1", "src/app.py", "leak", scope="7"),
+        _c("a", "7@h2", "src/app.py", "leak", scope="7"),
+    ]
+
+    m = arm_metrics("a", claims)
+
+    assert m.re_reported == 1 and m.distinct_claims == 1 and m.one_shot_rate == 0.0

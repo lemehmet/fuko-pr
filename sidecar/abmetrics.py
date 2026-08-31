@@ -94,6 +94,15 @@ def claim_title(title: str, body: str) -> str:
 class Claim:
     """One finding a seat published, reduced to what the metrics need.
 
+    ``scope`` is the window a claim's IDENTITY is bounded by -- one PR.
+    :func:`claim_anchor` carries no PR of its own, because the ledger it comes
+    from is already scoped per ``(repo, pr, seat)``. Left unbounded across the
+    multi-PR window this tool is meant to be run over, one ``(file, title)``
+    recurring on two different PRs would count as a re-report, deflating the
+    one-shot rate -- and neither arm's carried state spans PRs, so that movement
+    could not be attributed to the variable under test. It is a stored field
+    rather than a slice of ``round_key`` so nothing depends on that key's shape.
+
     ``round_key`` groups claims into the unit two arms are compared WITHIN --
     the head they reviewed, which for an inline comment is its
     ``original_commit_id`` and NOT the ``commit_id`` GitHub rewrites when it
@@ -106,6 +115,7 @@ class Claim:
     round_key: str
     file: str
     title: str
+    scope: str = ""
 
     @property
     def anchor(self) -> tuple[str, str]:
@@ -141,6 +151,16 @@ def collect_claims(
     off-diff class a stateful reviewer is hypothesized to add, so the exclusion
     would not be direction-neutral: it would bias the coverage metric toward the
     null.
+
+    Fetching that channel DISCLOSES that bias; it does not yet close it. Markers
+    carry neither title nor body and nothing rehydrates them from the prose they
+    sit beside (#142), so every body-carried finding currently lands in the
+    untitled drop and is reported as a count rather than scored. What reading the
+    channel buys today is the receipt -- the round is known to have happened --
+    and a number naming what is missing, instead of an omission with no trace in
+    the output. Whoever reads a coverage figure while that count is non-zero is
+    reading it with the treatment's hypothesized gain class outside the numerator,
+    and should say so.
 
     A signal reaches an arm only through the comment or review it came from: the
     normalized signal carries no author, so it is rejoined by ``thread_url``.
@@ -201,7 +221,13 @@ def collect_claims(
         if not title:
             untitled += 1
             continue
-        claim = Claim(arm=arm, round_key=f"{pr_num}@{commit}", file=signal.file, title=title)
+        claim = Claim(
+            arm=arm,
+            round_key=f"{pr_num}@{commit}",
+            file=signal.file,
+            title=title,
+            scope=str(pr_num),
+        )
         receipts.add((claim.arm, claim.round_key))
         claims.append(claim)
     return claims, receipts, untitled
@@ -322,9 +348,11 @@ def arm_metrics(
     """
     mine = [c for c in claims if c.arm == arm]
     rounds = _receipt_rounds(arm, receipts) if receipts else {c.round_key for c in mine}
-    seen: dict[tuple[str, str], set[str]] = {}
+    # Keyed by (PR, anchor): a re-report is the SAME claim seen in more than one
+    # round of one PR's review cycle, not one headline recurring across PRs.
+    seen: dict[tuple[str, tuple[str, str]], set[str]] = {}
     for claim in mine:
-        seen.setdefault(claim.anchor, set()).add(claim.round_key)
+        seen.setdefault((claim.scope, claim.anchor), set()).add(claim.round_key)
     re_reported = sum(1 for keys in seen.values() if len(keys) > 1)
     touches = Counter(c.file for c in mine)
     top = touches.most_common(TOP_PATHS)

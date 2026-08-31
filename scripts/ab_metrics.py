@@ -13,8 +13,9 @@ The estimators live in :mod:`sidecar.abmetrics` and are unit-tested; this file
 is the credentialed, I/O half -- what it adds is fetching, the login-to-arm
 mapping, and formatting. Claim identity is the findings ledger's own RULE --
 ``(file, casefolded title)`` via :func:`sidecar.reviewer.ledger.claim_anchor` --
-applied to the title recovered from what was published; a round is one head (the
-comment's ``commit_id``). The rule is shared, the inputs are not: ``encode_marker``
+applied to the title recovered from what was published; a round is one head (an
+inline comment's ``original_commit_id``, which GitHub does not rewrite when it
+re-anchors an outdated thread). The rule is shared, the inputs are not: ``encode_marker``
 omits title and body, so a published finding's title is re-derived from the
 rendered markdown rather than read back from the ledger, and an anchor computed
 here will not equal the one the ledger stored for the same finding. That is
