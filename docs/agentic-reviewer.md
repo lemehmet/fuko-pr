@@ -132,9 +132,20 @@ The rules that matter:
 Storage is Postgres-only (`FUKO_DATABASE_URL`, `migrations/009_review_state.sql`)
 and entirely best-effort: with no store, an unreachable one, or a sqlite-vec
 deployment, every ledger call is a no-op and the round builds exactly the prompt
-it built before the ledger existed. Note that today this needs the store
-reachable **from the runner**, which the homelab deployment (runner → sidecar
-over `FUKO_URL`) does not yet provide.
+it built before the ledger existed.
+
+The runner reaches that store the same way it reaches every other piece of
+shared state — the **sidecar over HTTP** when `FUKO_URL` is set, else the local
+Postgres (#171). A review runner in the homelab deployment holds `FUKO_URL` +
+`FUKO_TOKEN` and no connection string, so before this seam existed every ledger
+call took the no-op path and each round was byte-for-byte a pre-ledger one.
+`sidecar/review_state_client.py` chooses the transport; the endpoints are
+`/rs/findings`, `/rs/round`, `/rs/settled`, `/rs/coverage` and their writes,
+behind the same bearer-token dependency as `/cb/*` and `/rh/*`. Requests carry
+`(repo, pr, seat)` on every call — including the id-addressed writes, which the
+store matches in SQL, so no request can settle, re-raise or touch a row outside
+its own seat's lane. A sidecar that does not answer latches the run onto the
+local branch after one timeout rather than paying one per call (#170).
 
 ## Rounds aim: the coverage ledger
 

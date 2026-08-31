@@ -40,6 +40,16 @@ second opinion that is the entire reason for running two seats (#160), and it
 would do so most seductively here: the seats overlap on 45 files, so sharing
 coverage looks like free coverage and is in fact the manufacture of exactly the
 correlation the second seat exists to break.
+
+Every store call here goes through :mod:`sidecar.review_state_client` rather
+than :mod:`sidecar.review_state` directly. That module chooses the transport --
+the sidecar over HTTP when ``FUKO_URL`` is set, else the local Postgres -- and
+returns the same neutral value on either path when the store cannot be reached,
+so nothing in this file has to know which one it is talking to (#171). What the
+transport DOES change here is that the lane now travels with every id-addressed
+write: over the wire a finding id's ``(repo, pr, seat)`` is a claim in a request
+body rather than a fact about the call stack, so the store matches it in SQL and
+this module supplies it.
 """
 
 from __future__ import annotations
@@ -50,8 +60,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import review_state
-from ..review_state import SettledFinding, StoredFinding
+from .. import review_state_client as ledger_store
+from ..review_state import MAX_OPEN_FINDINGS, SettledFinding, StoredFinding
 from .prompt import (
     EXAMINED_REQUIRED_FIELDS,
     MAX_PRIOR_COVERAGE,
@@ -251,7 +261,12 @@ def _tree_root(checkout_root: str) -> tuple[Path, str] | None:
 
 
 def _retire_missing(
-    stored: Sequence[StoredFinding], checkout_root: str, head_sha: str
+    repo: str,
+    pr: int,
+    seat: str,
+    stored: Sequence[StoredFinding],
+    checkout_root: str,
+    head_sha: str,
 ) -> list[StoredFinding]:
     """Mark findings whose file is gone ``stale`` and return the ones to carry.
 
@@ -269,6 +284,10 @@ def _retire_missing(
     is resolved through its own symlinks once, here, so that every per-path
     containment check compares like with like: on a host whose temp or work dir
     is itself a link, a real parent under a lexical root would never match.
+
+    The lane travels with the retirement because the write is scoped to it: this
+    is the one closure fuko makes itself, and it may only ever be made inside the
+    seat whose read produced the row.
     """
     resolved = _tree_root(checkout_root)
     if resolved is None:
@@ -277,7 +296,9 @@ def _retire_missing(
     live: list[StoredFinding] = []
     for row in stored:
         if _is_gone(root, real_root, row.prior.file):
-            review_state.transition(row.id, "stale", f"file absent from the tree at {head_sha}")
+            ledger_store.transition(
+                repo, pr, seat, row.id, "stale", f"file absent from the tree at {head_sha}"
+            )
         else:
             live.append(row)
     return live
@@ -383,7 +404,7 @@ def _carried_coverage(
     delta-expiry has to survive -- a toggle window in which entries silently
     stop being invalidated -- has no equivalent here.
     """
-    rows = review_state.live_coverage(repo, pr, seat)
+    rows = ledger_store.live_coverage(repo, pr, seat)
     kept = [
         row
         for row in rows
@@ -397,7 +418,7 @@ def _carried_coverage(
     gone = sorted({row.file for row in kept if _is_gone(root, real_root, row.file)})
     if not gone:
         return kept, hollow, 0
-    retired = review_state.expire_coverage(repo, pr, seat, gone)
+    retired = ledger_store.expire_coverage(repo, pr, seat, gone)
     dead = set(gone)
     # The rows leave this round's prompt whatever the store said: an entry about
     # a file the head does not carry must not be rendered even if the write that
@@ -464,7 +485,7 @@ def _reopen_candidates(repo: str, pr: int, seat: str) -> dict[tuple[str, str], S
     the reversal worth having rather than merely tidy.
     """
     candidates: dict[tuple[str, str], SettledFinding] = {}
-    for row in review_state.settled_findings(repo, pr, seat):
+    for row in ledger_store.settled_findings(repo, pr, seat):
         candidates.setdefault(_anchor(row.file, row.title), row)
     return candidates
 
@@ -558,9 +579,9 @@ def carry_in(
     checked against the checkout at all, so netting off only the retirements
     among the rows in hand would produce a number describing neither state.
     """
-    expired = review_state.expire_coverage(repo, pr, seat, _expiry_targets(touched_files))
-    opened = review_state.open_findings(repo, pr, seat)
-    live = _retire_missing(opened.rows, checkout_root, head_sha)
+    expired = ledger_store.expire_coverage(repo, pr, seat, _expiry_targets(touched_files))
+    opened = ledger_store.open_findings(repo, pr, seat)
+    live = _retire_missing(repo, pr, seat, opened.rows, checkout_root, head_sha)
     coverage, hollow, retired = (
         _carried_coverage(repo, pr, seat, checkout_root) if coverage_ledger else ([], 0, 0)
     )
@@ -571,12 +592,12 @@ def carry_in(
     # with the list it was given cannot drift out of step with it the way a
     # second copy of the enumeration could.
     rows = {minted: row.id for minted, row in zip(state.ids, live)}
-    round_ = review_state.next_round(repo, pr, seat)
+    round_ = ledger_store.next_round(repo, pr, seat)
     if opened.truncated:
         print(
             f"fuko: review-state seat {seat} round {round_}: {repo}#{pr} held "
             f"{len(opened.rows) + opened.truncated} open findings for this seat at read time, "
-            f"over the {review_state.MAX_OPEN_FINDINGS}-row read cap -- "
+            f"over the {MAX_OPEN_FINDINGS}-row read cap -- "
             f"the {opened.truncated} NEWEST "
             "are not in this round's prompt and cannot be settled until earlier rows close",
             file=sys.stderr,
@@ -733,7 +754,7 @@ def settle(
         reason = entry.reason.strip()
         if entry.status == "fixed" or (entry.status == "rejected" and reason):
             settled.add(entry.id)
-            closed += int(review_state.transition(row_id, entry.status, reason))
+            closed += int(ledger_store.transition(repo, pr, seat, row_id, entry.status, reason))
         else:
             touch.append(row_id)
     # Rows this round leaves open, keyed by claim. A verdict that MEANT to close
@@ -764,17 +785,17 @@ def settle(
         # dedup exists to stop, arriving by the new door: a reopened row is an
         # open row, and the rest of this round has to see it as one.
         closed_row = candidates.pop(anchor, None)
-        if closed_row is not None and review_state.reopen(
-            closed_row.id, _reopen_reason(closed_row, carried.round)
+        if closed_row is not None and ledger_store.reopen(
+            repo, pr, seat, closed_row.id, _reopen_reason(closed_row, carried.round)
         ):
             reopened.append(f"{finding.file}: {finding.title}")
             still_open[anchor] = closed_row.id
             continue
         fresh.append(finding)
-    review_state.touch_findings(touch)
-    recorded = review_state.record_findings(repo, pr, seat, carried.round, head_sha, fresh)
+    ledger_store.touch_findings(repo, pr, seat, touch)
+    recorded = ledger_store.record_findings(repo, pr, seat, carried.round, head_sha, fresh)
     coverage = (
-        review_state.record_coverage(repo, pr, seat, carried.round, head_sha, _keyed(examined))
+        ledger_store.record_coverage(repo, pr, seat, carried.round, head_sha, _keyed(examined))
         if coverage_ledger
         else 0
     )

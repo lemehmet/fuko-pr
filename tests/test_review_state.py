@@ -133,10 +133,10 @@ def test_review_state_no_ops_without_a_database(monkeypatch):
 
     assert review_state.record_findings("o/r", 7, "henry", 1, "sha", [_finding()]) == 0
     assert review_state.open_findings("o/r", 7, "henry") == review_state.OpenLedger()
-    assert review_state.transition(_UUID, "fixed", "rewritten") is False
+    assert review_state.transition("o/r", 7, "henry", _UUID, "fixed", "rewritten") is False
     assert review_state.settled_findings("o/r", 7, "henry") == ()
-    assert review_state.reopen(_UUID, "re-found") is False
-    assert review_state.touch_findings([_UUID]) == 0
+    assert review_state.reopen("o/r", 7, "henry", _UUID, "re-found") is False
+    assert review_state.touch_findings("o/r", 7, "henry", [_UUID]) == 0
     assert review_state.record_coverage("o/r", 7, "henry", 1, "sha", [_region()]) == 0
     assert review_state.live_coverage("o/r", 7, "henry") == []
     assert review_state.expire_coverage("o/r", 7, "henry", ["src/app.py"]) == 0
@@ -154,9 +154,9 @@ def test_a_store_failure_never_reaches_the_review(pg, monkeypatch, capsys):
 
     assert review_state.record_findings("o/r", 7, "henry", 1, "sha", [_finding()]) == 0
     assert review_state.open_findings("o/r", 7, "henry") == review_state.OpenLedger()
-    assert review_state.transition(_UUID, "fixed") is False
+    assert review_state.transition("o/r", 7, "henry", _UUID, "fixed") is False
     assert review_state.settled_findings("o/r", 7, "henry") == ()
-    assert review_state.reopen(_UUID, "re-found") is False
+    assert review_state.reopen("o/r", 7, "henry", _UUID, "re-found") is False
     assert review_state.live_coverage("o/r", 7, "henry") == []
     assert "connection refused" in capsys.readouterr().err
 
@@ -351,28 +351,33 @@ def test_next_round_is_one_without_a_store(monkeypatch):
 def test_transition_settles_only_open_rows(pg):
     conn = pg(rowcount=1)
 
-    assert review_state.transition(_UUID, "fixed", "rewritten in this head") is True
+    assert (
+        review_state.transition("o/r", 7, "henry", _UUID, "fixed", "rewritten in this head") is True
+    )
     sql, params = conn.statements[0]
     assert "updated_at = now()" in sql
-    assert sql.endswith("WHERE id = %s AND status = 'open'")
-    assert params == ("fixed", "rewritten in this head", _UUID)
+    # The lane is matched in SQL, not merely supplied by the caller: over the
+    # HTTP seam (#171) a row id arrives as a claim in a request body, and one
+    # seat closing another's finding is what #160 forbids.
+    assert sql.endswith("WHERE id = %s AND status = 'open' AND repo = %s AND pr = %s AND seat = %s")
+    assert params == ("fixed", "rewritten in this head", _UUID, "o/r", 7, "henry")
 
 
 def test_transition_refuses_an_unknown_verdict_or_a_malformed_id(pg):
     """Fail-safe direction: a finding that does not transition stays open."""
     conn = pg(rowcount=1)
 
-    assert review_state.transition(_UUID, "still_open") is False
-    assert review_state.transition(_UUID, "resolved") is False
-    assert review_state.transition("p1", "fixed") is False
-    assert review_state.transition("../../etc/passwd", "fixed") is False
+    assert review_state.transition("o/r", 7, "henry", _UUID, "still_open") is False
+    assert review_state.transition("o/r", 7, "henry", _UUID, "resolved") is False
+    assert review_state.transition("o/r", 7, "henry", "p1", "fixed") is False
+    assert review_state.transition("o/r", 7, "henry", "../../etc/passwd", "fixed") is False
     assert conn.statements == []
 
 
 def test_transition_reports_no_change_when_the_row_was_already_settled(pg):
     conn = pg(rowcount=0)
 
-    assert review_state.transition(_UUID, "stale", "file deleted") is False
+    assert review_state.transition("o/r", 7, "henry", _UUID, "stale", "file deleted") is False
     assert len(conn.statements) == 1
 
 
@@ -414,16 +419,17 @@ def test_settled_findings_clamps_a_caller_supplied_limit(pg):
 def test_reopen_returns_a_model_closed_row_to_open(pg):
     conn = pg(rowcount=1)
 
-    assert review_state.reopen(_UUID, "re-raised in round 4: contradicts fixed in round 2") is True
+    reason = "re-raised in round 4: contradicts fixed in round 2"
+    assert review_state.reopen("o/r", 7, "henry", _UUID, reason) is True
     sql, params = conn.statements[0]
     assert "SET status = 'open'" in sql and "reopened = reopened + 1" in sql
     assert "updated_at = now()" in sql
-    assert sql.endswith("WHERE id = %s AND status = ANY(%s)")
-    assert params == (
-        "re-raised in round 4: contradicts fixed in round 2",
-        _UUID,
-        ["fixed", "rejected"],
+    # Scoped like `transition`: re-raising another seat's row is the same
+    # cross-seat coupling as closing one, reached from the other direction.
+    assert sql.endswith(
+        "WHERE id = %s AND status = ANY(%s) AND repo = %s AND pr = %s AND seat = %s"
     )
+    assert params == (reason, _UUID, ["fixed", "rejected"], "o/r", 7, "henry")
 
 
 def test_reopen_refuses_a_malformed_id_and_reports_an_unmatched_row(pg):
@@ -431,21 +437,22 @@ def test_reopen_refuses_a_malformed_id_and_reports_an_unmatched_row(pg):
     matches nothing and the caller records the claim as a fresh row instead."""
     conn = pg(rowcount=0)
 
-    assert review_state.reopen("p1", "re-found") is False
+    assert review_state.reopen("o/r", 7, "henry", "p1", "re-found") is False
     assert conn.statements == []
-    assert review_state.reopen(_UUID, "re-found") is False
+    assert review_state.reopen("o/r", 7, "henry", _UUID, "re-found") is False
     assert len(conn.statements) == 1
 
 
 def test_touch_findings_refreshes_reasserted_rows_only(pg):
     conn = pg(rowcount=2)
 
-    assert review_state.touch_findings([_UUID, "p1"]) == 2
+    assert review_state.touch_findings("o/r", 7, "henry", [_UUID, "p1"]) == 2
     sql, params = conn.statements[0]
     assert "SET updated_at = now()" in sql and "status = 'open'" in sql
-    assert params == ([_UUID],)
+    assert "AND repo = %s AND pr = %s AND seat = %s" in sql
+    assert params == ([_UUID], "o/r", 7, "henry")
 
-    assert review_state.touch_findings(["p1", "p2"]) == 0
+    assert review_state.touch_findings("o/r", 7, "henry", ["p1", "p2"]) == 0
     assert len(conn.statements) == 1
 
 
@@ -529,7 +536,7 @@ def test_a_bare_string_is_refused_where_a_sequence_of_them_is_meant(pg, capsys):
     conn = pg(rowcount=5)
 
     assert review_state.expire_coverage("o/r", 7, "henry", "src/app.py") == 0
-    assert review_state.touch_findings(_UUID) == 0
+    assert review_state.touch_findings("o/r", 7, "henry", _UUID) == 0
     assert conn.statements == []
 
     err = capsys.readouterr().err

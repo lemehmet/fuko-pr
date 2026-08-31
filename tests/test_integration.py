@@ -292,10 +292,35 @@ def test_review_state_ledgers_roundtrip_on_a_live_server():
     assert [s.id for s in R.open_findings(TEST_REPO, 1, "henry").rows] == [s.id for s in stored]
 
     # str id against a uuid column, both shapes the store uses.
-    assert R.touch_findings([s.id for s in stored]) == 2
+    ids = [s.id for s in stored]
+    assert R.touch_findings(TEST_REPO, 1, "henry", ids) == 2
+
+    # The lane the id-addressed writes carry (#171) is matched in SQL, and the
+    # MISMATCH is the half that proves it. Over the wire a row id is a claim in
+    # a request body, so what has to hold is that offering these same real ids
+    # under a lane that is not theirs changes nothing -- #160's cross-seat
+    # coupling, and the entire reason the lane travels with the id.
+    #
+    # A positive result cannot show this. It proves binding and parameter ORDER
+    # (a mis-ordered bind could not match the row), but `repo` and `seat` are
+    # both TEXT, so a WHERE that compared the wrong column to the wrong
+    # parameter would satisfy every positive assertion in the suite. Nor can the
+    # unit tier: it pins SQL text and parameter tuples against a replay fake
+    # returning a canned rowcount, which is true of any WHERE clause, and the
+    # ledger's in-memory fake enforces the lane in Python rather than in SQL.
+    # Only a real server evaluates the predicate. (`qwen-anthropic/qwen3.8-max`.)
+    assert R.touch_findings(TEST_REPO, 1, "gray", ids) == 0
+    assert R.touch_findings("other/repo", 1, "henry", ids) == 0
+    assert R.touch_findings(TEST_REPO, 2, "henry", ids) == 0
+
     settled = next(s for s in stored if s.prior.title == "a")
-    assert R.transition(settled.id, "fixed", "rewritten in this head") is True
-    assert R.transition(settled.id, "fixed", "replayed stale id") is False
+    # Refused for the wrong seat, and the row it refused is still open -- which
+    # the transition immediately below proves by succeeding on it.
+    assert R.transition(TEST_REPO, 1, "gray", settled.id, "fixed", "another seat's row") is False
+    assert (
+        R.transition(TEST_REPO, 1, "henry", settled.id, "fixed", "rewritten in this head") is True
+    )
+    assert R.transition(TEST_REPO, 1, "henry", settled.id, "fixed", "replayed stale id") is False
 
     assert [s.prior.title for s in R.open_findings(TEST_REPO, 1, "henry").rows] == ["b"]
 
@@ -310,12 +335,21 @@ def test_review_state_ledgers_roundtrip_on_a_live_server():
     assert [(c.id, c.status, c.title, c.reason) for c in closed] == [
         (settled.id, "fixed", "a", "rewritten in this head")
     ]
-    assert R.reopen(settled.id, "re-raised: an independent finding contradicts fixed") is True
+    # A closure is not another seat's to undo either: same id, wrong lane, and
+    # the row stays closed -- which the reopen below proves by succeeding on it.
+    assert R.settled_findings(TEST_REPO, 1, "gray") == ()
+    assert R.reopen(TEST_REPO, 1, "gray", settled.id, "another seat's closure") is False
+    assert (
+        R.reopen(
+            TEST_REPO, 1, "henry", settled.id, "re-raised: an independent finding contradicts fixed"
+        )
+        is True
+    )
     assert sorted(s.prior.title for s in R.open_findings(TEST_REPO, 1, "henry").rows) == ["a", "b"]
     # Open again, so the row is no longer the settled read's to offer and a
     # replayed reopen changes nothing -- the count cannot inflate on an open row.
     assert R.settled_findings(TEST_REPO, 1, "henry") == ()
-    assert R.reopen(settled.id, "replayed") is False
+    assert R.reopen(TEST_REPO, 1, "henry", settled.id, "replayed") is False
     with db() as conn:
         row = conn.execute(
             "SELECT reopened, status_reason FROM review_findings WHERE id = %s",
