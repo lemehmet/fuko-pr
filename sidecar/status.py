@@ -115,6 +115,13 @@ _CR_CHECK_NAMES = re.compile(r"coderabbit", re.I)
 # and it is the only body allowed to DEMOTE a completed read (#137). CR's one-off
 # replies are never rewritten, so a notice in one of those would stick forever.
 _CR_SUMMARY = re.compile(r"auto-generated comment: summarize by coderabbit\.ai", re.I)
+# CodeRabbit delimits the result of its MOST RECENT review inside its summary.
+# That block is what separates "reviewed HEAD and found nothing" from "carries an
+# older round's result" -- the summary is rewritten in place, so both a stale
+# result and a live notice can sit in one body at once (#137).
+_CR_RECENT_REVIEW = re.compile(
+    r"<!-- recent_review_start -->(.*?)<!-- recent_review_end -->", re.S | re.I
+)
 
 # Identities a run receipt may legitimately come from. ANCHORED, and requiring
 # the `[bot]` suffix, deliberately: the loose `fuko` substring used for finding
@@ -230,6 +237,36 @@ def _cr_is_notice_body(body: str) -> bool:
     return bool(_CR_RATE_LIMIT_MARK.search(body) or _CR_PAUSE_MARK.search(body))
 
 
+def _cr_marker_covers_head(body: str, head_sha: str) -> bool:
+    """Whether a terminal marker in ``body`` is evidence that CR read ``head_sha``.
+
+    CR's summary is rewritten in place, so "does this body contain a terminal
+    marker" is the wrong question: a throttled or auto-paused round leaves ONE body
+    holding the previous round's result, a range line bumped to the new head, and a
+    live notice, all together. When CR delimits its current result (the
+    ``recent_review`` block), that block is the answer -- the marker counts only if
+    the block also names HEAD. Both halves are observed: on a Fair-Usage round the
+    block still named the PREVIOUS head while the notice carried the bumped range,
+    and on an auto-pause after a real review it named HEAD.
+
+    That precision matters in both directions. Treating any notice-bearing body as
+    evidence-free (the coarser rule this replaces) is right for the throttled case
+    but wrong for the auto-pause CR posts *after* completing a review -- CR pauses
+    to guard against FUTURE commits, and demoting that completion would report
+    `paused` for a head it demonstrably read.
+
+    Without the delimiter there is no block to scope to, so the coarse rule stands:
+    a body that is itself a notice cannot vouch for HEAD.
+    """
+    block = _CR_RECENT_REVIEW.search(body)
+    if block is None:
+        return bool(_CR_DONE_MARKER.search(body)) and not _cr_is_notice_body(body)
+    inner = block.group(1)
+    return bool(_CR_DONE_MARKER.search(inner)) and any(
+        _sha_match(h, head_sha) for h in _range_heads(inner)
+    )
+
+
 def _cr_demotion(notice_blob: str, head_reviewed: str | None, with_content: bool) -> dict | None:
     """Return the degraded row a live CodeRabbit notice imposes on a would-be ``done``.
 
@@ -264,6 +301,14 @@ def _cr_demotion(notice_blob: str, head_reviewed: str | None, with_content: bool
             head_reviewed,
             "CR signalled completion on HEAD but its live summary still carries a "
             "pause notice and nothing on HEAD carries review content",
+            with_content,
+        )
+    if _CR_IN_PROGRESS.search(notice_blob):
+        return _cr_row(
+            "in_progress",
+            head_reviewed,
+            "CR signalled completion on HEAD but its live summary still reports an "
+            "active scan and nothing on HEAD carries review content",
             with_content,
         )
     return None
@@ -409,9 +454,7 @@ def coderabbit_state(
     # then vouch for a commit CR never opened (#137). Excluding notice bodies
     # costs nothing on a genuine review: a real post-review summary reports its
     # allowance as a "Limit details:" line, which these patterns do not match.
-    marker_on_head = any(
-        _CR_DONE_MARKER.search(b) for b in head_bodies if not _cr_is_notice_body(b)
-    )
+    marker_on_head = any(_cr_marker_covers_head(b, head_sha) for b in head_bodies)
     # A submitted review whose body has actual prose is independent evidence: CR
     # writes one when it reviewed, and the empty acknowledgement is precisely the
     # artifact of a Fair-Usage round. The notice exclusion applies here for the

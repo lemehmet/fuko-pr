@@ -381,6 +381,90 @@ def test_coderabbit_summary_quoting_notice_prose_is_not_a_notice():
     assert s["reviewed_head_with_content"] is True
 
 
+def _summary(*, recent_range=None, recent_zero=False, notice="", extra=""):
+    """CR's in-place summary comment, with an optional delimited recent-review block.
+
+    Mirrors the real shape: the machine marker, then whatever notice is live, then
+    the ``recent_review`` block holding the LAST completed review's result.
+    """
+    body = "<!-- This is an auto-generated comment: summarize by coderabbit.ai -->\n"
+    if notice:
+        body += notice + "\n"
+    if recent_range is not None:
+        body += "<!-- recent_review_start -->\n"
+        if recent_zero:
+            body += "No actionable comments were generated in the recent review. \U0001f389\n"
+        body += (
+            "Reviewing files that changed from the base of the PR and between "
+            f"`abc1234` and `{recent_range}`.\n"
+        )
+        body += "<!-- recent_review_end -->\n"
+    return _cr(body + extra)
+
+
+_AUTO_PAUSE = (
+    "<!-- This is an auto-generated comment: review paused by coderabbit.ai -->\n"
+    "> [!NOTE]\n> ## Reviews paused\n>\n"
+    "> It looks like this branch is under active development. To avoid overwhelming "
+    "you with review comments due to an influx of new commits, CodeRabbit has "
+    "automatically paused this review."
+)
+
+
+def test_coderabbit_auto_pause_after_a_completed_review_of_head_stays_done():
+    """A pause CR posts AFTER reviewing HEAD must not demote that review (#137).
+
+    Observed on this PR: CR completed the review, reported zero actionable comments
+    for the current range, and then auto-paused to guard against FURTHER commits.
+    Both sit in the one in-place summary. Treating any notice-bearing body as
+    evidence-free reported `paused` for a head CR demonstrably read — a false
+    demote of exactly the kind the anti-stickiness rule exists to prevent.
+    """
+    summary = _summary(recent_range=HEAD, recent_zero=True, notice=_AUTO_PAUSE)
+    s = coderabbit_state(HEAD, [summary], [_cr_review(HEAD, state="COMMENTED", body="")])
+    assert s["state"] == "done"
+    assert s["reviewed_head_with_content"] is True
+
+
+def test_coderabbit_notice_whose_recent_review_names_the_previous_head_is_demoted():
+    """The same body shape, throttled: the delimited result is the PREVIOUS round's.
+
+    Also observed on this PR. Under Fair Usage the `recent_review` block still named
+    the previous head while the notice carried the range bumped to the new one, so
+    the marker inside it vouches for a commit CR never opened.
+    """
+    summary = _summary(
+        recent_range="0000aaa",
+        recent_zero=True,
+        notice=_FAIR_USAGE,
+        extra=(
+            "\nReviewing files that changed from the base of the PR and between "
+            f"`0000aaa` and `{HEAD}`."
+        ),
+    )
+    s = coderabbit_state(HEAD, [summary], [_cr_review(HEAD, state="APPROVED")])
+    assert s["state"] == "rate_limited"
+    assert s["reviewed_head_with_content"] is False
+
+
+def test_coderabbit_live_in_progress_summary_demotes_an_empty_head_review():
+    """An empty review row on HEAD while CR's summary says it is still scanning.
+
+    Replying to a review thread makes GitHub record a review event against the
+    current HEAD with an empty body, which `review_on_head` read as a completion —
+    so a CR that was visibly mid-scan reported `done`. Observed on this PR at
+    02:28Z. Same guard as the notice demotion: with no review content on HEAD, a
+    live signal in the in-place summary outranks the empty acknowledgement.
+    """
+    summary = _summary(
+        notice="> [!NOTE]\n> Currently processing new changes in this PR. "
+        "This may take a few minutes, please wait..."
+    )
+    s = coderabbit_state(HEAD, [summary], [_cr_review(HEAD, state="COMMENTED", body="")])
+    assert s["state"] == "in_progress"
+    assert s["reviewed_head_with_content"] is False
+
+
 def test_coderabbit_pause_notice_demotes_to_paused_not_rate_limited():
     """The two notices need different recoveries, so they keep different states.
 
