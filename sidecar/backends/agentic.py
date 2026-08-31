@@ -674,7 +674,9 @@ class AgenticBackend:
         returns on them are applied, and this round's published findings become
         the next round's open ledger. An entry that turns the flag OFF is the
         stateless arm of #159's A/B -- it reads nothing, settles nothing and
-        writes nothing, so its prompt matches the pre-ledger one exactly.
+        writes nothing, and its prompt carries no prior-state section at all.
+        What it still carries of the ledger era is the output contract, asked
+        for unconditionally and so identical in both arms.
         An entry that opts into ``coverage_ledger`` additionally carries
         the COVERAGE half (#157): the regions this seat's earlier rounds recorded
         as examined are rendered as advisory context, the coverage this round's

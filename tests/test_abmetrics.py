@@ -5,7 +5,7 @@ worked by hand rather than round-tripped: an estimator that agrees with itself
 is exactly the failure mode ad-hoc measurement scripts have.
 """
 
-from sidecar.abmetrics import Claim, arm_metrics, chapman_pool_size, pair_metrics
+from sidecar.abmetrics import Claim, arm_metrics, chapman_pool_size, claim_title, pair_metrics
 
 
 def _c(arm, round_key, file, title):
@@ -75,3 +75,27 @@ def test_pair_metrics_are_none_when_the_arms_never_overlapped():
 
     assert p.rounds == 0 and p.union == 0
     assert p.agreement is None and p.pool_estimate is None and p.coverage is None
+
+
+def test_claim_title_prefers_the_stored_title_and_unwraps_its_rendering():
+    assert claim_title("Unchecked None", "body") == "Unchecked None"
+    assert claim_title("**Unchecked None**", "body") == "Unchecked None"
+
+
+def test_claim_title_falls_back_past_the_shared_model_label():
+    """The label is identical across arms by design, so keying on it fakes agreement."""
+    body = "\U0001f916 `qwen-anthropic/qwen3.8-max`\n\n**Unchecked None**\n\ndetail"
+
+    assert claim_title("", body) == "Unchecked None"
+
+
+def test_claim_title_is_empty_when_only_decoration_survives():
+    """`****` is a rendered EMPTY title; treating it as content collapses a file's claims."""
+    assert claim_title("****", "\U0001f916 `qwen-anthropic/qwen3.8-max`") == ""
+    assert claim_title("", "") == ""
+    assert claim_title("  ", "\n  \n**  **\n") == ""
+
+
+def test_two_untitled_claims_on_one_file_do_not_become_one():
+    """The guarantee the empty return buys: callers must drop, not anchor on ``""``."""
+    assert claim_title("****", "") == claim_title("", "")

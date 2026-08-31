@@ -1,16 +1,26 @@
 """Score the stateful-vs-stateless review A/B from PR receipts (#159, epic #160).
 
-Fetches each named PR's inline review comments, normalizes them with fuko's own
-recognizers, assigns each finding to an ARM by its author login, and reports the
-metrics the epic is scored on: findings per arm, distinct paths, path
-concentration, one-shot rate, cross-arm agreement, and Chapman pool coverage.
+Fetches each named PR's review receipts through BOTH channels the reviewers
+publish on -- inline comments, and the review bodies that carry unanchorable
+findings -- normalizes them with fuko's own recognizers, assigns each finding to
+an ARM by its author login, and reports the metrics the epic is scored on:
+findings per arm, distinct paths, path concentration, one-shot rate, cross-arm
+agreement, and Chapman pool coverage.
 Token and cost per run come from ``review_runs`` (#152) and are printed only
 when a database is configured.
 
 The estimators live in :mod:`sidecar.abmetrics` and are unit-tested; this file
 is the credentialed, I/O half -- what it adds is fetching, the login-to-arm
-mapping, and formatting. Claim identity is the findings ledger's own
-``(file, casefolded title)``; a round is one head (the comment's ``commit_id``).
+mapping, and formatting. Claim identity is the findings ledger's own RULE --
+``(file, casefolded title)`` via :func:`sidecar.reviewer.ledger.claim_anchor` --
+applied to the title recovered from what was published; a round is one head (the
+comment's ``commit_id``). The rule is shared, the inputs are not: ``encode_marker``
+omits title and body, so a published finding's title is re-derived from the
+rendered markdown rather than read back from the ledger, and an anchor computed
+here will not equal the one the ledger stored for the same finding. That is
+harmless for every comparison this tool makes -- both arms are re-derived
+identically -- and fatal to any future join against ledger rows, which is why it
+is stated here rather than left to be discovered.
 
 Arms are named EXPLICITLY on the command line rather than inferred, because on
 this fleet they cannot be inferred: #159's control and treatment run the same
@@ -46,9 +56,9 @@ import subprocess
 import sys
 
 from sidecar import run_metrics, runner
-from sidecar.abmetrics import Claim, TOP_PATHS, arm_metrics, pair_metrics
+from sidecar.abmetrics import Claim, TOP_PATHS, arm_metrics, claim_title, pair_metrics
 from sidecar.backends.base import PRRef
-from sidecar.normalizers import collect_signals
+from sidecar.normalizers import collect_review_signals, collect_signals
 
 BASELINES = {
     "cross-arm agreement": "4.7%",
@@ -65,6 +75,9 @@ it may be the rule changing, and this tool cannot tell the reader which.
 """
 
 
+_API = "https://api.github.com"
+
+
 def _token() -> str:
     """Return a GitHub token from ``GITHUB_TOKEN`` or the ``gh`` CLI."""
     env = os.environ.get("GITHUB_TOKEN")
@@ -74,31 +87,59 @@ def _token() -> str:
 
 
 def _pairs(values: list[str], flag: str) -> dict[str, str]:
-    """Parse repeated ``NAME=VALUE`` flags into a dict, failing loudly on a typo."""
+    """Parse repeated ``NAME=VALUE`` flags into a dict, failing loudly on a typo.
+
+    A repeated NAME, or one VALUE given to two NAMEs, is rejected rather than
+    resolved last-wins. That is the copy-paste typo this tool's charter has to
+    catch: two arms handed the same bot login would score every claim under one
+    of them and compare it against an arm holding none, which prints ``n/a``
+    agreement and a power warning that reads as "no data" rather than "bad
+    mapping" (CodeRabbit-class shape raised by the qwen3.8-max active seat).
+    """
     out: dict[str, str] = {}
     for raw in values:
         name, sep, value = raw.partition("=")
-        if not sep or not name.strip() or not value.strip():
+        name, value = name.strip(), value.strip()
+        if not sep or not name or not value:
             raise SystemExit(f"{flag} expects NAME=VALUE, got {raw!r}")
-        out[name.strip()] = value.strip()
+        if name in out:
+            raise SystemExit(f"{flag} {name!r} given more than once")
+        if value in out.values():
+            raise SystemExit(f"{flag} value {value!r} mapped to more than one name")
+        out[name] = value
     return out
 
 
 def _claims(repo: str, pr_num: int, token: str, arms: dict[str, str]) -> tuple[list[Claim], int]:
-    """Return one PR's claims for the mapped arms, plus how many titles were empty.
+    """Return one PR's claims for the mapped arms, plus how many carried no title.
 
-    A signal reaches an arm only through the comment it came from: the normalized
-    signal carries no author, so it is rejoined to its comment by ``thread_url``.
+    BOTH publication channels are read. Anchorable findings become inline
+    comments; everything else rides the review BODY -- ``overflow`` under
+    "Findings without a diff anchor", and, on a 422 anchoring failure, a whole
+    round demoted body-only. Reading only the first would drop precisely the
+    off-diff class the stateful arm is hypothesized to add, so the exclusion
+    would not be direction-neutral: it would bias the coverage metric this
+    experiment ships on toward the null. Empirically that channel is still empty
+    on this repo -- 0 body-carried signals across 78 reviews on #192, #197 and
+    #203 -- so reading it now closes the gap before it opens rather than
+    correcting a number already published.
+
+    A signal reaches an arm only through the comment or review it came from: the
+    normalized signal carries no author, so it is rejoined by ``thread_url``.
     A finding whose author is not one of the named arms is skipped -- CodeRabbit's
     findings are on the same PR and are not part of this experiment.
 
-    An empty ``title`` is a known reviewer output (#142) and would collapse every
-    such finding onto one anchor per file. The first line of the body stands in,
-    and the count is returned so the caller can say how much of the run leaned on
-    the fallback rather than burying it.
+    A claim with no usable title is DROPPED and counted, never anchored on the
+    empty string. Body-carried findings arrive titleless by construction --
+    ``encode_marker`` omits title and body, and nothing rehydrates them from the
+    rendered text (#142) -- so folding them in on a ``(file, "")`` anchor would
+    collapse every one of them per file and, because both arms collapse onto the
+    same key, report agreement the reviewers never reached. Dropping loudly costs
+    the count and keeps the metric honest; the caller prints it.
     """
     pr = PRRef(repo=repo, number=pr_num, url=f"https://github.com/{repo}/pull/{pr_num}")
-    comments = runner.fetch_inline_comments(pr, token, "https://api.github.com")
+    comments = runner.fetch_inline_comments(pr, token, _API)
+    reviews = runner.fetch_reviews(pr, token, _API)
     by_thread = {
         c.get("html_url"): (
             (c.get("user") or {}).get("login", ""),
@@ -106,18 +147,26 @@ def _claims(repo: str, pr_num: int, token: str, arms: dict[str, str]) -> tuple[l
         )
         for c in comments
     }
+    # Review bodies join the same way: `collect_review_signals` stamps each
+    # marker's `thread_url` with the REVIEW's html_url when it carries none.
+    by_thread.update(
+        {
+            r.get("html_url"): ((r.get("user") or {}).get("login", ""), r.get("commit_id") or "")
+            for r in reviews
+        }
+    )
     login_to_arm = {login: arm for arm, login in arms.items()}
     out: list[Claim] = []
     untitled = 0
-    for signal in collect_signals(comments):
+    for signal in collect_signals(comments) + collect_review_signals(reviews):
         login, commit = by_thread.get(signal.thread_url or "", ("", ""))
         arm = login_to_arm.get(login)
         if arm is None or not signal.file:
             continue
-        title = signal.title.strip()
+        title = claim_title(signal.title, signal.body)
         if not title:
             untitled += 1
-            title = next((ln for ln in signal.body.splitlines() if ln.strip()), "")
+            continue
         out.append(Claim(arm=arm, round_key=f"{pr_num}@{commit}", file=signal.file, title=title))
     return out, untitled
 
@@ -125,6 +174,17 @@ def _claims(repo: str, pr_num: int, token: str, arms: dict[str, str]) -> tuple[l
 def _pct(value: float | None) -> str:
     """Format a fraction as a percentage, or ``n/a`` when it is undefined."""
     return "n/a" if value is None else f"{value * 100:.1f}%"
+
+
+def _num(value: int | None) -> str:
+    """Format a count, or ``n/a`` when the aggregate was NULL.
+
+    ``run_metrics`` keeps "not measured" distinct from zero and returns ``None``
+    for the first (#152). Interpolating it with ``str`` would print the literal
+    "None" into a report whose stated convention one column to the right is
+    n/a-never-a-misleading-figure.
+    """
+    return "n/a" if value is None else str(value)
 
 
 def _report_arms(claims: list[Claim], arms: dict[str, str]) -> None:
@@ -185,8 +245,8 @@ def _report_cost(repo: str, slots: dict[str, str], days: int) -> None:
             continue
         cost = "n/a" if r["cost_usd"] is None else f"{r['cost_usd']:.4f}"
         print(
-            f"{arm:<12} {r['runs']:>5} {str(r['input_tokens']):>10} "
-            f"{str(r['cache_read_tokens']):>10} {str(r['output_tokens']):>9} {cost:>9}"
+            f"{arm:<12} {r['runs']:>5} {_num(r['input_tokens']):>10} "
+            f"{_num(r['cache_read_tokens']):>10} {_num(r['output_tokens']):>9} {cost:>9}"
         )
 
 
@@ -228,7 +288,11 @@ def main() -> None:
 
     print(f"\n=== {args.repo} PRs {args.prs} ===")
     if untitled:
-        print(f"note: {untitled} finding(s) had an empty title; first body line used (#142)")
+        print(
+            f"note: {untitled} finding(s) carried no usable title and were DROPPED from "
+            "every metric below; review-body findings arrive titleless until #142 "
+            "rehydrates them"
+        )
     _report_arms(claims, arms)
     _report_pair(claims, arms)
     _report_cost(args.repo, _pairs(args.slot, "--slot"), args.days)

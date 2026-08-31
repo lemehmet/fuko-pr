@@ -30,11 +30,15 @@ credentials and the parts most likely to change.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from .reviewer.ledger import claim_anchor
+
+_LABEL_RE = re.compile(r"^\s*🤖\s*`[^`]*`\s*$")
+"""The visible model label a comment carries in A/B mode. Decoration, not a title."""
 
 TOP_PATHS = 3
 """How many paths the concentration metric reports, matching the epic's ``64%``.
@@ -43,6 +47,43 @@ A fixed N rather than a parameter with a default, because the number is only
 ever compared against a published baseline computed at 3; a caller free to ask
 for 5 would produce a figure that reads like the same metric and is not.
 """
+
+
+def claim_title(title: str, body: str) -> str:
+    """Recover a claim's title from what was published, or ``""`` if nothing usable is.
+
+    Lives here rather than in the fetching script because it is half of claim
+    identity: :func:`claim_anchor` decides when two titles are one claim, and this
+    decides what counts as a title at all. Both halves belong to the same rule.
+
+    The stored title is preferred and the body's lines are the fallback, and both
+    are filtered for the two shapes that are publisher decoration rather than
+    content:
+
+    * the visible ``🤖 `model``` label prefixed to every comment in A/B mode,
+      which is IDENTICAL across arms whenever they run the same model -- exactly
+      #159's design -- so keying on it would collapse one arm's claims onto the
+      other's and report cross-arm agreement neither reviewer reached;
+    * the ``**...**`` wrapper a rendered finding title arrives in, which degrades
+      to ``****`` when the title was empty -- non-empty, and so silently keyed on
+      as if it were content.
+
+    Returning ``""`` is a real answer and callers must treat it as one: anchoring
+    on the empty string would collapse every untitled finding in a file onto one
+    claim. Findings published in a review body arrive with neither title nor body,
+    so this is their normal outcome until they are rehydrated (#142).
+
+    Stripping the bold wrapper also moves the recovered title closer to the clean
+    one the ledger anchored on, but does not make them equal -- see
+    :attr:`Claim.anchor`.
+    """
+    for candidate in (title, *body.splitlines()):
+        if _LABEL_RE.match(candidate):
+            continue
+        cleaned = candidate.strip().strip("*").strip()
+        if cleaned:
+            return cleaned
+    return ""
 
 
 @dataclass(frozen=True)
@@ -62,7 +103,15 @@ class Claim:
 
     @property
     def anchor(self) -> tuple[str, str]:
-        """This claim's identity, under the findings ledger's own rule."""
+        """This claim's identity, under the findings ledger's own rule.
+
+        The RULE is shared; the inputs need not be. A caller scoring published
+        receipts re-derives ``title`` from rendered markdown, because the signal
+        marker carries neither title nor body -- so this anchor will not equal
+        the one the ledger stored for the same finding, and a join against ledger
+        rows on it would silently match nothing. Every comparison in this module
+        is between claims derived the same way, which is what makes it sound.
+        """
         return claim_anchor(self.file, self.title)
 
 

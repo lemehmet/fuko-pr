@@ -148,8 +148,11 @@ never mentions the flag behaves exactly as it did, down to the harness
 environment (the backend emits `FUKO_AGENTIC_FINDINGS_LEDGER` only to say `0`).
 
 A seat with the flag off makes **no findings read, retires nothing, mints no
-ids, applies no verdicts and records nothing** — its prompt is byte-for-byte the
-pre-ledger one. That is what makes a genuinely stateless arm expressible, which
+ids, applies no verdicts and records nothing**, and its prompt carries no
+prior-state section at all. It is not byte-for-byte the pre-ledger prompt: the
+output contract still asks for `examined` and `prior_status` unconditionally. It
+is asked for in both arms, so nothing state-dependent separates them — which is
+what makes a genuinely stateless arm expressible, and which
 is why the flag exists (#159): before it, both arms of a stateful-vs-stateless
 A/B carried findings. Turning it back on **self-heals**: the first flag-on round
 retires rows whose files the head no longer carries, against the checkout it

@@ -1353,6 +1353,42 @@ def test_a_seat_with_the_findings_ledger_off_neither_reads_nor_writes_findings(m
     assert outcome.recorded == 0 and outcome.closed == 0 and outcome.reasserted == 0
 
 
+def test_a_flag_off_round_applies_no_verdict_even_holding_a_carried_state(monkeypatch, store):
+    """Off writes nothing on THIS call's arguments, not on how they were built.
+
+    The in-flow pairing (flag-off ``carry_in`` -> flag-off ``settle``) leaves the
+    verdict pass empty anyway, so this exercises the mismatched pair the public
+    signature permits: a carried state minted while the flag was on, settled by a
+    round that has it off. Nothing may close.
+    """
+    settle(
+        carry_in(REPO, PR, SEAT),
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head1",
+        findings=[_finding()],
+    )
+    carried = carry_in(REPO, PR, SEAT)
+    minted = next(iter(carried.state.ids))
+    for name in ("transition", "touch_findings", "record_findings"):
+        monkeypatch.setattr(review_state, name, _forbidden(name))
+
+    outcome = settle(
+        carried,
+        repo=REPO,
+        pr=PR,
+        seat=SEAT,
+        head_sha="head2",
+        prior_status=[PriorFindingStatus(id=minted, status="fixed", reason="gone")],
+        findings_ledger=False,
+    )
+
+    assert outcome == ledger.Settlement()
+    # The row is untouched, so a later flag-on round is still offered it.
+    assert _finding().title in carry_in(REPO, PR, SEAT).text
+
+
 def test_the_findings_gate_is_the_only_difference_between_the_two_arms(store):
     """A round's own claim reaches the next round's prompt iff the flag is on."""
     settle(

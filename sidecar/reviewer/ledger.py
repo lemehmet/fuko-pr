@@ -770,19 +770,29 @@ def settle(
 
     ``findings_ledger`` gates this function's OWN writes the same way and for the
     same reason, one tier down (#159). It defaults ON because Tier 1 shipped
-    unconditional. Off, :func:`carry_in` handed this round nothing, so the
-    verdict pass and the dedup pass are already empty by construction; what the
-    flag adds is that the round's published findings are not recorded either.
-    Recording quietly for a later flip is the failure this avoids: those rows
-    would come back as carried claims on a flag-on round that could not have
-    settled them, asserted against heads no round in between examined. The
-    coverage half is independent -- a seat may run either tier alone, and #159's
-    control runs neither while its treatment runs both.
+    unconditional. Off, nothing here reads the ledger, applies a verdict to it,
+    or records into it: the round's published findings are not written, and the
+    verdict pass is skipped rather than left to be empty. Recording quietly for a
+    later flip is the failure this avoids: those rows would come back as carried
+    claims on a flag-on round that could not have settled them, asserted against
+    heads no round in between examined. The coverage half is independent -- a
+    seat may run either tier alone, and #159's control runs neither while its
+    treatment runs both.
+
+    The verdict pass is gated on the flag rather than on the emptiness a flag-off
+    :func:`carry_in` produces, even though the in-flow pairing makes the two
+    equivalent. "Off writes nothing" should hold on this call's own arguments, so
+    that a caller which hands a flag-off round a carried state built while the
+    flag was on -- a mismatched pair no runtime path builds, but one this public
+    signature permits -- still closes no rows. Every other write on this path is
+    already gated that way; the verdict loop was the one place where the property
+    rested on the caller instead (CodeRabbit, #203).
     """
     touch: list[str] = []
     closed = 0
     settled: set[str] = set()
-    for entry in carried.state.accepted_status(prior_status):
+    verdicts = carried.state.accepted_status(prior_status) if findings_ledger else ()
+    for entry in verdicts:
         row_id = carried.rows.get(entry.id)
         if row_id is None:
             continue
