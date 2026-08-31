@@ -339,3 +339,18 @@ def test_review_state_ledgers_roundtrip_on_a_live_server():
     assert [c.file for c in R.live_coverage(TEST_REPO, 1, "henry")] == ["src/util.py"]
     assert R.expire_coverage(TEST_REPO, 1, "henry") == 1
     assert R.live_coverage(TEST_REPO, 1, "henry") == []
+
+    # `next_round` spans BOTH ledgers (#157), and its UNION ALL is the only new
+    # SQL this tier adds. A recording connection can show the statement contains
+    # the union but never that the server accepts it, and `@_best_effort` turns a
+    # server-side failure into `1` -- which is precisely the "N rounds under one
+    # label" defect the union exists to prevent, silently, behind a default-off
+    # flag. Same standard as #169 (`qwen-anthropic/qwen3.8-max`).
+    assert R.next_round(TEST_REPO, 1, "henry") == 1
+    assert R.record_coverage(TEST_REPO, 1, "henry", 5, head, [region]) == 1
+    assert R.next_round(TEST_REPO, 1, "henry") == 6
+    # An EXPIRED coverage row is still a round that happened: the query has no
+    # `expired_at` filter, and re-issuing the number of a round whose coverage
+    # has since been invalidated is the same collision.
+    assert R.expire_coverage(TEST_REPO, 1, "henry") == 1
+    assert R.next_round(TEST_REPO, 1, "henry") == 6

@@ -931,6 +931,13 @@ class AgenticBackend:
             or settlement.recorded
             or settlement.reopened
             or settlement.coverage
+            # Being SHOWN coverage is ledger activity too, and it is the number
+            # the rollout is scored on: a flag-on seat that carries K entries,
+            # publishes nothing and returns an empty `examined` (which the
+            # contract allows) would otherwise print no line at all, and
+            # `coverage carried` exists nowhere else
+            # (`qwen-anthropic/qwen3.8-max`, #157).
+            or carried.coverage
             # `expired` earns its place in the gate rather than riding along:
             # expiry runs on EVERY seat, flag or no flag, so a flag-off seat
             # whose delta retired a flag-on seat's entries writes to the ledger

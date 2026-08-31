@@ -195,11 +195,13 @@ rather than stylistic:
   remove a stale assurance and gating it would let a seat toggled off and back on
   carry entries no round in between could expire.
 
-  A deleted or renamed-away file is *not* in that diff — a deletion emits
-  `+++ /dev/null` and a rename leaves nothing at the old path — even though both
-  differ maximally from base, so the read path retires those against the
-  checkout, the same way the findings ledger retires a finding whose file is
-  gone. The residual gap left is a file modified, examined, then reverted to its
+  A deleted or renamed-away file never reaches the *parsed file set* expiry
+  matches against — `parse_diff` collects a path only from a `+++ b/` header, and
+  a deletion emits `+++ /dev/null` while a rename leaves nothing at the old path
+  — even though both differ maximally from base. (The raw diff still describes
+  both; it is the set derived from it that does not.) So the read path retires
+  those against the checkout, the same way the findings ledger retires a finding
+  whose file is gone. The residual gap left is a file modified, examined, then reverted to its
   base content: it leaves the diff and is still in the tree, so neither pass
   expires its entry. What makes that survivable is the next rule.
 - **Advisory, never binding.** The block is introduced by fixed prose

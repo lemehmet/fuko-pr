@@ -7,7 +7,7 @@ import pytest
 
 from sidecar import review_state
 from sidecar.review_state import StoredFinding
-from sidecar.reviewer.prompt import PriorFinding
+from sidecar.reviewer.prompt import PriorCoverage, PriorFinding
 from sidecar.throttle import TIMEOUT_RETURNCODE
 from sidecar.backends import agentic as agentic_mod
 from sidecar.backends import get_backend
@@ -909,6 +909,51 @@ def test_invoke_leaves_coverage_alone_for_a_seat_that_did_not_opt_in(monkeypatch
 
     assert seen["recorded"] == [] and seen["read"] == 0
     assert seen["expired"] == [("dorian", ["src/app.py"])]
+
+
+def test_the_receipt_reports_coverage_a_round_was_shown_even_when_it_wrote_nothing(
+    monkeypatch, capsys
+):
+    """Being SHOWN coverage is ledger activity, and `coverage carried` exists nowhere else.
+
+    Reachable for a flag-on seat with no open findings whose round publishes
+    nothing and returns an empty `examined` -- which the output contract allows
+    -- and whose delta expires nothing. The rollout is scored on this receipt
+    (`qwen-anthropic/qwen3.8-max`).
+    """
+    _ledger(monkeypatch)
+    _coverage(monkeypatch)
+    monkeypatch.setattr(
+        review_state,
+        "live_coverage",
+        lambda *a, **k: [
+            PriorCoverage(
+                file="src/util.py",
+                region="open_source",
+                checked="whether callers handle None",
+                conclusion="all four branch on None",
+                evidence="src/util.py:118-166",
+                round=1,
+            )
+        ],
+    )
+    payload = json.loads(REVIEW_JSON)
+    payload["findings"], payload["examined"] = [], []
+    capsys.readouterr()
+
+    _invoke(
+        monkeypatch,
+        AgenticBackend(),
+        HarnessResult(0, json.dumps(payload)),
+        env={
+            "FUKO_AGENTIC_MODEL": "claude-x",
+            "FUKO_SEAT": "dorian",
+            "FUKO_AGENTIC_COVERAGE_LEDGER": "1",
+        },
+    )
+
+    line = [x for x in capsys.readouterr().err.splitlines() if "review-state seat dorian" in x]
+    assert len(line) == 1 and "coverage carried 1, expired 0, recorded 0" in line[0]
 
 
 def test_a_value_other_than_one_reads_as_coverage_off(monkeypatch):
