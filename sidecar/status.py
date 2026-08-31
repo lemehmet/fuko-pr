@@ -19,6 +19,13 @@ the inline comments (issue #17). Its walkthrough issue comment is the fallback w
 no check-run is observable, and only a *terminal* walkthrough marker (a completion
 line, not merely the "Reviewing files … between …" range that CR posts up front)
 counts as done there. Copilot's state is its latest review's `commit_id`.
+
+Both of CodeRabbit's completion signals are emitted under a Fair-Usage limit too,
+on a commit CR never read, so a live limit or pause notice in CR's in-place-edited
+summary DEMOTES a would-be `done` unless CR left review content on HEAD (#137).
+That content verdict is reported in its own right as `reviewed_head_with_content`,
+which is what separates "reviewed HEAD and found nothing" from "acknowledged HEAD
+and did not read it" — the two the state alone collapses together.
 """
 
 from __future__ import annotations
@@ -81,6 +88,11 @@ _CR_DONE_MARKER = re.compile(
 _CR_REVIEWING = re.compile(r"between\s+`?([0-9a-f]{7,40})`?\s+and\s+`?([0-9a-f]{7,40})`?", re.I)
 
 _CR_CHECK_NAMES = re.compile(r"coderabbit", re.I)
+# The marker on CR's summary comment -- the one comment CR rewrites IN PLACE on
+# every push. That is what makes a notice inside it current rather than historical,
+# and it is the only body allowed to DEMOTE a completed read (#137). CR's one-off
+# replies are never rewritten, so a notice in one of those would stick forever.
+_CR_SUMMARY = re.compile(r"auto-generated comment: summarize by coderabbit\.ai", re.I)
 
 # Identities a run receipt may legitimately come from. ANCHORED, and requiring
 # the `[bot]` suffix, deliberately: the loose `fuko` substring used for finding
@@ -179,6 +191,62 @@ def _sha_match(a: str | None, b: str | None) -> bool:
     return a[:n] == b[:n]
 
 
+def _cr_row(state: State, head_reviewed: str | None, detail: str, with_content: bool) -> dict:
+    """Build a CodeRabbit row, always carrying the ``reviewed_head_with_content`` verdict.
+
+    The key rides on EVERY CodeRabbit row, including the ones where it is trivially
+    false, so a consumer can read it unconditionally. A key that appears only on
+    interesting rows is one a consumer learns to skip.
+    """
+    row = _row("coderabbit", state, head_reviewed, detail)
+    row["reviewed_head_with_content"] = with_content
+    return row
+
+
+def _cr_is_notice_body(body: str) -> bool:
+    """Whether ``body`` is one of CodeRabbit's throttle notices rather than a review."""
+    return bool(_CR_RATE_LIMIT.search(body) or _CR_PAUSED.search(body))
+
+
+def _cr_demotion(notice_blob: str, head_reviewed: str | None, with_content: bool) -> dict | None:
+    """Return the degraded row a live CodeRabbit notice imposes on a would-be ``done``.
+
+    ``None`` when nothing demotes: either CR left content proving it read HEAD, or
+    no live notice says the window was closed.
+
+    The notice is allowed to OVERRIDE a completion signal, not merely to fill in a
+    state when nothing else does (#137). A check-run that completes, or a review row
+    submitted on HEAD, is emitted by CodeRabbit even when the Fair-Usage window
+    denied it the review itself -- an empty acknowledgement is *positive* evidence
+    of a review that did not happen, which is strictly worse than silence, because
+    a gate that opens on ``done`` then starts a fix round (and merges) against a
+    reviewer that never read the commit.
+
+    ``with_content`` is the escape hatch that keeps this from being sticky: a CR
+    that genuinely reviewed HEAD leaves a terminal marker or a non-empty review
+    body, and that outranks any notice.
+    """
+    if with_content:
+        return None
+    if _CR_RATE_LIMIT.search(notice_blob):
+        return _cr_row(
+            "rate_limited",
+            head_reviewed,
+            "CR signalled completion on HEAD but its live summary still carries a "
+            "limit notice and nothing on HEAD carries review content",
+            with_content,
+        )
+    if _CR_PAUSED.search(notice_blob):
+        return _cr_row(
+            "paused",
+            head_reviewed,
+            "CR signalled completion on HEAD but its live summary still carries a "
+            "pause notice and nothing on HEAD carries review content",
+            with_content,
+        )
+    return None
+
+
 def coderabbit_state(
     head_sha: str,
     issue_comments: list[dict],
@@ -234,6 +302,36 @@ def coderabbit_state(
     "rate limited by coderabbit.ai" marker as well as the prose, because the
     hourly and Fair-Usage-adaptive notices word themselves differently (#86) and
     matching only the hourly text read a throttled CR as ``pending``.
+
+    A live notice can also **demote** a completion signal, not only supply a state
+    where none exists (#137). Under Fair Usage, CodeRabbit still completes its
+    check-run and still submits a review row on HEAD -- with an empty body and no
+    walkthrough -- so both of this function's ``done`` doors open on a commit it
+    never read. Worse, the summary comment is rewritten in place, so its range line
+    is bumped to the new HEAD while the *previous* round's terminal marker is still
+    sitting in it, which opens a third door through the marker itself. The
+    discriminator is therefore CONTENT, reported as ``reviewed_head_with_content``:
+    a terminal marker in a HEAD-scoped body that is not itself a notice, or a
+    non-empty CR review body on HEAD. When that is absent and CR's live summary
+    still carries a limit or pause notice, the row reports ``rate_limited`` /
+    ``paused`` instead of ``done``. The two notices keep their own states because
+    they need different recoveries (credits or a wait vs. ``@coderabbitai resume``).
+
+    Demotion is scoped to CR's **summary** comment because that is the one comment
+    CR rewrites in place, so a notice in it describes the window now; a one-off CR
+    reply is never rewritten and a notice there would demote every later round
+    forever. When no summary comment is observable at all, CR's live issue comments
+    are used instead -- with no in-place-edited anchor, trusting the notice is the
+    fail-safe direction.
+
+    Content only overrides the notice; the notice does not gate content. An empty
+    APPROVED review on HEAD with NO live notice stays ``done`` (issue #18), just
+    with ``reviewed_head_with_content`` false: the key exposes the ambiguity on
+    every row, while the state changes only when a notice positively says the
+    window was closed. An in-progress check-run likewise still reports
+    ``in_progress`` rather than being demoted -- the observed recovery sequence is
+    ``rate_limited -> in_progress -> done``, so an active scan outranks the notice
+    that preceded it.
     """
     cr_issue_bodies = [
         c.get("body", "") or ""
@@ -244,26 +342,7 @@ def coderabbit_state(
     bodies = cr_issue_bodies + [r.get("body", "") or "" for r in cr_reviews]
     check = _coderabbit_check(check_runs)
     if not bodies and not cr_reviews and check is None:
-        return _row("coderabbit", "none", None, "no CodeRabbit activity")
-
-    if check is not None:
-        status = (check.get("status") or "").lower()
-        if status != "completed":
-            return _row(
-                "coderabbit", "in_progress", head_sha, f"check-run still {status or 'pending'}"
-            )
-        conclusion = (check.get("conclusion") or "").lower()
-        zero = bool(_CR_DONE_ZERO.search("\n".join(bodies)))
-        return _row(
-            "coderabbit",
-            "done",
-            head_sha,
-            (
-                "no actionable comments"
-                if zero
-                else f"check-run completed ({conclusion or 'neutral'})"
-            ),
-        )
+        return _cr_row("none", None, "no CodeRabbit activity", False)
 
     # No all-bodies blob: every transient-state read is scoped to CR's live issue
     # comments (see below), and the completion reads use `head_blob`/`bodies`
@@ -283,6 +362,58 @@ def coderabbit_state(
     )
     review_on_head = any(r.get("commit_id") == head_sha for r in cr_reviews)
 
+    head_bodies = (
+        # Any range line in the body may be the one covering HEAD, so this asks
+        # about all of them rather than only the first (#101). Checking just the
+        # first would drop a body whose later range covers HEAD, and with it the
+        # terminal marker that body carries.
+        [b for b in bodies if any(_sha_match(h, head_sha) for h in _range_heads(b))]
+        + [r.get("body", "") or "" for r in cr_reviews if r.get("commit_id") == head_sha]
+        + (cr_issue_bodies if review_on_head else [])
+    )
+    head_blob = "\n".join(head_bodies)
+    # A body that IS a limit/pause notice cannot also be evidence that CR read
+    # HEAD. The summary comment is rewritten in place, so under Fair Usage it can
+    # carry a range line already bumped to the new HEAD, the PREVIOUS round's
+    # terminal marker, and the live notice, all at once -- and the marker would
+    # then vouch for a commit CR never opened (#137). Excluding notice bodies
+    # costs nothing on a genuine review: a real post-review summary reports its
+    # allowance as a "Limit details:" line, which these patterns do not match.
+    marker_on_head = any(
+        _CR_DONE_MARKER.search(b) for b in head_bodies if not _cr_is_notice_body(b)
+    )
+    # A submitted review whose body has actual prose is independent evidence: CR
+    # writes one when it reviewed, and the empty acknowledgement is precisely the
+    # artifact of a Fair-Usage round.
+    body_on_head = any(
+        (r.get("body") or "").strip() for r in cr_reviews if r.get("commit_id") == head_sha
+    )
+    with_content = marker_on_head or body_on_head
+    summary_blob = "\n".join(b for b in cr_issue_bodies if _CR_SUMMARY.search(b))
+    notice_blob = summary_blob or issue_blob
+
+    if check is not None:
+        status = (check.get("status") or "").lower()
+        if status != "completed":
+            return _cr_row(
+                "in_progress", head_sha, f"check-run still {status or 'pending'}", with_content
+            )
+        demoted = _cr_demotion(notice_blob, head_sha, with_content)
+        if demoted is not None:
+            return demoted
+        conclusion = (check.get("conclusion") or "").lower()
+        zero = bool(_CR_DONE_ZERO.search("\n".join(bodies)))
+        return _cr_row(
+            "done",
+            head_sha,
+            (
+                "no actionable comments"
+                if zero
+                else f"check-run completed ({conclusion or 'neutral'})"
+            ),
+            with_content,
+        )
+
     if not (walk_on_head or review_on_head):
         # `issue_blob`, not `blob`: every transient state is read from CR's LIVE
         # status comments only. A submitted review body is never rewritten, so a
@@ -292,27 +423,20 @@ def coderabbit_state(
         # below was already scoped this way; the other two were not, and the
         # inconsistency predates #19/#86.
         if _CR_RATE_LIMIT.search(issue_blob):
-            return _row(
-                "coderabbit", "rate_limited", walk_head, "rate-limit notice; HEAD not yet scanned"
+            return _cr_row(
+                "rate_limited", walk_head, "rate-limit notice; HEAD not yet scanned", with_content
             )
         if _CR_PAUSED.search(issue_blob):
-            return _row("coderabbit", "paused", walk_head, "reviews paused; HEAD not yet scanned")
+            return _cr_row(
+                "paused", walk_head, "reviews paused; HEAD not yet scanned", with_content
+            )
         if _CR_IN_PROGRESS.search(issue_blob):
-            return _row("coderabbit", "in_progress", walk_head, "review in progress")
-        return _row(
-            "coderabbit", "pending", walk_head, "neither walkthrough nor review covers the HEAD"
+            return _cr_row("in_progress", walk_head, "review in progress", with_content)
+        return _cr_row(
+            "pending", walk_head, "neither walkthrough nor review covers the HEAD", with_content
         )
 
-    head_blob = "\n".join(
-        # Any range line in the body may be the one covering HEAD, so this asks
-        # about all of them rather than only the first (#101). Checking just the
-        # first would drop a body whose later range covers HEAD, and with it the
-        # terminal marker that body carries.
-        [b for b in bodies if any(_sha_match(h, head_sha) for h in _range_heads(b))]
-        + [r.get("body", "") or "" for r in cr_reviews if r.get("commit_id") == head_sha]
-        + (cr_issue_bodies if review_on_head else [])
-    )
-    if not review_on_head and not _CR_DONE_MARKER.search(head_blob):
+    if not review_on_head and not marker_on_head:
         # A throttle notice is asked about BEFORE `in_progress`/`pending`, and it
         # is asked here rather than only in the not-yet-scanned branch above
         # (#19). CR's throttle notice lives in its summary comment, which also
@@ -329,40 +453,44 @@ def coderabbit_state(
         # `issue_blob` -- CR's live status comments -- like the in-progress check
         # below, so a stale notice in an old review body cannot resurrect it.
         if _CR_RATE_LIMIT.search(issue_blob):
-            return _row(
-                "coderabbit",
+            return _cr_row(
                 "rate_limited",
                 head_sha,
                 "rate-limit notice on this PR and HEAD not yet completed",
+                with_content,
             )
         if _CR_PAUSED.search(issue_blob):
-            return _row(
-                "coderabbit",
+            return _cr_row(
                 "paused",
                 head_sha,
                 "reviews paused and HEAD not yet completed",
+                with_content,
             )
         if _CR_IN_PROGRESS.search(issue_blob):
-            return _row(
-                "coderabbit",
+            return _cr_row(
                 "in_progress",
                 head_sha,
                 "review in progress (CR named HEAD and reports an active scan)",
+                with_content,
             )
-        return _row(
-            "coderabbit",
+        return _cr_row(
             "pending",
             head_sha,
             "walkthrough range line covers HEAD but CR shows no completion marker, "
             "submitted review, or in-progress check-run yet",
+            with_content,
         )
 
+    head_reviewed = walk_head if walk_on_head else head_sha
+    demoted = _cr_demotion(notice_blob, head_reviewed, with_content)
+    if demoted is not None:
+        return demoted
     zero = bool(_CR_DONE_ZERO.search(head_blob))
-    return _row(
-        "coderabbit",
+    return _cr_row(
         "done",
-        walk_head if walk_on_head else head_sha,
+        head_reviewed,
         "no actionable comments" if zero else "scanned HEAD (any findings are inline)",
+        with_content,
     )
 
 
