@@ -598,6 +598,29 @@ def test_digest_survives_a_source_round_trip(store):
     assert total == 1 and rows[0]["source"] == "digest"
 
 
+def _spy_on_hydration(monkeypatch) -> list[int]:
+    """Record the bind-parameter count of every `lid IN (...)` hydration query."""
+    widths: list[int] = []
+    real_read = ss.SqliteVecStore._read
+
+    class _Watched:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, params=()):
+            if "FROM learnings WHERE lid IN" in sql:
+                widths.append(len(params))
+            return self._conn.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    monkeypatch.setattr(
+        ss.SqliteVecStore, "_read", lambda self, fn: real_read(self, lambda c: fn(_Watched(c)))
+    )
+    return widths
+
+
 def test_query_batches_its_row_fetch_over_the_sqlite_var_limit(store, monkeypatch):
     """The KNN window is no longer capped at candidate_k, so the IN list must batch.
 
@@ -605,6 +628,11 @@ def test_query_batches_its_row_fetch_over_the_sqlite_var_limit(store, monkeypatc
     placeholder per returned row would eventually cross SQLite's host-parameter
     limit — at which point every query for the repo raises and the runner
     swallows it into empty knowledge, losing the ordinary learnings too.
+
+    The result alone cannot show this: 20 ids fit in one `IN` list, and reaching
+    a real SQLite build's 32766-parameter limit is not a unit test. So the
+    hydration queries are observed directly, and the assertion is on their
+    parameter counts rather than on the rows they return.
     """
     monkeypatch.setattr(ss, "_VAR_BATCH", 3)
     monkeypatch.setattr(ss.settings, "digest_retrieval", False)
@@ -617,7 +645,12 @@ def test_query_batches_its_row_fetch_over_the_sqlite_var_limit(store, monkeypatc
             for i in range(10)
         ],
     )
+    widths = _spy_on_hydration(monkeypatch)
 
     hits = store.query("o/r", ["src/auth/a.rs"], query_text="auth")
+
     assert len(hits) == 10
     assert {r["source"] for r in hits} == {"remember"}
+    # One query per batch, and none wider than the batch plus the `now` bind.
+    assert len(widths) == 7
+    assert max(widths) <= ss._VAR_BATCH + 1
