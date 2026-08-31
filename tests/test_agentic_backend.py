@@ -1664,6 +1664,49 @@ def test_parse_failure_dumps_the_output_it_could_not_parse(monkeypatch, capsys):
     assert result.detail.startswith("failed:exit 1"), result.detail[:80]
 
 
+def test_hollow_examined_runbook_survives_the_receipt(monkeypatch, capsys):
+    """#166: a precise error `_failure_result` truncates away has fixed nothing.
+
+    `detail` is capped at 460 characters and cut from the END, so the clause at
+    risk is exactly the actionable one. The payload here is adversarial on every
+    axis the model controls — a 200-character path, all three fields missing, a
+    second hollow entry, an unrelated schema error, 25 findings — and the tail
+    of the runbook still has to be in the receipt and in the job log.
+    """
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    payload = {
+        # A non-`examined` error too: the runbook still leads, since the hollow
+        # entry is the part the reader cannot diagnose unaided.
+        "summary": {"not": "a string"},
+        "findings": [{"file": "a.py", "line": i, "title": f"t{i}", "body": "b"} for i in range(25)],
+        "examined": [
+            {"file": "x/" * 100 + "deep.py", "region": "L1-L9"},
+            {"file": "second.py"},
+        ],
+    }
+    result, _ = _invoke(monkeypatch, backend, HarnessResult(0, json.dumps(payload)), env=None)
+
+    detail = result.detail
+    assert detail.startswith("failed:exit 1: "), detail[:60]
+    assert len(detail.splitlines()) == 1, repr(detail)
+    for element in (
+        "examined[0]",
+        "missing checked, conclusion, evidence",
+        "25 finding(s) lost",
+        "not the PR diff",
+        "re-run this seat",
+    ):
+        assert element in detail, (element, detail)
+    # The very last clause: what survives truncation is the whole criterion.
+    assert detail.endswith("merge without this seat's coverage."), detail[-80:]
+
+    # ...and the job log carries it too, prefixed so model-written text in the
+    # message cannot reach column 0 of a line of its own.
+    log = [ln for ln in capsys.readouterr().err.splitlines() if "reviewer output rejected" in ln]
+    assert log and all(ln.startswith("fuko: ") for ln in log), log
+
+
 def test_auth_failure_detail_is_flattened_and_verdict_led(monkeypatch):
     """The auth path kept the column-0 vector open after the others were closed.
 

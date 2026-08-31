@@ -663,6 +663,45 @@ def test_parse_review_rejects_garbage_and_bad_schema():
         parse_review('{"examined": [{"file": "a.py", "checked": "c", "evidence": "e"}]}')
 
 
+def test_hollow_examined_entry_raises_a_runbook_not_a_schema_complaint():
+    """#166: the boundary stays strict, so the failure has to be worth reading.
+
+    Asserted on the message, not the exception type, because the reader is an
+    engineer mid-incident: which entry and which field, what it cost, that the
+    fault is the reviewer's output rather than their diff, and what to do next.
+    """
+    payload = {
+        "findings": [{"file": "a.py", "line": i, "title": f"t{i}", "body": "b"} for i in range(5)],
+        "examined": [
+            {"file": "ok.py", "checked": "c", "conclusion": "x", "evidence": "e"},
+            {"file": "sidecar/backends/agentic.py", "region": "L120-L240", "checked": "c"},
+        ],
+    }
+    with pytest.raises(ReviewParseError) as excinfo:
+        parse_review(json.dumps(payload))
+    message = str(excinfo.value)
+
+    assert "examined[1]" in message  # which entry, not "1 validation error"
+    assert "sidecar/backends/agentic.py" in message and "L120-L240" in message
+    assert "missing conclusion, evidence" in message  # and which fields
+    assert "5 finding(s) lost" in message  # what it cost, at scale
+    assert "not the PR diff" in message  # where the fault is NOT
+    assert "re-run this seat" in message and "promote its backup" in message
+    assert "merge without this seat's coverage" in message
+
+
+def test_other_structural_failures_keep_the_generic_parse_message():
+    """The runbook is for the hollow-coverage shape only; #166 changed nothing else."""
+    for text in (
+        "no json here",
+        "{not json at all,}",
+        '{"findings": [{"file": "a.py", "body": "no title"}]}',
+    ):
+        with pytest.raises(ReviewParseError) as excinfo:
+            parse_review(text)
+        assert "round discarded" not in str(excinfo.value)
+
+
 def test_parse_review_without_ledger_sections_reviews_exactly_as_before():
     """A model that ignores the state contract must still produce a valid review."""
     payload = {

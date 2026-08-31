@@ -831,6 +831,13 @@ class AgenticBackend:
             _dump_harness_output(
                 model_name, "parse-failure (harness exit 0)", result.stderr, result.text
             )
+            # The dump above is the evidence; THIS is the diagnosis, and it has
+            # to reach the job log on its own rather than only via `detail` —
+            # the caller that prints `detail` is several frames away and an A/B
+            # run joins eight of them into one string (#166). Prefixed and
+            # flattened like every other author-influenced line here: the
+            # message quotes model-written paths and the gates are ^-anchored.
+            print(f"fuko: {_flatten_for_log(str(e))}", file=sys.stderr)
             # Lead with the verdict here too. This path returns
             # `failed:exit 1` on the channel, so a detail opening with parser
             # prose would break the contract the other failure paths keep
