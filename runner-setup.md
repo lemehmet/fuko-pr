@@ -90,6 +90,16 @@ docker compose -f docker/runner-compose.yml exec ollama ollama pull bge-m3
 - `ollama` — local embeddings backend (`bge-m3`, 1024-dim)
 - `sidecar` — FastAPI service on host port `8000`, auth via `FUKO_AUTH_TOKEN`
 
+The compose file pins `FUKO_EMBED_MODEL: bge-m3` and `FUKO_EMBED_QUERY_PREFIX:
+""` on the sidecar, so this stack works as written. Both are overrides, not
+defaults: the sidecar's built-in default is `qwen3-embedding-0.6b`, which this
+Ollama service does not serve, and its query instruction is wrong for a
+symmetric model like bge-m3. **If you deploy the sidecar without this compose
+file** — the [dedicated-host](#dedicated-host) path, or your own unit — set both
+yourself, together. Only the model is tracked in `meta`, so a mismatched prefix
+degrades retrieval with nothing in the logs to show for it; see
+[Changing the embedding model](#6-updating-the-stack).
+
 > **Pin `COMPOSE_PROJECT_NAME`, or always invoke compose identically.**
 > The project name decides which volumes you get, and a different name means a
 > second, empty knowledge base plus a port-8000 collision with the stack you
