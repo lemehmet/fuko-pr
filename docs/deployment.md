@@ -35,7 +35,8 @@ runners and the model are on the same private network.
 
 Same as above with a hosted pgvector connection string in `FUKO_DATABASE_URL`. The
 sidecar is optional — `fuko review` connects to the DB directly. On hosted runners
-without a local Ollama, point `[embedding]` at a remote provider (see below).
+without a local Ollama, point `FUKO_EMBED_BASE_URL`/`FUKO_EMBED_MODEL` at a remote
+provider (see below).
 
 ## Server-free (sqlite-vec in S3/R2)
 
@@ -89,9 +90,19 @@ The bucket is private; keep it that way.
 
 A hosted runner has no local Ollama, so pair the server-free store with a **remote
 embedding provider** (any OpenAI-compatible `/embeddings` endpoint — e.g. Voyage,
-Jina, or BigModel). Set `[embedding] base_url`/`model` and the key env var.
-Embeddings are cheap (pennies), and the file is small, so each run's
-download/query/upload is fast.
+Jina, or BigModel). The embedding endpoint is environment-only — `.fuko.toml` has
+no say in it (#216) — so set it on the runner:
+
+```bash
+FUKO_EMBED_BASE_URL=https://api.example.com/v1
+FUKO_EMBED_MODEL=<the provider's embedding model>
+FUKO_EMBED_API_KEY=<the provider's key>
+FUKO_EMBED_QUERY_PREFIX=          # empty unless the model is asymmetric
+```
+
+`FUKO_EMBED_MODEL` is also the provenance marker for the stored vectors, so
+changing it re-embeds the knowledge base. Embeddings are cheap (pennies), and the
+file is small, so each run's download/query/upload is fast.
 
 ## Ollama in Docker
 

@@ -6,7 +6,8 @@ Guidance for AI coding agents working on fuko-pr.
 
 fuko-pr is a thin RAG knowledge sidecar for PR-Agent (see `README.md`).
 Python 3.11+, FastAPI + psycopg3/pgvector, embeddings via any OpenAI-compatible
-endpoint (default: local Ollama `bge-m3`).
+endpoint, configured by `FUKO_EMBED_*` in the environment and nowhere else
+(default: `qwen3-embedding-0.6b`). `.fuko.toml` has no say in it — see #216.
 
 ## Rules (mandatory)
 
@@ -25,8 +26,12 @@ endpoint (default: local Ollama `bge-m3`).
 - **Stdlib-first.** Only add a dependency when the stdlib genuinely cannot do it.
 - **Embedding-dimension changes are handled automatically.** If the embedding model's
   dimension changes, the store re-embeds every learning and rebuilds the vector
-  column/table on next startup (Postgres) or next access (sqlite-vec) — a one-time,
-  potentially slow cost. Do not reintroduce a manual drop-&-recreate step.
+  column/table — a one-time, potentially slow cost. Postgres runs it at sidecar
+  startup, or on the first access that touches the embedding space in a process
+  with no startup warm; sqlite-vec runs it on next access. Do not reintroduce a
+  manual drop-&-recreate step, and do not move the Postgres pass back inside
+  `get_pool`'s lock (#217): the best-effort state paths share that pool and must
+  never queue behind a re-embed.
 - **Embeddings are provider-agnostic.** z.ai exposes no `/embeddings` endpoint, so
   embeddings always go through an OpenAI-compatible HTTP endpoint. Chat (PR-Agent)
   is configured separately.
