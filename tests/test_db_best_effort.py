@@ -63,6 +63,8 @@ def _open_latch(monkeypatch):
     monkeypatch.setattr(db, "_unreachable_until", 0.0)
     monkeypatch.setattr(db, "_latch_gen", 0)
     monkeypatch.setattr(db, "_pool", None)
+    monkeypatch.setattr(db, "_embed_space_checked", False)
+    monkeypatch.setattr(db, "_pending_embed_space", None)
     monkeypatch.setattr(db, "register_vector", lambda conn: None)
 
 
@@ -72,7 +74,7 @@ def pool(monkeypatch):
 
     def install(error=None, conn_error=None):
         fake = _FakePool(error, conn_error)
-        monkeypatch.setattr(db, "get_pool", lambda *, timeout=None: fake)
+        monkeypatch.setattr(db, "get_pool", lambda *, timeout=None, embed_space=True: fake)
         return fake
 
     return install
@@ -202,9 +204,9 @@ def test_a_failure_during_the_probe_survives_that_probes_success(pool, monkeypat
     acquire = db.db
 
     @contextlib.contextmanager
-    def latch_during_acquisition(*, timeout=None):
+    def latch_during_acquisition(*, timeout=None, embed_space=True):
         db._latch(PoolTimeout("a concurrent call found it down"))
-        with acquire(timeout=timeout) as conn:
+        with acquire(timeout=timeout, embed_space=embed_space) as conn:
             yield conn
 
     monkeypatch.setattr(db, "db", latch_during_acquisition)
