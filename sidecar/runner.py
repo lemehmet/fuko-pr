@@ -1046,14 +1046,21 @@ def _backend_for(entry: ReviewModel, review: ReviewConfig):
     name was validated at config load, so ``get_backend`` cannot raise here.
     Resolved per branch rather than once per run so a fleet may mix drivers.
 
-    A per-entry ``tool_timeout`` override lands on the branch's backend INSTANCE
-    (constructed fresh per branch, so no cross-branch bleed): the whole branch —
-    same-driver backups included — runs under the entry's budget, which is the
-    honest reading of "this seat's tools cost more".
+    A per-entry ``tool_timeout`` or ``max_turns`` override lands on the branch's
+    backend INSTANCE (constructed fresh per branch, so no cross-branch bleed):
+    the whole branch — same-driver backups included — runs under the entry's
+    budget, which is the honest reading of "this seat's tools cost more" and of
+    "this seat paces itself" (#229). A promoted backup therefore reviews under
+    the rescued seat's numbers, not its own, the rule #204/#209 established.
     """
     backend = get_backend(entry.backend or review.backend, review)
     if getattr(entry, "tool_timeout", None):
         backend.tool_timeout = entry.tool_timeout
+    # Set unconditionally, like tool_timeout: only the agentic driver reads it
+    # (the field says so), and gating on the driver here would make the knob's
+    # reach a property of two files instead of one.
+    if getattr(entry, "max_turns", None):
+        backend.max_turns = entry.max_turns
     return backend
 
 

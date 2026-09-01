@@ -480,9 +480,15 @@ class AgenticBackend:
     injection = "prompt"
 
     def __init__(self, config: ReviewConfig | None = None) -> None:
-        """Take the per-tool timeout from ``[review]``; other knobs are constants."""
+        """Take the per-tool timeout and the turn cap from ``[review]``.
+
+        Both are per-INSTANCE, and an instance is built per branch, so
+        ``runner._backend_for`` can layer a per-entry override on top without
+        bleeding into a sibling branch. An unset ``[review].max_turns`` keeps
+        the harness default.
+        """
         self.tool_timeout = config.tool_timeout if config else 900
-        self.max_turns = DEFAULT_MAX_TURNS
+        self.max_turns = (config.max_turns if config else None) or DEFAULT_MAX_TURNS
         # Keyed (pr_url, model, identity): two [[review.models]] entries may
         # legally share a provider/name and differ only by `token_env` (the same
         # model run under two App identities) -- nothing validates uniqueness --

@@ -273,6 +273,13 @@ def _permission_settings(env: dict[str, str]) -> str:
 # about. That keeps this a backstop against a pathological loop rather than a
 # review-length limit -- at 50 it was the latter, and exhausting it ENDS a
 # review with exit 1 and an empty stderr, indistinguishable from a crash (#149).
+#
+# That derivation holds only for a seat running at that RATE. A seat that paces
+# itself (sleeps between tool calls) covers the same 250 turns in hours, so for
+# it this cap -- not `tool_timeout`, which is per tool CALL -- is the only bound
+# under the CI job's own, and 250 sits above it. Hence it is a DEFAULT, not the
+# number: `[review].max_turns` sets the fleet's, a per-entry
+# `[[review.models]].max_turns` sets a seat's (#229).
 DEFAULT_MAX_TURNS = 250
 
 # "Not logged in · Please run /login" and the API-key equivalents. Auth failure

@@ -119,12 +119,30 @@ class ModelConfig(BaseModel):
         ),
     )
 
-    @field_validator("max_context", "max_model_tokens", "tool_timeout")
+    max_turns: int | None = Field(
+        default=None,
+        description=(
+            "Per-entry override of [review].max_turns, i.e. the agent's "
+            "`--max-turns` cap; None inherits it, and an unset [review] value "
+            "falls back to the harness default. Read by the agentic backend "
+            "only. Exists because the default is derived from a turn RATE (a "
+            "seat that does not pace itself), and a seat that sleeps between "
+            "tool calls runs the same cap for an order of magnitude more "
+            "wall-clock -- for it the cap, not `tool_timeout`, is the only "
+            "bound below the CI job's own, because `tool_timeout` is per tool "
+            "CALL and the budget arithmetic counts turns not at all (#229). "
+            "Applies to the whole BRANCH this entry starts, backups included "
+            "(a failover mid-branch keeps the branch's cap), exactly as "
+            "`tool_timeout` does."
+        ),
+    )
+
+    @field_validator("max_context", "max_model_tokens", "tool_timeout", "max_turns")
     @classmethod
     def _positive_token_count(cls, value: int | None) -> int | None:
-        """A token count (or per-entry timeout), when set, must be positive."""
+        """A token count, per-entry timeout or turn cap, when set, must be positive."""
         if value is not None and value <= 0:
-            raise ValueError("token counts must be > 0 when set")
+            raise ValueError("token counts, timeouts and turn caps must be > 0 when set")
         return value
 
 
@@ -296,6 +314,27 @@ class ReviewConfig(BaseModel):
     # EVERY seat's stuck-branch bound. Budget arithmetic sums per-entry values
     # (fleet_sequential_cost_minutes), so an override changes its own branch's
     # worst case, not the fleet's.
+    max_turns: int | None = Field(
+        default=None,
+        description=(
+            "Fleet default for the agentic agent's `--max-turns` cap; None "
+            "takes the harness default (`DEFAULT_MAX_TURNS`). A per-entry "
+            "[[review.models]] `max_turns` overrides it for that branch, same "
+            "precedence as `tool_timeout`. The harness default is derived from "
+            "an observed turn RATE, so it bounds wall-clock only for a seat "
+            "that runs at that rate; a self-paced seat needs its own number "
+            "(#229). Read by the agentic backend only."
+        ),
+    )
+
+    @field_validator("max_turns")
+    @classmethod
+    def _positive_max_turns(cls, value: int | None) -> int | None:
+        """A fleet-wide turn cap, when set, must be positive."""
+        if value is not None and value <= 0:
+            raise ValueError("max_turns must be > 0 when set")
+        return value
+
     optional_tools: list[str] = Field(
         default_factory=list,
         description=(

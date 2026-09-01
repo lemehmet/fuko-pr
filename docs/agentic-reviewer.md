@@ -465,6 +465,18 @@ higher per-review cost and latency than a single-shot pr-agent pass.
 containers (a timeout classifies as throttle-class and fails over), and it is
 the bound that binds first — the turn cap (`DEFAULT_MAX_TURNS`, 250) sits
 above what that budget buys at the observed ~5 turns/min, so it is a backstop
-against a pathological loop rather than a review-length limit. Trial-seat
+against a pathological loop rather than a review-length limit.
+
+That ordering assumes a seat running at that rate. A seat that paces itself —
+sleeping between tool calls — takes hours to spend 250 turns, and
+`tool_timeout` cannot save it because it is a per-tool-CALL budget: the turn
+cap becomes the only bound below the CI job's own `timeout-minutes`, and being
+cancelled by the job cap loses *every* branch's output, not just the slow one.
+So the cap is configurable (#229): `[review].max_turns` sets the fleet default
+and a per-entry `[[review.models]].max_turns` overrides it for that branch,
+backups included — the same precedence and branch scope as `tool_timeout`.
+Unset at both levels means `DEFAULT_MAX_TURNS`. Note the turns-to-wall-clock
+mapping is per-seat and unmeasured; set a seat's number from its own observed
+pacing, not from the fleet's. Trial-seat
 first: run it as a non-gating `role = "trial"` entry and
 score marginal uniqueness receipts-only before letting it gate.
