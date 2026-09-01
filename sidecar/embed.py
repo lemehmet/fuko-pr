@@ -9,6 +9,15 @@ class EmbedError(RuntimeError):
     """Raised when an embeddings request fails or returns no data."""
 
 
+def _fit(text: str) -> str:
+    # Last line of defence, deliberately at the transport edge rather than at
+    # each call site: every path that reaches an embedding endpoint goes
+    # through here, so no future caller can reintroduce the 500 that a 12k-token
+    # PR body used to cause. Truncating only what is *embedded* is safe -- the
+    # full text is what gets stored and what a review reads back.
+    return text[: settings.embed_max_chars]
+
+
 class Embedder:
     """Embed text via an OpenAI-compatible ``/embeddings`` endpoint."""
 
@@ -22,12 +31,18 @@ class Embedder:
             self._headers["Authorization"] = f"Bearer {settings.embed_api_key}"
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        """Embed a batch of texts, returning one vector per input."""
+        """Embed a batch of texts, returning one vector per input.
+
+        Each input is truncated to ``embed_max_chars`` before it is sent. An
+        embedding endpoint rejects an over-long input outright rather than
+        truncating it for you, and the model behind it has a fixed context, so
+        the choice is between a shorter vector and no vector at all.
+        """
         if not texts:
             return []
         out: list[list[float]] = []
         for i in range(0, len(texts), settings.embed_batch_size):
-            batch = texts[i : i + settings.embed_batch_size]
+            batch = [_fit(t) for t in texts[i : i + settings.embed_batch_size]]
             try:
                 resp = self._client.post(
                     self._url,
