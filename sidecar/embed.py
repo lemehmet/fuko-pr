@@ -64,8 +64,19 @@ class Embedder:
         return out
 
     def embed_one(self, text: str) -> list[float]:
-        """Embed a single string."""
+        """Embed a single string as a *document*."""
         return self.embed([text])[0]
+
+    def embed_query(self, text: str) -> list[float]:
+        """Embed a single string as a *query*, with the model's task instruction.
+
+        Kept separate from :meth:`embed_one` rather than handled by a flag
+        because the asymmetry is easy to get half-right: prefixing both sides,
+        or neither, still returns 1024 well-formed dimensions and degrades
+        retrieval quietly. One method per side makes each call site say which
+        it means.
+        """
+        return self.embed([settings.embed_query_prefix + text])[0]
 
     def probe_dim(self) -> int:
         """Return the embedding dimension reported by the configured model.

@@ -93,6 +93,23 @@ file — no paid APIs, no server.
    base_url = "http://localhost:11434/v1"
    ```
 
+   > **The embedding endpoint is configured by environment, not by this
+   > section.** `[embedding]` is parsed but not yet consumed (#216) — the
+   > sidecar reads `FUKO_EMBED_*` only. For the local Ollama setup above that
+   > means, in your `.env` (see [`.env.example`](./.env.example)):
+   >
+   > ```bash
+   > FUKO_EMBED_BASE_URL=http://localhost:11434/v1
+   > FUKO_EMBED_MODEL=bge-m3
+   > FUKO_EMBED_QUERY_PREFIX=
+   > ```
+   >
+   > Both lines matter. `FUKO_EMBED_MODEL` defaults to
+   > `qwen3-embedding-0.6b`, which Ollama does not serve here, and it doubles
+   > as the provenance marker for the stored vectors — changing it re-embeds
+   > the knowledge base. `FUKO_EMBED_QUERY_PREFIX` defaults to that model's
+   > task instruction, which a symmetric model like bge-m3 must not receive.
+
 4. **Seed knowledge** and **review a PR**:
 
    ```bash

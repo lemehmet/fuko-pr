@@ -50,7 +50,12 @@ jobs:
         ports:
           - 11434
     env:
+      # bge-m3 is symmetric, so the query prefix has to be cleared alongside
+      # the model: the code default carries Qwen3-Embedding-0.6B's task
+      # instruction, and applying it to one side only degrades retrieval
+      # silently rather than failing.
       FUKO_EMBED_MODEL: bge-m3
+      FUKO_EMBED_QUERY_PREFIX: ""
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0

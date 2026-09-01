@@ -90,6 +90,16 @@ docker compose -f docker/runner-compose.yml exec ollama ollama pull bge-m3
 - `ollama` — local embeddings backend (`bge-m3`, 1024-dim)
 - `sidecar` — FastAPI service on host port `8000`, auth via `FUKO_AUTH_TOKEN`
 
+The compose file pins `FUKO_EMBED_MODEL: bge-m3` and `FUKO_EMBED_QUERY_PREFIX:
+""` on the sidecar, so this stack works as written. Both are overrides, not
+defaults: the sidecar's built-in default is `qwen3-embedding-0.6b`, which this
+Ollama service does not serve, and its query instruction is wrong for a
+symmetric model like bge-m3. **If you deploy the sidecar without this compose
+file** — the [dedicated-host](#dedicated-host) path, or your own unit — set both
+yourself, together. Only the model is tracked in `meta`, so a mismatched prefix
+degrades retrieval with nothing in the logs to show for it; see
+[Changing the embedding model](#6-updating-the-stack).
+
 > **Pin `COMPOSE_PROJECT_NAME`, or always invoke compose identically.**
 > The project name decides which volumes you get, and a different name means a
 > second, empty knowledge base plus a port-8000 collision with the stack you
@@ -155,7 +165,16 @@ Read from the environment with a `FUKO_` prefix (see [`.env.example`](./.env.exa
 | `FUKO_TOP_K`           | `6`     | learnings injected into a review                                    |
 | `FUKO_INGEST_MAX_NEW`  | `10`    | new learnings embedded per `/ingest-threads` call                   |
 | `FUKO_EMBED_BASE_URL`  | Ollama  | any OpenAI-compatible `/embeddings` endpoint                        |
-| `FUKO_EMBED_MODEL`     | `bge-m3`| embedding model                                                     |
+| `FUKO_EMBED_MODEL`     | `qwen3-embedding-0.6b` | embedding model, and the provenance marker for the stored vectors |
+| `FUKO_EMBED_QUERY_PREFIX` | Qwen3 task instruction | prepended to *queries* only; set to empty for a symmetric model |
+
+`FUKO_EMBED_MODEL` doubles as the provenance marker: changing it re-embeds the
+whole knowledge base on the next startup, because two models at the same
+dimension produce incomparable vectors and nothing else would notice. It must
+name whatever the endpoint actually serves — for the compose stack below that
+is `bge-m3`, so `docker/runner-compose.yml` pins both it and an empty
+`FUKO_EMBED_QUERY_PREFIX`. Only the model is tracked; a query prefix that does
+not match it degrades retrieval silently, which is why the two move together.
 
 `FUKO_INGEST_MAX_NEW` bounds how long a single ingest request can take, not how
 much a sweep can ingest: the sweep re-posts a batch until the sidecar reports
@@ -181,11 +200,26 @@ docker compose -f docker/runner-compose.yml restart sidecar
 ```
 
 **Changing the embedding model needs no manual migration.** Point
-`FUKO_EMBED_MODEL` (and `FUKO_EMBED_BASE_URL`) at the new one and restart. The
-sidecar probes the model's real dimension at startup and, if it changed,
-re-embeds every learning and rebuilds the vector column and index itself — a
-one-time and potentially slow startup, but automatic. Do not drop the `learnings`
-table by hand; see [`AGENTS.md`](./AGENTS.md).
+`FUKO_EMBED_MODEL` (and `FUKO_EMBED_BASE_URL`) at the new one, **set
+`FUKO_EMBED_QUERY_PREFIX` to match it**, and restart. The sidecar re-embeds
+every learning and rebuilds the vector column and index itself — a one-time and
+potentially slow startup, but automatic. Do not drop the `learnings` table by
+hand; see [`AGENTS.md`](./AGENTS.md).
+
+Two triggers, not one. A **dimension** change is visible in the schema. A
+**model** change at the same dimension is not — bge-m3 and Qwen3-Embedding-0.6B
+are both 1024-wide — so the sidecar records the model that produced the stored
+vectors in `meta.embed_model` and re-embeds when that changes too. An absent
+marker counts as a change, so the first restart after upgrading to a build that
+has this table re-embeds once by design.
+
+The query prefix is the half that is **not** covered by the marker, because it
+changes nothing about the stored vectors and must not trigger a re-embed. It is
+also the half that fails silently: a query embedded with an instruction the
+documents never carried still returns a well-formed vector and a plausible
+ranking. So move it with the model, in the same edit — empty for a symmetric
+model such as bge-m3, the model's own task instruction for an asymmetric one
+such as Qwen3-Embedding.
 
 ## Dedicated host
 
@@ -211,7 +245,15 @@ Worth doing there:
   the job. Confirm `curl <FUKO_URL>/healthz` works from the runner and that the job
   actually ran on the runner you expected (labels matched).
 - **Embedding 400 / model not found** — `ollama pull bge-m3` not run, or
-  `FUKO_EMBED_MODEL`/`FUKO_EMBED_BASE_URL` mismatch.
+  `FUKO_EMBED_MODEL`/`FUKO_EMBED_BASE_URL` mismatch. `FUKO_EMBED_MODEL` defaults
+  to `qwen3-embedding-0.6b`, which this Ollama stack does not serve, so it has
+  to be pinned to `bge-m3` (the compose file does) rather than left unset.
+- **Retrieval got worse after an embedding-model change, with nothing in the
+  logs** — `FUKO_EMBED_QUERY_PREFIX` was not moved with `FUKO_EMBED_MODEL`. Only
+  the model is tracked in `meta`, so a mismatched query prefix embeds the query
+  side into a different shape than the documents and still returns well-formed
+  vectors. Clear it for a symmetric model (bge-m3), set the model's own
+  instruction for an asymmetric one (Qwen3-Embedding).
 - **The sweep reports `chunk N failed: timed out`** — the sidecar took too long to
   embed a batch. It retries on the next hourly sweep by itself; if it persists,
   lower `FUKO_INGEST_MAX_NEW` on the sidecar, or `FUKO_CHUNK_SIZE` on the repo.

@@ -139,13 +139,38 @@ class SqliteVecStore:
 
         row = conn.execute("SELECT value FROM meta WHERE key = 'embed_dim'").fetchone()
         stored = int(row[0]) if row else None
+        # The model matters as much as the dimension: two 1024-wide models
+        # produce incomparable vectors, and a store holding both retrieves
+        # badly instead of failing. Same guard as the Postgres store's
+        # meta.embed_model -- see db.py's _ensure_embed_dim.
+        mrow = conn.execute("SELECT value FROM meta WHERE key = 'embed_model'").fetchone()
+        stored_model = mrow[0] if mrow else None
+        # A store with no dimension marker is only *fresh* if it also holds
+        # nothing. One that holds rows without a marker is an old file, and
+        # stamping the current model over vectors of unknown origin would
+        # record a provenance nobody established -- permanently disabling the
+        # guard for exactly the rows it exists to protect. `stored != dim` is
+        # then true by construction (None never equals an int), so such a file
+        # takes the migration path like any other unproven store.
         migrated = False
-        if stored is None:
-            conn.execute("INSERT INTO meta(key, value) VALUES ('embed_dim', ?)", (str(dim),))
-        elif stored != dim:
+        empty = conn.execute("SELECT 1 FROM learnings LIMIT 1").fetchone() is None
+        fresh = stored is None and empty
+        if not fresh and (stored != dim or stored_model != settings.embed_model):
             self._migrate_dim(conn, dim)
-            conn.execute("UPDATE meta SET value = ? WHERE key = 'embed_dim'", (str(dim),))
             migrated = True
+        # Upserted rather than INSERTed-or-UPDATEd per branch: the marker-less
+        # store above has no row to UPDATE, and the fresh one has none to
+        # INSERT over.
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES ('embed_dim', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (str(dim),),
+        )
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES ('embed_model', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (settings.embed_model,),
+        )
         conn.commit()
         return conn, migrated
 
@@ -316,7 +341,7 @@ class SqliteVecStore:
         q = _build_query(files, pr_body, query_text)
         if not q:
             return []
-        vec = _pack(get_embedder().embed_one(q))
+        vec = _pack(get_embedder().embed_query(q))
         k = top_k or settings.top_k
         cand = settings.candidate_k
         digests = bool(settings.digest_retrieval)

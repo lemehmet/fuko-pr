@@ -50,11 +50,16 @@ def test_build_query_bounds_the_pr_body_and_keeps_the_files_block():
 def test_build_query_keeps_the_files_block_within_the_transport_cap():
     # A body at its own cap plus a long file list used to overrun
     # embed_max_chars, so the transport cut in embed._fit ate the tail of the
-    # files block -- the part the ordering exists to protect.
+    # files block -- the part the ordering exists to protect. Asserted on the
+    # PREFIXED string, because that is what _fit actually sees: the query
+    # instruction is prepended after this budget is spent, so a budget that
+    # ignored it would push the assembled query past the cap by exactly the
+    # prefix's length and put the cut back in the files block.
     files = [f"packages/shared/src/module_{i:04d}/index.ts" for i in range(300)]
     q = _build_query(files, "log line\n" * 5000, None)
-    assert len(q) <= settings.embed_max_chars
-    assert q == _fit(q)
+    sent = settings.embed_query_prefix + q
+    assert len(sent) <= settings.embed_max_chars
+    assert sent == _fit(sent)
     assert "Changed files:" in q
     # Whatever paths survive are whole paths, never a half-written one.
     kept = q.split("Changed files:\n", 1)[1].split("\n")
@@ -63,6 +68,7 @@ def test_build_query_keeps_the_files_block_within_the_transport_cap():
 
 def test_build_query_never_cuts_a_path_in_half(monkeypatch):
     files = ["aaaaaaaaaaaaaaaaaaaa.py", "bbbbbbbbbbbbbbbbbbbb.py"]
+    monkeypatch.setattr(settings, "embed_query_prefix", "")
     monkeypatch.setattr(settings, "embed_max_chars", 40)
     assert _build_query(files, None, None) == "Changed files:\naaaaaaaaaaaaaaaaaaaa.py"
     # A budget that ends exactly on a path boundary keeps that path: rewinding
@@ -75,12 +81,34 @@ def test_build_query_never_cuts_a_path_in_half(monkeypatch):
 def test_build_query_cuts_the_body_not_the_files_block(monkeypatch):
     # The body absorbs the whole shortfall; the files block is kept intact and
     # is dropped only when there is no room for even one whole path.
+    monkeypatch.setattr(settings, "embed_query_prefix", "")
     monkeypatch.setattr(settings, "embed_max_chars", 30)
     q = _build_query(["a.py"], "b" * 500, None)
     assert q.endswith("Changed files:\na.py")
     assert len(q) <= 30
     monkeypatch.setattr(settings, "embed_max_chars", 19)
     assert _build_query(["a.py"], "b" * 500, None) == "Changed files:\na.py"
+
+
+def test_the_query_prefix_is_charged_to_the_budget(monkeypatch):
+    # The prefix is paid for here or it is paid for by _fit, and _fit takes it
+    # out of the tail -- the files block. So a longer instruction has to cost
+    # the files block its place in the budget, not cost it its last paths after
+    # the fact.
+    monkeypatch.setattr(settings, "embed_max_chars", 29)
+    monkeypatch.setattr(settings, "embed_query_prefix", "")
+    assert _build_query(["a.py"], "b" * 500, None).endswith("Changed files:\na.py")
+
+    # 29 - 10 leaves exactly the 19-char files block and no room for the body.
+    monkeypatch.setattr(settings, "embed_query_prefix", "P" * 10)
+    q = _build_query(["a.py"], "b" * 500, None)
+    assert q == "Changed files:\na.py"
+    assert len(settings.embed_query_prefix + q) <= settings.embed_max_chars
+
+    # One more character of instruction and the block no longer fits whole, so
+    # it is dropped rather than half-written.
+    monkeypatch.setattr(settings, "embed_query_prefix", "P" * 11)
+    assert "Changed files:" not in _build_query(["a.py"], "b" * 500, None)
 
 
 def test_embed_max_chars_must_be_positive():

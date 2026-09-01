@@ -92,9 +92,9 @@ def creating_pool(monkeypatch):
         made = _FakePool(error)
         made.closed = False
         monkeypatch.setattr(db, "ConnectionPool", lambda **_k: made)
-        monkeypatch.setattr(db, "_resolve_embed_dim", lambda: 8)
+        monkeypatch.setattr(db, "_resolve_embed_dim", lambda: (8, True))
         monkeypatch.setattr(db, "_migration_sql", lambda dim: ())
-        monkeypatch.setattr(db, "_ensure_embed_dim", lambda conn, dim: None)
+        monkeypatch.setattr(db, "_ensure_embed_dim", lambda conn, dim, **_k: None)
         monkeypatch.setattr(db.atexit, "register", lambda fn: fn)
         return made
 
