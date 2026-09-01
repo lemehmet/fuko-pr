@@ -266,7 +266,14 @@ def _permission_settings(env: dict[str, str]) -> str:
 # options exit with "error: unknown option", this one runs) and documented in
 # the CLI reference. It bounds a pathological tool loop; the wall-clock
 # `tool_timeout` is the outer bound that does not depend on this flag.
-DEFAULT_MAX_TURNS = 50
+#
+# 250 is chosen so `tool_timeout` binds FIRST: at the observed ~5 turns/min a
+# 2700s budget is ~225 turns, and fuko-pr's own 1800s is ~150, so in both cases
+# a runaway hits the wall-clock bound the budget arithmetic actually reasons
+# about. That keeps this a backstop against a pathological loop rather than a
+# review-length limit -- at 50 it was the latter, and exhausting it ENDS a
+# review with exit 1 and an empty stderr, indistinguishable from a crash (#149).
+DEFAULT_MAX_TURNS = 250
 
 # "Not logged in · Please run /login" and the API-key equivalents. Auth failure
 # must NOT be treated as throttling: failing over to the next provider would
@@ -500,6 +507,25 @@ def run_review(
     returncode, outcome, stderr, timed_out = _drive(
         cmd, prompt=prompt, cwd=cwd, env=env, timeout=timeout, emit=_emit
     )
+    # Only a non-success subtype is announced: a clean run stays quiet so the
+    # line is a signal and not noise. It is keyed on the subtype alone, not on
+    # the returncode, because the returncode is exactly what cannot tell these
+    # endings apart -- `error_max_turns` exits 1 with an empty stderr (#149).
+    # The MODEL rides the line for the same reason it rides `_emit` above:
+    # concurrent branches interleave on ONE stderr, so a line without it is
+    # unassignable when two seats end badly in the same window.
+    #
+    # The subtype is FLATTENED for the same reason `_emit`'s argument is: it is
+    # a stream-derived string, so a value carrying a line break would put chosen
+    # text at column 0 of its own line and forge a gate downstream log consumers
+    # anchor on (#147). The guard tests the RAW value on purpose -- flattening
+    # first would let a crafted `success\n...` go quiet, which is backwards.
+    if outcome.subtype and outcome.subtype != "success":
+        print(
+            f"fuko: agentic {model} harness ended with result subtype={_flatten(outcome.subtype)}",
+            file=sys.stderr,
+            flush=True,
+        )
     if timed_out:
         # The text is deliberately dropped (a killed run has no verdict), but the
         # accounting is not: a run killed at 30 minutes is the single most
@@ -564,6 +590,7 @@ class _StreamOutcome:
     usage: dict | None = None
     cost_usd: float | None = None
     turns: int | None = None
+    subtype: str | None = None
 
 
 def _consume_stream(lines, emit) -> _StreamOutcome:
@@ -585,12 +612,19 @@ def _consume_stream(lines, emit) -> _StreamOutcome:
     messages counted here for the progress lines are a DIFFERENT quantity, so
     substituting them would put two definitions in one column; a run whose
     terminal event never arrived honestly reports ``None``.
+
+    ``subtype`` is the terminal event's own verdict on how the run ended, and is
+    the ONLY place a turn-cap exhaustion says so: it exits 1 with nothing on
+    stderr but a benign startup warning, so a review that simply stopped was
+    read as a provider fault for a full day (#149). Folding the feed away used
+    to discard it.
     """
     result_text: str | None = None
     last_assistant_text = ""
     reported_usage: dict | None = None
     reported_cost: float | None = None
     reported_turns: int | None = None
+    reported_subtype: str | None = None
     turns = 0
     for raw in lines:
         raw = raw.strip()
@@ -619,6 +653,8 @@ def _consume_stream(lines, emit) -> _StreamOutcome:
                 reported_usage = usage
             reported_cost = _as_float(event.get("total_cost_usd"))
             reported_turns = _as_int(event.get("num_turns"))
+            if isinstance(event.get("subtype"), str):
+                reported_subtype = event["subtype"]
             if isinstance(event.get("result"), str):
                 result_text = event["result"]
     return _StreamOutcome(
@@ -627,6 +663,7 @@ def _consume_stream(lines, emit) -> _StreamOutcome:
         usage=reported_usage,
         cost_usd=reported_cost,
         turns=reported_turns,
+        subtype=reported_subtype,
     )
 
 

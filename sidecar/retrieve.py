@@ -19,15 +19,51 @@ from .embed import get_embedder
 _PR_BODY_CHARS = 6000
 
 
+def _trim_files_block(block: str, room: int) -> str:
+    """Return ``block`` cut to ``room`` characters on a path boundary."""
+    if room <= 0:
+        return ""
+    if len(block) <= room:
+        return block
+    # A cut landing exactly on a path boundary already ends on a whole path;
+    # rewinding to the previous newline there would throw away a complete path
+    # for nothing, and with no body to absorb the freed room it can empty the
+    # query outright.
+    cut = block[:room] if block[room] == "\n" else block[:room].rpartition("\n")[0]
+    # A block whose first line alone overruns the room leaves nothing whole to
+    # keep; half a path matches no glob and embeds as noise, so keep none.
+    return cut if "\n" in cut else ""
+
+
 def _build_query(files: list[str], pr_body: str | None, query_text: str | None) -> str:
-    parts: list[str] = []
-    if query_text:
-        parts.append(query_text.strip())
-    if pr_body:
-        parts.append(pr_body.strip()[:_PR_BODY_CHARS])
-    if files:
-        parts.append("Changed files:\n" + "\n".join(files))
-    return "\n".join(p for p in parts if p).strip()
+    # Bounding the body alone is not enough: the transport cap in
+    # ``embed._fit`` cuts the *assembled* string, so a body sitting at
+    # _PR_BODY_CHARS leaves the trailing "Changed files:" block whatever is
+    # left of embed_max_chars -- and a PR with enough changed files overruns
+    # that, losing exactly the block this ordering exists to protect. So the
+    # budget is allocated here, by discriminative value rather than by position:
+    # an explicit query_text is the caller's own question, the files block is
+    # what makes one PR's query differ from another's, and the body yields
+    # first. Assembled order is unchanged; only the allocation is prioritised.
+    limit = max(0, settings.embed_max_chars)
+    head = (query_text or "").strip()
+    body = (pr_body or "").strip()[:_PR_BODY_CHARS]
+    files_block = "Changed files:\n" + "\n".join(files) if files else ""
+
+    used = 0
+    kept: dict[str, str] = {}
+    for name, part in (("head", head), ("files", files_block), ("body", body)):
+        if not part:
+            continue
+        sep = 1 if used else 0
+        room = limit - used - sep
+        part = _trim_files_block(part, room) if name == "files" else part[: max(0, room)]
+        if not part:
+            continue
+        kept[name] = part
+        used += len(part) + sep
+
+    return "\n".join(kept[n] for n in ("head", "body", "files") if kept.get(n)).strip()
 
 
 def query(
