@@ -218,6 +218,151 @@ def test_zai_anthropic_preset_builds_gateway_env(monkeypatch):
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "glm-5.3"
 
 
+def test_anthropic_compatible_preset_serves_every_slot_from_one_model(monkeypatch):
+    """A self-hosted gateway preset routes all three model slots to the entry.
+
+    `anthropic-compatible` carries no `small_model` quirk, unlike the vendor
+    gateways beside it, and that is the point: a single-model deployment has no
+    cheap tier, so naming a second slug for the background haiku-class calls
+    would make the gateway swap models mid-review. The base URL comes off the
+    ENTRY -- the preset has none.
+    """
+    monkeypatch.setenv("ANTHROPIC_COMPAT_KEY", "sk-local")
+    env = AgenticBackend().build_env(
+        get_preset("anthropic-compatible"),
+        ModelConfig(
+            provider="anthropic-compatible",
+            name="Qwen3.8-Flash-Next-GGUF",
+            base_url="https://llm.example.internal/anthropic",
+            auth="api-key",
+        ),
+        knowledge="",
+        tools=["review"],
+    )
+    assert env["ANTHROPIC_API_KEY"] == "sk-local"
+    assert env["ANTHROPIC_BASE_URL"] == "https://llm.example.internal/anthropic"
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "Qwen3.8-Flash-Next-GGUF"
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "Qwen3.8-Flash-Next-GGUF"
+    assert env["FUKO_AGENTIC_MODEL"] == "Qwen3.8-Flash-Next-GGUF"
+
+
+@pytest.mark.parametrize("auth", ["api-key", "subscription", "auto"])
+def test_requires_base_url_preset_without_one_is_a_config_error(monkeypatch, auth):
+    """No endpoint + `requires_base_url` must raise in EVERY auth mode.
+
+    The silent alternative is the dangerous one: the run reaches
+    api.anthropic.com, and if the entry's name is a slug Anthropic serves, a
+    REAL Claude review is published under this entry's label -- billed to the
+    key or to the runner's login depending on the mode. The receipt cannot
+    catch it, because the label and the requested model still agree.
+    """
+    monkeypatch.setenv("ANTHROPIC_COMPAT_KEY", "sk-local")
+    with pytest.raises(ValueError, match="no default endpoint"):
+        AgenticBackend().build_env(
+            get_preset("anthropic-compatible"),
+            ModelConfig(provider="anthropic-compatible", name="local-model", auth=auth),
+            knowledge="",
+            tools=["review"],
+        )
+
+
+def test_requires_base_url_preset_refuses_subscription_mode(monkeypatch):
+    """A gateway-only preset cannot run on the runner's own Claude login.
+
+    Subscription mode deliberately injects no base URL, so for this preset
+    class it can only mean the wrong endpoint -- and the entry's `base_url`
+    being present makes that MORE dangerous, not less: the operator believes
+    the traffic goes to their gateway.
+    """
+    monkeypatch.delenv("ANTHROPIC_COMPAT_KEY", raising=False)
+    with pytest.raises(ValueError, match="reaches its model only through"):
+        AgenticBackend().build_env(
+            get_preset("anthropic-compatible"),
+            ModelConfig(
+                provider="anthropic-compatible",
+                name="local-model",
+                base_url="https://llm.example.internal/anthropic",
+                auth="subscription",
+            ),
+            knowledge="",
+            tools=["review"],
+        )
+
+
+def test_missing_key_message_offers_no_fallback_a_gateway_preset_cannot_take(
+    monkeypatch,
+):
+    """The missing-key error must not advise a mode the endpoint guard refuses.
+
+    For a `requires_base_url` preset, `auth = "subscription"` is not an
+    alternative to exporting the key -- it is the other half of the same
+    refusal. Advertising it sends the operator from one error into a second,
+    less obvious one.
+    """
+    monkeypatch.delenv("ANTHROPIC_COMPAT_KEY", raising=False)
+    with pytest.raises(ValueError) as excinfo:
+        AgenticBackend().build_env(
+            get_preset("anthropic-compatible"),
+            ModelConfig(
+                provider="anthropic-compatible",
+                name="local-model",
+                base_url="https://llm.example.internal/anthropic",
+                auth="api-key",
+            ),
+            knowledge="",
+            tools=["review"],
+        )
+    assert "subscription" not in str(excinfo.value)
+    assert "ANTHROPIC_COMPAT_KEY" in str(excinfo.value)
+
+
+def test_missing_key_message_keeps_the_fallback_for_a_normal_preset(monkeypatch):
+    """A preset with its own endpoint still gets the subscription suggestion."""
+    monkeypatch.delenv("QWEN_TOKEN_PLAN_KEY", raising=False)
+    with pytest.raises(ValueError, match="auth = 'subscription'"):
+        AgenticBackend().build_env(
+            get_preset("qwen-anthropic"),
+            ModelConfig(provider="qwen-anthropic", name="qwen3.8-max", auth="api-key"),
+            knowledge="",
+            tools=["review"],
+        )
+
+
+def test_requires_base_url_preset_refuses_auto_with_no_key(monkeypatch):
+    """The realistic path into subscription mode is `auto` and a forgotten key.
+
+    `_resolve_auth` reads a missing key as "this is a subscription runner",
+    which is right for every other preset and wrong for this one: the
+    misconfiguration the endpoint guard targets is exactly the one that steers
+    around it. `auto` is the default, so this is the case that actually ships.
+    """
+    monkeypatch.delenv("ANTHROPIC_COMPAT_KEY", raising=False)
+    with pytest.raises(ValueError, match="auth = 'subscription' never injects"):
+        AgenticBackend().build_env(
+            get_preset("anthropic-compatible"),
+            ModelConfig(
+                provider="anthropic-compatible",
+                name="local-model",
+                base_url="https://llm.example.internal/anthropic",
+            ),
+            knowledge="",
+            tools=["review"],
+        )
+
+
+def test_configured_endpoint_reads_the_entry_when_the_preset_has_none(monkeypatch):
+    """Attribution follows the entry's base_url for a preset with no default."""
+    monkeypatch.setenv("ANTHROPIC_COMPAT_KEY", "sk-local")
+    model = ModelConfig(
+        provider="anthropic-compatible",
+        name="local-model",
+        base_url="https://llm.example.internal/anthropic",
+        auth="api-key",
+    )
+    endpoint = AgenticBackend().configured_endpoint(get_preset("anthropic-compatible"), model)
+    assert endpoint == "https://llm.example.internal/anthropic"
+
+
 def test_build_env_plain_anthropic_leaves_model_routing_alone(monkeypatch):
     """No base_url = real Anthropic: the harness's own `claude-*` defaults are
     correct there, so the routing vars must NOT be injected."""

@@ -400,11 +400,17 @@ auth = "subscription"   # "auto" (default) | "subscription" | "api-key"
   `CLAUDE_CONFIG_DIR`, both of which pass through to the agent untouched).
   A logged-out runner is caught by a preflight (`claude auth status`) and
   fails that branch immediately, before any clone.
-- **`api-key`** — `ANTHROPIC_KEY` (the preset's env var) is passed through as
-  `ANTHROPIC_API_KEY`, with `ANTHROPIC_BASE_URL` for a gateway. A missing key
-  is a config error, raised before the run.
-- **`auto`** (default) — api-key when `ANTHROPIC_KEY` is set, else
-  subscription.
+- **`api-key`** — the preset's env var (`ANTHROPIC_KEY`, or e.g.
+  `ANTHROPIC_COMPAT_KEY`) is passed through as `ANTHROPIC_API_KEY`, with
+  `ANTHROPIC_BASE_URL` for a gateway. A missing key is a config error, raised
+  before the run.
+- **`auto`** (default) — api-key when **the preset's own key env var** is set,
+  else subscription. Not `ANTHROPIC_KEY` specifically: `_resolve_auth` reads
+  `preset.key_env`, which is `QWEN_TOKEN_PLAN_KEY` for `qwen-anthropic`,
+  `ANTHROPIC_COMPAT_KEY` for `anthropic-compatible`, and so on. Exporting a
+  real `ANTHROPIC_KEY` does not make `auto` resolve to api-key for a gateway
+  entry — it resolves to subscription, which for a `requires_base_url` preset
+  is refused outright (see below).
 
 **Why the modes are mutually exclusive at the environment level:** Claude
 Code's credential precedence is `ANTHROPIC_AUTH_TOKEN` > `ANTHROPIC_API_KEY` >
@@ -421,41 +427,92 @@ classified as throttling, so the branch fails over to a backup entry; an
 authentication failure is deliberately **not**, because failing over would
 burn every provider in the pool on what is a one-line runner fix.
 
+### A self-hosted gateway: `anthropic-compatible`
+
+Any endpoint that speaks the Anthropic Messages API can host a seat — a LiteLLM
+or vLLM in front of local weights, a rented box, a provider without a preset of
+its own:
+
+```toml
+[[review.models]]
+provider = "anthropic-compatible"
+name = "Qwen3.8-Flash-Next-GGUF"   # the gateway's slug, verbatim
+base_url = "https://llm.example.internal/anthropic"
+auth = "api-key"                   # key from ANTHROPIC_COMPAT_KEY
+backend = "agentic"
+max_context = 262144
+role = "trial"
+```
+
+`base_url` and `auth = "api-key"` are both **required**, and each is a config
+error rather than a default. The preset has no endpoint of its own, so a
+missing `base_url` falls back to `api.anthropic.com`; and subscription mode
+injects no base URL at all, so it reaches that same endpoint even when the
+entry names a gateway. Either way, if the entry's `name` happens to be a slug
+Anthropic serves, that is not a failed run but a *successful* one against the
+wrong model, published under this entry's label — a substitution the receipt
+cannot detect, because the label and the requested model still agree.
+
+The auth rule matters more than it looks, because the realistic way to hit it
+is not writing `auth = "subscription"`. It is leaving `auth` at its `auto`
+default and forgetting to export the key: `auto` reads a missing key as "this
+is a subscription runner", which is correct for every other preset and wrong
+for this one. Both refusals therefore run before the auth branch, not inside
+it.
+
+The preset deliberately carries no `small_model` quirk, so the entry's own
+model serves the harness's background haiku-class and subagent calls too. The
+vendor presets name a cheap tier there to keep those calls off an expensive
+model; a single-model deployment has no cheap tier, and naming a second slug
+would make the gateway swap models mid-review.
+
 ## Configuration
 
 ```toml
 [review]
-backend = "agentic"        # global until fuko-pr #99 lands per-model backend
+backend = "agentic"        # fleet default; any entry may override it
 
 [[review.models]]
 provider = "anthropic"
 name = "claude-sonnet-5"
-auth = "subscription"      # or "api-key" (ANTHROPIC_KEY); see Authentication
+auth = "subscription"      # or "api-key"; see Authentication
+# backend = "pr-agent"     # per-entry override (#99, landed)
 # extra_instructions = """
 # ...per-entry steering, same field the pr-agent backend uses (#98)."""
 ```
+
+Per-entry `backend` landed with #99 — `ReviewModel.backend`, validated at
+config-parse time and resolved per branch by `_backend_for`, with the driver
+recorded on the receipt. `[review].backend` is the fleet default an entry may
+override, which is what lets one fleet mix harnesses (the correlation fix the
+2026-07-31 audit motivated) and what a `role = "trial"` seat on a new driver
+rides in on.
 
 Current limits, on purpose:
 
 - **Runner prerequisite:** the `claude` CLI must be installed on the runner
   and authenticated per the mode above; a missing binary fails that branch
   with a clear message instead of throttling.
-- **`anthropic` preset only.** The headless-Claude harness authenticates via
-  `ANTHROPIC_API_KEY`. Other model families arrive with an OSS agentic harness
-  implementing the same `run_review` signature — the strategy and driver do
-  not change for it.
-- **Global `backend` scalar.** Mixing agentic and pr-agent entries in one
-  fleet needs per-model backend selection + backend-attributed receipts,
-  tracked as #99. Until then a repo opts in wholesale (or dogfoods it solo).
+- **Anthropic-protocol presets only.** The gate is the preset's
+  `litellm_prefix`, not its name: any preset whose prefix is `anthropic/`
+  qualifies, because the harness is headless Claude Code and it speaks that
+  protocol. That is `anthropic` itself, the vendor gateways
+  (`qwen-anthropic`, `zai-anthropic`) and `anthropic-compatible` — the model
+  behind those endpoints is not Claude. Other model families arrive with an
+  OSS agentic harness implementing the same `run_review` signature — the
+  strategy and driver do not change for it.
 - **One tool.** `review` only; `improve`/`describe` in `[review].tools` are
-  ignored for this backend.
-- **Failover stays inside the configured backend.** Because `backend` is a
-  single global scalar (above), every entry in the pool — actives and backups
-  alike — runs on the same driver, so an agentic branch fails over to another
-  *agentic* entry. A pr-agent backup rescuing an agentic branch is not
-  something this release can express; it becomes possible with #99's per-model
-  backend field, which is also where a per-entry say on mixing harnesses
-  belongs.
+  ignored for this backend — accepted rather than rejected so a shared list
+  keeps working. Worth knowing when sizing a job: the budget arithmetic
+  (`fleet_sequential_cost_minutes`) charges every branch `len(tools)`, so an
+  all-agentic fleet with `tools = ["review", "improve"]` books twice the
+  wall-clock it can actually spend.
+- **Failover stays inside a branch's own driver.** `backend` is per entry
+  (below), but a pool is not mixed: `_compatible_backups` filters a branch's
+  failover targets to entries on the same driver, so an agentic branch fails
+  over only to another *agentic* entry. A pr-agent backup cannot rescue an
+  agentic branch, and a promotion across drivers is refused too (#132). That
+  is a deliberate rule about what a substitute may be, not a missing feature.
 
 ## Cost & pacing
 

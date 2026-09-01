@@ -117,6 +117,26 @@ PRESETS: dict[str, ProviderPreset] = {
         key_env="ZAI_KEY",
         quirks={"small_model": "glm-4.5-air"},
     ),
+    # Any gateway that speaks the Anthropic Messages API and is not one of the
+    # named vendors above -- a self-hosted LiteLLM or vLLM, a rented box, a
+    # provider we have not earned a preset for yet. The endpoint is the
+    # deployment's, never ours, hence `requires_base_url`: without it the key
+    # would go to api.anthropic.com, which for a local gateway's throwaway key
+    # is a confusing 401 and for a fleet that also holds a real Anthropic key
+    # is a silently billed review against the wrong model.
+    #
+    # No `small_model` quirk, and that is a choice rather than an omission. The
+    # sibling gateway presets name a cheap tier so the harness's background
+    # haiku-class calls do not run on the expensive model; a single-model
+    # deployment has no cheap tier, and pointing those calls at a second slug
+    # would make it swap models mid-review. Absent the quirk the backend falls
+    # back to the entry's own model for every slot, which is the correct
+    # default here.
+    "anthropic-compatible": ProviderPreset(
+        litellm_prefix="anthropic/",
+        key_env="ANTHROPIC_COMPAT_KEY",
+        requires_base_url=True,
+    ),
 }
 
 
