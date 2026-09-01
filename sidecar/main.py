@@ -19,7 +19,7 @@ from .stores import current_store
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """Run DB migrations before the sidecar serves traffic.
+    """Check the embedding endpoint, then run DB migrations, before serving traffic.
 
     Warming the pool at startup means migrations run-and-commit before any
     request, so a fresh database never 500s on its first ``/query`` / ``/cb``
@@ -27,7 +27,23 @@ async def lifespan(_app: FastAPI):
     isn't reachable at boot the error is logged and startup proceeds, leaving
     ``/healthz`` available and the (lock-guarded) lazy ``get_pool()`` path to
     retry on first use.
+
+    The embedding check is the one thing here that is *not* best-effort. A
+    database that is merely down fails loudly on the next request; an endpoint
+    serving a different model than the one configured fails no request at all
+    -- it returns well-formed vectors from the wrong space, and the store
+    retrieves noise (#220). Refusing to start is the only way that failure gets
+    noticed, so :meth:`Embedder.verify_model` is allowed to propagate. It only
+    raises when the endpoint *answers* and the configured model is absent; an
+    endpoint that is unreachable or silent about its models does not block boot.
     """
+    # Before the pool, because opening it is what re-embeds the store on a
+    # marker change -- and re-embedding every learning with the wrong model is
+    # worse than not starting at all.
+    from .embed import get_embedder
+
+    get_embedder().verify_model()
+
     if settings.database_url:
         from .db import get_pool
 
