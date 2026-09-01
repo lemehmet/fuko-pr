@@ -58,6 +58,40 @@ def test_mismatch_refuses(monkeypatch):
     assert "bge-m3" in str(exc.value) and "qwen3-embedding-0.6b" in str(exc.value)
 
 
+def test_ollama_latest_tag_matches_untagged_config(monkeypatch):
+    # Ollama lists `bge-m3:latest` and resolves an untagged request to it, so
+    # every Ollama deployment in this repo (compose, .env.example, CI) pins the
+    # untagged name against a list that never contains it verbatim.
+    _responder(monkeypatch, body={"models": [{"name": "bge-m3:latest"}]})
+    monkeypatch.setattr(settings, "embed_model", "bge-m3")
+    Embedder().verify_model()  # does not raise
+
+
+def test_latest_tag_does_not_mask_a_different_model(monkeypatch):
+    _responder(monkeypatch, body={"models": [{"name": "qwen3-embedding-0.6b:latest"}]})
+    monkeypatch.setattr(settings, "embed_model", "bge-m3")
+    with pytest.raises(EmbedModelMismatch):
+        Embedder().verify_model()
+
+
+def test_only_the_latest_tag_is_accepted(monkeypatch):
+    # A different tag is a different artefact that an untagged request would
+    # not resolve to, so it must stay a refusal rather than become a match.
+    _responder(monkeypatch, body={"models": [{"name": "bge-m3:q4_K_M"}]})
+    monkeypatch.setattr(settings, "embed_model", "bge-m3")
+    with pytest.raises(EmbedModelMismatch):
+        Embedder().verify_model()
+
+
+def test_tagged_config_is_not_loosened(monkeypatch):
+    # The allowance runs one way only: a config that names a tag is taken at
+    # its word, so nothing silently widens a deliberately pinned tag.
+    _responder(monkeypatch, body={"data": [{"id": "bge-m3"}]})
+    monkeypatch.setattr(settings, "embed_model", "bge-m3:latest")
+    with pytest.raises(EmbedModelMismatch):
+        Embedder().verify_model()
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

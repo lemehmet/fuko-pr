@@ -226,9 +226,12 @@ So the sidecar now asks the endpoint what it serves (`GET
 {FUKO_EMBED_BASE_URL}/models`) at startup and **refuses to start** when the
 answer does not include `FUKO_EMBED_MODEL`. An endpoint that is unreachable or
 does not implement `/models` is *not* a mismatch and does not block startup --
-only a definite answer that the configured model is absent does. If the sidecar
-exits at boot naming two models, the fix is to point `FUKO_EMBED_MODEL` at what
-is served, not to disable the check.
+only a definite answer that the configured model is absent does. Ollama's
+`:latest` tag is handled for you -- an untagged `FUKO_EMBED_MODEL=bge-m3`
+matches a served `bge-m3:latest`, which is what every Ollama setup here looks
+like -- but no other tag is, because Ollama would not resolve an untagged
+request to one either. If the sidecar exits at boot naming two models, the fix
+is to point `FUKO_EMBED_MODEL` at what is served, not to disable the check.
 
 To check an existing store by hand, embed a stored learning's own text and
 compare it with the stored vector -- `cos ~= 1.0` means they share a space:

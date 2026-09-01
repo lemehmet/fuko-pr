@@ -122,6 +122,24 @@ class Embedder:
                         break
         return names or None
 
+    def _is_served(self, names: list[str]) -> bool:
+        """Whether ``names`` contains the configured model, allowing Ollama's tag.
+
+        Ollama lists its models tag-qualified (``bge-m3:latest``) but resolves an
+        *untagged* request name to that same ``:latest`` tag, so every Ollama
+        deployment documented here -- which all pin the untagged ``bge-m3`` --
+        is genuinely served by a list that only ever says ``bge-m3:latest``.
+
+        Only ``:latest`` is accepted, and only when the configured name carries
+        no tag of its own. Any other tag is a variant the endpoint would *not*
+        resolve an untagged request to, so accepting it would widen the guard
+        into the silent-wrong-vectors hole this exists to close (#220).
+        """
+        model = settings.embed_model
+        if model in names:
+            return True
+        return ":" not in model and f"{model}:latest" in names
+
     def verify_model(self) -> None:
         """Raise if the endpoint definitively does not serve the configured model.
 
@@ -134,14 +152,15 @@ class Embedder:
         was *asked for*.
 
         So ask the endpoint what it actually has. Silent when it will not say,
-        loud only when it answers and the configured model is not in the list.
+        loud only when it answers and the configured model is not in the list --
+        where "in the list" is tag-aware for Ollama, see :meth:`_is_served`.
 
         Raises:
             EmbedModelMismatch: The endpoint serves models, none of them the
                 configured one.
         """
         names = self.served_models()
-        if names is None or settings.embed_model in names:
+        if names is None or self._is_served(names):
             return
         raise EmbedModelMismatch(
             f"{self._url.removesuffix('/embeddings')} does not serve "
