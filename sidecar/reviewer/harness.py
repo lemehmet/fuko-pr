@@ -273,6 +273,17 @@ def _permission_settings(env: dict[str, str]) -> str:
 # about. That keeps this a backstop against a pathological loop rather than a
 # review-length limit -- at 50 it was the latter, and exhausting it ENDS a
 # review with exit 1 and an empty stderr, indistinguishable from a crash (#149).
+#
+# That derivation holds only for a seat running at that RATE. `tool_timeout`
+# bounds the whole agentic invocation -- this driver runs one process per branch,
+# not one per tool -- so a seat that paces itself between tool calls reaches that
+# bound long before 250 turns and the cap never binds: it dies by the timeout's
+# kill rather than at the `error_max_turns` ending, which is the diagnosable one.
+# Restoring that ordering is a two-knob job -- the smaller bound fires, so such a
+# seat needs `tool_timeout` raised to cover its pacing AND a cap under what that
+# budget then buys -- which is why 250 is a DEFAULT and not the number:
+# `[review].max_turns` sets the fleet's, a per-entry
+# `[[review.models]].max_turns` sets a seat's (#229).
 DEFAULT_MAX_TURNS = 250
 
 # "Not logged in · Please run /login" and the API-key equivalents. Auth failure

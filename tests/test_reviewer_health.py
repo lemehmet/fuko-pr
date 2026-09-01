@@ -430,6 +430,30 @@ def test_backend_for_applies_per_entry_tool_timeout():
     assert runner._backend_for(fast, review).tool_timeout == 800
 
 
+def test_backend_for_applies_per_entry_max_turns():
+    """#229: entry > [review] > DEFAULT_MAX_TURNS, on the branch's own instance.
+
+    Same shape as the tool_timeout override above, and it carries the same
+    consequence: the instance is built per BRANCH and the whole pool reviews
+    through it, so a backup answering a failover INSIDE the branch runs the
+    rescued seat's cap rather than its own, while an escalation promotion starts
+    a branch of its own and keeps its own (#204/#209) — and a paced seat's cap
+    cannot bleed into an unpaced sibling.
+    """
+    from sidecar.fukoconfig import ReviewConfig, ReviewModel
+    from sidecar.reviewer.harness import DEFAULT_MAX_TURNS
+
+    paced = ReviewModel(provider="anthropic", name="m", backend="agentic", max_turns=80)
+    unpaced = ReviewModel(provider="anthropic", name="n", backend="agentic")
+    fleet_default = ReviewConfig(backend="agentic", max_turns=120)
+    assert runner._backend_for(paced, fleet_default).max_turns == 80
+    assert runner._backend_for(unpaced, fleet_default).max_turns == 120
+
+    unset = ReviewConfig(backend="agentic")
+    assert runner._backend_for(paced, unset).max_turns == 80
+    assert runner._backend_for(unpaced, unset).max_turns == DEFAULT_MAX_TURNS
+
+
 def test_config_parsed_backup_with_token_env_is_promoted(monkeypatch, tmp_path):
     """#114 end-to-end: a role="backup" entry may carry token_env through TOML
     parsing, and such an identity'd backup is then promoted under escalation.

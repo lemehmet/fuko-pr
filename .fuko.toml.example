@@ -75,6 +75,20 @@ tools = ["review", "improve"]   # PR-Agent tools to run
 # number, which grows every seat's stuck-branch bound. Budget arithmetic sums
 # per-entry values, so the override changes only its own branch's worst case.
 #
+# `max_turns` (agentic driver only), fleet-wide in [review] or per entry: the
+# agent's `--max-turns` cap. Unset at both levels means the harness default.
+# Same precedence and branch scope as `tool_timeout` — a same-driver backup
+# rescuing the branch inherits the branch's cap, while an escalation promotion
+# starts a branch of its own and keeps its own number.
+# Set it TOGETHER with `tool_timeout`, because the smaller bound is the one that
+# fires. `tool_timeout` bounds the WHOLE agentic invocation (one subprocess per
+# branch, one timer), so a seat that paces itself between tool calls — sleeps, a
+# thinking-mode gateway — reaches that kill long before any turn cap. Raise that
+# seat's `tool_timeout` to cover its paced wall-clock first, then size its
+# `max_turns` under what the raised budget buys. A cap set on its own never
+# binds, and the death it fails to prevent reads like a gateway outage rather
+# than a capped review. See docs/agentic-reviewer.md.
+#
 # Per-entry review steering: an optional `extra_instructions` string on any
 # entry is prepended to the shared knowledge blob for THAT entry's runs only —
 # use it to differentiate a fleet that would otherwise converge on the same
