@@ -150,9 +150,18 @@ store = "postgres"              # postgres | sqlite-vec
 # key = "owner/repo.db"
 # creds_env_prefix = "FUKO_S3"  # reads FUKO_S3_ACCESS_KEY_ID, FUKO_S3_SECRET_ACCESS_KEY
 
-[embedding]
+# Embeddings are NOT configured here. There is no [embedding] section — adding
+# one now fails the config load rather than being ignored (#216). The embedding
+# endpoint is environment-only, because the sidecar is a separate process that
+# may hold no repo checkout at all:
+#
+#   FUKO_EMBED_BASE_URL=http://localhost:11434/v1
+#   FUKO_EMBED_MODEL=bge-m3            # doubles as the vectors' provenance
+#                                      # marker; changing it re-embeds the store
+#   FUKO_EMBED_QUERY_PREFIX=           # empty for a symmetric model (bge-m3);
+#                                      # leave unset for qwen3-embedding-0.6b
+#   FUKO_EMBED_API_KEY=...             # remote providers only
+#
 # Self-hosted runners: local Ollama (offline default). SaaS runners: prefer a
-# remote, non-OpenAI provider (e.g. Voyage, Jina, bigmodel) — see docs.
-provider = "ollama"
-model = "bge-m3"
-base_url = "http://localhost:11434/v1"
+# remote, non-OpenAI provider (e.g. Voyage, Jina, bigmodel) — see .env.example
+# and docs/deployment.md.

@@ -87,28 +87,26 @@ file — no paid APIs, no server.
    backend = "file"
    key = ".fuko/kb.db"                  # a local file; use s3/r2 for CI runners
 
-   [embedding]
-   provider = "ollama"
-   model = "bge-m3"
-   base_url = "http://localhost:11434/v1"
    ```
 
-   > **The embedding endpoint is configured by environment, not by this
-   > section.** `[embedding]` is parsed but not yet consumed (#216) — the
-   > sidecar reads `FUKO_EMBED_*` only. For the local Ollama setup above that
-   > means, in your `.env` (see [`.env.example`](./.env.example)):
-   >
-   > ```bash
-   > FUKO_EMBED_BASE_URL=http://localhost:11434/v1
-   > FUKO_EMBED_MODEL=bge-m3
-   > FUKO_EMBED_QUERY_PREFIX=
-   > ```
-   >
-   > Both lines matter. `FUKO_EMBED_MODEL` defaults to
-   > `qwen3-embedding-0.6b`, which Ollama does not serve here, and it doubles
-   > as the provenance marker for the stored vectors — changing it re-embeds
-   > the knowledge base. `FUKO_EMBED_QUERY_PREFIX` defaults to that model's
-   > task instruction, which a symmetric model like bge-m3 must not receive.
+   **Embeddings are not part of this file** — they are configured by
+   environment only, because the sidecar is a separate process that may hold no
+   repo checkout at all. `.fuko.toml` has no `[embedding]` section; putting one
+   back fails the config load with a pointer here rather than being ignored
+   (#216). For the local Ollama setup above, put this in your `.env` (see
+   [`.env.example`](./.env.example)):
+
+   ```bash
+   FUKO_EMBED_BASE_URL=http://localhost:11434/v1
+   FUKO_EMBED_MODEL=bge-m3
+   FUKO_EMBED_QUERY_PREFIX=
+   ```
+
+   All three lines matter. `FUKO_EMBED_MODEL` defaults to
+   `qwen3-embedding-0.6b`, which Ollama does not serve here, and it doubles as
+   the provenance marker for the stored vectors — changing it re-embeds the
+   knowledge base. `FUKO_EMBED_QUERY_PREFIX` defaults to that model's task
+   instruction, which a symmetric model like bge-m3 must not receive.
 
 4. **Seed knowledge** and **review a PR**:
 
@@ -223,11 +221,13 @@ fuko kb forget owner/name --id <uuid>
 
 ## Configuration
 
-- **`.fuko.toml`** (committed, per-repo): backend, model provider, tools, store,
-  embedding. See `.fuko.toml.example`. Secrets are never in this file — each
-  provider preset declares the env var that holds its key.
-- **`FUKO_*` env** (runtime/server settings): `FUKO_DATABASE_URL`, `FUKO_EMBED_*`,
-  `FUKO_AUTH_TOKEN`, etc. See `.env.example`.
+- **`.fuko.toml`** (committed, per-repo): backend, model provider, tools, store.
+  See `.fuko.toml.example`. Secrets are never in this file — each provider
+  preset declares the env var that holds its key.
+- **`FUKO_*` env** (runtime/server settings): `FUKO_DATABASE_URL`, `FUKO_AUTH_TOKEN`,
+  and **the entire embedding endpoint** (`FUKO_EMBED_BASE_URL`, `FUKO_EMBED_MODEL`,
+  `FUKO_EMBED_API_KEY`, `FUKO_EMBED_QUERY_PREFIX`) — there is no file-based way to
+  set it. See `.env.example`.
 
 Design and contracts: [`docs/design.md`](docs/design.md).
 
