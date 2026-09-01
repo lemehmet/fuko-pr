@@ -213,6 +213,37 @@ vectors in `meta.embed_model` and re-embeds when that changes too. An absent
 marker counts as a change, so the first restart after upgrading to a build that
 has this table re-embeds once by design.
 
+**A third case, which neither trigger can see.** Both of the above watch the
+*configuration*. If the endpoint itself is switched to another model under the
+same alias, nothing in the config changes and nothing in the schema changes --
+and llama-server ignores the `model` field in a request, so asking for `bge-m3`
+returns a vector from whatever is actually loaded, with `"model":"bge-m3"`
+echoed back. Queries then land in one space and the store sits in another, every
+round injects zero learnings, and no request ever fails. That happened here over
+2026-08-31/09-01.
+
+So the sidecar now asks the endpoint what it serves (`GET
+{FUKO_EMBED_BASE_URL}/models`) at startup and **refuses to start** when the
+answer does not include `FUKO_EMBED_MODEL`. An endpoint that is unreachable or
+does not implement `/models` is *not* a mismatch and does not block startup --
+only a definite answer that the configured model is absent does. Ollama's
+`:latest` tag is handled for you -- an untagged `FUKO_EMBED_MODEL=bge-m3`
+matches a served `bge-m3:latest`, which is what every Ollama setup here looks
+like -- but no other tag is, because Ollama would not resolve an untagged
+request to one either. If the sidecar exits at boot naming two models, the fix
+is to point `FUKO_EMBED_MODEL` at what is served, not to disable the check.
+
+To check an existing store by hand, embed a stored learning's own text and
+compare it with the stored vector -- `cos ~= 1.0` means they share a space:
+
+```sql
+select text, embedding::text from learnings limit 3;
+```
+
+(A `query()` probe is not a substitute: learnings carry file globs, so a query
+with no changed files filters every candidate out and returns zero hits whether
+or not anything is wrong.)
+
 The query prefix is the half that is **not** covered by the marker, because it
 changes nothing about the stored vectors and must not trigger a re-embed. It is
 also the half that fails silently: a query embedded with an instruction the
