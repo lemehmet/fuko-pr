@@ -36,6 +36,30 @@ from .logfmt import flatten_for_log
 _pool: ConnectionPool | None = None
 _pool_lock = threading.Lock()
 
+_embed_space_lock = threading.Lock()
+_embed_space_checked = False
+"""Whether the embedding-provenance pass has already run in this process.
+
+Set once the pass has been *attempted*, not once it succeeded on its own terms:
+a probe failure defers the check to the next process start (see
+:func:`_ensure_embed_dim`) and re-running it in-process would turn that
+documented deferral into a retry loop against an embedder that is by definition
+unreachable. The one thing that does clear it is the pass raising, which leaves
+nothing recorded and the store exactly as it was, so the next caller that needs
+the embedding space tries again -- the same shape as a failed pool creation
+being retried by the next call.
+"""
+
+_pending_embed_space: tuple[int, bool] | None = None
+"""The ``(dim, probed)`` pair pool creation resolved, for the deferred pass.
+
+Resolved once, at pool creation, because the migration DDL already needs it to
+size ``vector(N)`` -- and reusing it means a probe that failed there stays
+failed for the pass, so the deferral documented in :func:`_ensure_embed_dim`
+still lasts until the next process start rather than becoming an in-process
+retry (#218).
+"""
+
 BEST_EFFORT_TIMEOUT_S = 2.0
 """How long a best-effort call may wait for a connection, in seconds.
 
@@ -228,13 +252,15 @@ def _migrate_embed_dim(conn, dim: int) -> None:
 
 
 def _close_pool() -> None:
-    global _pool
+    global _pool, _embed_space_checked, _pending_embed_space
     if _pool is not None:
         try:
             _pool.close()
         except Exception:
             pass
         _pool = None
+    _embed_space_checked = False
+    _pending_embed_space = None
 
 
 def vector_literal(vec: list[float]) -> str:
@@ -242,7 +268,45 @@ def vector_literal(vec: list[float]) -> str:
     return "[" + ",".join(repr(float(v)) for v in vec) + "]"
 
 
-def get_pool(*, timeout: float | None = None) -> ConnectionPool:
+def _ensure_embed_space(pool: ConnectionPool, *, timeout: float | None = None) -> None:
+    """Run the embedding-provenance pass once, outside ``_pool_lock``.
+
+    Separated from pool creation because the two have different costs and
+    different audiences (#217). Replaying the idempotent DDL is milliseconds and
+    everyone needs it; the provenance pass can call :func:`_migrate_embed_dim`,
+    which embeds the WHOLE store synchronously in batches -- minutes on a real
+    store, and guaranteed once on the first startup after #214 because an absent
+    ``meta.embed_model`` marker counts as a change. Holding ``_pool_lock`` across
+    that made every concurrent first-time caller queue behind it, including the
+    best-effort state paths whose whole contract is that they never block a
+    review. They have no stake in the embedding space either: the ledgers, the
+    breaker, run metrics and reviewer health touch neither ``learnings`` nor a
+    vector, so this is work they were waiting on and could not use.
+
+    Its own lock, so a caller that DOES need the space still waits for it (that
+    is the point of the marker -- nothing may read or write a store whose
+    vectors this process cannot vouch for) while a best-effort caller sails past
+    on a pool that is already published and usable.
+
+    A failure here does not close the pool, unlike one during creation: by this
+    point the pool is published and serving the best-effort traffic that never
+    needed the pass. The pass is left un-run instead, so the next caller that
+    needs the embedding space retries it.
+    """
+    global _embed_space_checked
+    if _embed_space_checked:
+        return
+    with _embed_space_lock:
+        if _embed_space_checked:
+            return
+        dim, probed = _pending_embed_space or _resolve_embed_dim()
+        with pool.connection(timeout=timeout) as conn:
+            register_vector(conn)
+            _ensure_embed_dim(conn, dim, probed=probed)
+        _embed_space_checked = True
+
+
+def get_pool(*, timeout: float | None = None, embed_space: bool = True) -> ConnectionPool:
     """Return the shared connection pool, creating it and running migrations once.
 
     The pool is published to the module global only after migrations have
@@ -260,48 +324,59 @@ def get_pool(*, timeout: float | None = None) -> ConnectionPool:
             connection, and a bound applied only afterwards would never be
             reached. It does not bound the migration statements themselves,
             which run once the connection is in hand, nor the wait for
-            ``_pool_lock``, which is held across the whole creation -- so a
-            caller can still queue behind someone else's, and concurrent
-            first-time callers against a dead store each run their own attempt.
-            Both are residuals of the acquisition-only bound; tracked in #207.
+            ``_pool_lock`` -- so a caller can still queue behind someone else's
+            creation, and concurrent first-time callers against a dead store
+            each run their own attempt. Both are residuals of the
+            acquisition-only bound; tracked in #207.
+        embed_space: Whether this caller reads or writes the embedding space and
+            must therefore find it migrated. Defaults to ``True`` so every
+            existing caller -- ``main.lifespan``'s startup warm, and :func:`db`
+            for the knowledge base -- keeps today's behaviour, and so a future
+            caller that forgets to think about it is safe rather than fast.
+            :func:`db_best_effort` is the one caller that passes ``False``; see
+            :func:`_ensure_embed_space` for why that is sound.
     """
-    global _pool
-    if _pool is not None:
-        return _pool
-    with _pool_lock:
-        if _pool is not None:
-            return _pool
-        pool = ConnectionPool(
-            conninfo=settings.database_url,
-            min_size=1,
-            max_size=10,
-            open=True,
-        )
-        try:
-            dim, probed = _resolve_embed_dim()
-            with pool.connection(timeout=timeout) as conn:
-                for stmt in _migration_sql(dim):
-                    conn.execute(stmt)
-                _ensure_embed_dim(conn, dim, probed=probed)
-                register_vector(conn)
-        except Exception:
-            pool.close()
-            raise
-        atexit.register(_close_pool)
-        _pool = pool
-    return _pool
+    global _pool, _pending_embed_space
+    pool = _pool
+    if pool is None:
+        with _pool_lock:
+            if _pool is None:
+                made = ConnectionPool(
+                    conninfo=settings.database_url,
+                    min_size=1,
+                    max_size=10,
+                    open=True,
+                )
+                try:
+                    dim, probed = _resolve_embed_dim()
+                    with made.connection(timeout=timeout) as conn:
+                        for stmt in _migration_sql(dim):
+                            conn.execute(stmt)
+                        register_vector(conn)
+                except Exception:
+                    made.close()
+                    raise
+                atexit.register(_close_pool)
+                _pending_embed_space = (dim, probed)
+                _pool = made
+            pool = _pool
+    if embed_space:
+        _ensure_embed_space(pool, timeout=timeout)
+    return pool
 
 
 @contextmanager
-def db(*, timeout: float | None = None):
+def db(*, timeout: float | None = None, embed_space: bool = True):
     """Yield a pooled connection with the pgvector adapter registered.
 
     Args:
         timeout: Seconds to wait for a connection, or ``None`` (the default) for
             psycopg_pool's own 30s. Callers that must not block a review pass
             through :func:`db_best_effort` instead of naming a number here.
+        embed_space: Forwarded to :func:`get_pool`; ``False`` only for
+            :func:`db_best_effort`, whose callers touch no vector.
     """
-    pool = get_pool(timeout=timeout)
+    pool = get_pool(timeout=timeout, embed_space=embed_space)
     with pool.connection(timeout=timeout) as conn:
         register_vector(conn)
         yield conn
@@ -436,6 +511,14 @@ def db_best_effort():
     budget caps a single call; the latch caps the ROUND, since a budget alone
     still costs its own wait on every one of a degraded round's calls.
 
+    Neither bound covers work done *before* a connection is handed out, so this
+    also declares ``embed_space=False`` (#217): none of those four modules
+    touches ``learnings`` or a vector, and the embedding-provenance pass they
+    would otherwise have queued behind can run for minutes after an embedding
+    model swap. A runner whose first database contact is one of these -- the
+    direct-Postgres path, which unlike ``main.lifespan`` has no startup warm --
+    creates the pool, replays the idempotent DDL, and proceeds.
+
     Latched by connection failures -- :class:`~psycopg_pool.PoolTimeout` and
     :class:`~psycopg.OperationalError`, either of which means "this database is
     not answering", including a connection lost part-way through a statement. An
@@ -465,7 +548,7 @@ def db_best_effort():
     """
     gen = _enter_probe()
     try:
-        with db(timeout=BEST_EFFORT_TIMEOUT_S) as conn:
+        with db(timeout=BEST_EFFORT_TIMEOUT_S, embed_space=False) as conn:
             _unlatch(gen)
             yield conn
     except PoolTimeout as e:
