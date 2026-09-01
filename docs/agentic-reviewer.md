@@ -459,9 +459,12 @@ Current limits, on purpose:
 
 ## Cost & pacing
 
-An agentic review is multi-turn (up to 50 tool turns) against a frontier
-model: expect noticeably higher per-review cost and latency than a single-shot
-pr-agent pass. `[review].tool_timeout` bounds wall-clock exactly as it does
-for pr-agent containers (a timeout classifies as throttle-class and fails
-over). Trial-seat first: run it as a non-gating `role = "trial"` entry and
+An agentic review is multi-turn against a frontier model: expect noticeably
+higher per-review cost and latency than a single-shot pr-agent pass.
+`[review].tool_timeout` bounds wall-clock exactly as it does for pr-agent
+containers (a timeout classifies as throttle-class and fails over), and it is
+the bound that binds first — the turn cap (`DEFAULT_MAX_TURNS`, 250) sits
+above what that budget buys at the observed ~5 turns/min, so it is a backstop
+against a pathological loop rather than a review-length limit. Trial-seat
+first: run it as a non-gating `role = "trial"` entry and
 score marginal uniqueness receipts-only before letting it gate.

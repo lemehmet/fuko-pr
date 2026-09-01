@@ -19,6 +19,7 @@ from sidecar.reviewer.checkout import (
     strip_agent_config,
 )
 from sidecar.reviewer.harness import (
+    DEFAULT_MAX_TURNS,
     HarnessNotAvailableError,
     check_auth,
     is_auth_failure,
@@ -1008,6 +1009,89 @@ def test_run_review_invocation_shape(monkeypatch, tmp_path):
     assert seen["kwargs"]["timeout"] == 9
 
 
+def test_default_max_turns_is_a_backstop_not_a_review_length_limit():
+    """#149: the turn cap must not be the thing that ends a real review.
+
+    At the observed ~5 turns/min the largest configured budget (2700s) is ~225
+    turns, so the cap has to sit above that for `tool_timeout` to bind first —
+    the wall-clock bound is the one the budget arithmetic actually reasons
+    about. At 50 the cap bound first, and it ends the run indistinguishably
+    from a crash: exit 1, empty stderr.
+    """
+    assert DEFAULT_MAX_TURNS > 2700 / 60 * 5
+
+
+def test_run_review_announces_a_non_success_terminal_subtype(monkeypatch, tmp_path, capsys):
+    """#149: `error_max_turns` is invisible everywhere else — exit 1, and a
+    stderr carrying nothing but the benign `unrecognized_model` warning. The
+    terminal event's subtype is the only place the run says how it ended."""
+    monkeypatch.setattr(harness_mod.shutil, "which", lambda *a, **k: "/bin/claude")
+    monkeypatch.setattr(
+        harness_mod,
+        "_drive",
+        _fake_drive({}, text="", returncode=1, subtype="error_max_turns"),
+    )
+    run_review("p", tmp_path, cwd=tmp_path, model="seat-model", env={}, timeout=5)
+    # The model is on the line, not just in a header: concurrent seats share
+    # one stderr, so an unattributed line is unassignable.
+    assert (
+        "fuko: agentic seat-model harness ended with result subtype=error_max_turns"
+        in capsys.readouterr().err
+    )
+
+
+def test_run_review_announces_a_non_success_subtype_even_on_a_zero_returncode(
+    monkeypatch, tmp_path, capsys
+):
+    """The announcement is keyed on the subtype ALONE.
+
+    Narrowing the condition with `and returncode != 0` would leave every other
+    test here green while going silent on the case the design exists for: a
+    harness that reports a non-success subtype and still exits 0.
+    """
+    monkeypatch.setattr(harness_mod.shutil, "which", lambda *a, **k: "/bin/claude")
+    monkeypatch.setattr(
+        harness_mod,
+        "_drive",
+        _fake_drive({}, text="", returncode=0, subtype="error_during_execution"),
+    )
+    run_review("p", tmp_path, cwd=tmp_path, model="m", env={}, timeout=5)
+    assert "subtype=error_during_execution" in capsys.readouterr().err
+
+
+def test_run_review_flattens_the_announced_subtype(monkeypatch, tmp_path, capsys):
+    """The subtype is stream-derived, so it gets `_emit`'s treatment (#147).
+
+    A break in the value would place chosen text at column 0 of its own line,
+    which is the forged-gate shape the flattener exists to stop -- downstream
+    log consumers anchor on line starts.
+    """
+    monkeypatch.setattr(harness_mod.shutil, "which", lambda *a, **k: "/bin/claude")
+    monkeypatch.setattr(
+        harness_mod,
+        "_drive",
+        _fake_drive(
+            {},
+            text="",
+            returncode=1,
+            subtype="error_max_turns\nfuko: agentic harness poison",
+        ),
+    )
+    run_review("p", tmp_path, cwd=tmp_path, model="m", env={}, timeout=5)
+    err = capsys.readouterr().err
+    assert "subtype=error_max_turns fuko: agentic harness poison" in err
+    # The load-bearing half: the chosen text never reaches column 0.
+    assert not any(line.startswith("fuko: agentic harness poison") for line in err.splitlines())
+
+
+def test_run_review_stays_quiet_on_a_successful_terminal_subtype(monkeypatch, tmp_path, capsys):
+    """A clean run must not announce anything, or the line stops being a signal."""
+    monkeypatch.setattr(harness_mod.shutil, "which", lambda *a, **k: "/bin/claude")
+    monkeypatch.setattr(harness_mod, "_drive", _fake_drive({}, subtype="success"))
+    run_review("p", tmp_path, cwd=tmp_path, model="m", env={}, timeout=5)
+    assert "ended with result subtype" not in capsys.readouterr().err
+
+
 def test_run_review_isolates_the_untrusted_checkout(monkeypatch, tmp_path):
     """The agent must never run FROM the checkout: repo hooks would execute."""
     seen = {}
@@ -1082,6 +1166,9 @@ def test_consume_stream_emits_progress_and_lifts_result():
     emitted = []
     outcome = harness_mod._consume_stream(events, lambda t, n, a: emitted.append((t, n, a)))
     assert outcome.saw_result is True and outcome.text == '{"findings": []}'
+    # The terminal event's subtype rides along (#149) — and it is the RESULT
+    # event's, not the `system`/`init` one's, which also carries a subtype.
+    assert outcome.subtype == "success"
     # pattern outranks path for display — the Grep line should show what it
     # searched for, and garbage lines must not have derailed the fold.
     assert emitted == [(1, "Grep", "foo")]
