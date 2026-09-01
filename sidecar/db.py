@@ -158,12 +158,16 @@ def _ensure_embed_dim(conn, dim: int, *, probed: bool = True) -> None:
     produced, never on the strength of a fallback dimension.
 
     The deferral lasts until the next pool creation, which -- the pool being a
-    process-global singleton -- means the next process start. Nothing retrieves
-    against the stale vectors in the meantime: a query has to be embedded
-    first, so the same outage that deferred the re-embed also stops anything
-    from reading the store it left unmigrated. It is announced rather than
-    silent, because a store that stays unmigrated across restarts is an
-    embedder that never came back.
+    process-global singleton -- means the next process start. While the outage
+    lasts, nothing can read or write the store either: both sides have to embed
+    first. It does NOT hold after that. If the embedder recovers inside the same
+    process the mismatch is still pending and nothing re-checks it, so queries
+    and ingests run against a store this process could not prove the provenance
+    of, until a restart re-embeds it. That residual is #218; withholding the
+    marker is what makes the restart heal it instead of entrenching it, and is
+    the reason the marker is withheld rather than merely the migration skipped.
+    Announced on stderr rather than silent, because a store that stays
+    unmigrated across restarts is an embedder that never came back.
     """
     if not probed:
         print(

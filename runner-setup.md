@@ -190,11 +190,26 @@ docker compose -f docker/runner-compose.yml restart sidecar
 ```
 
 **Changing the embedding model needs no manual migration.** Point
-`FUKO_EMBED_MODEL` (and `FUKO_EMBED_BASE_URL`) at the new one and restart. The
-sidecar probes the model's real dimension at startup and, if it changed,
-re-embeds every learning and rebuilds the vector column and index itself — a
-one-time and potentially slow startup, but automatic. Do not drop the `learnings`
-table by hand; see [`AGENTS.md`](./AGENTS.md).
+`FUKO_EMBED_MODEL` (and `FUKO_EMBED_BASE_URL`) at the new one, **set
+`FUKO_EMBED_QUERY_PREFIX` to match it**, and restart. The sidecar re-embeds
+every learning and rebuilds the vector column and index itself — a one-time and
+potentially slow startup, but automatic. Do not drop the `learnings` table by
+hand; see [`AGENTS.md`](./AGENTS.md).
+
+Two triggers, not one. A **dimension** change is visible in the schema. A
+**model** change at the same dimension is not — bge-m3 and Qwen3-Embedding-0.6B
+are both 1024-wide — so the sidecar records the model that produced the stored
+vectors in `meta.embed_model` and re-embeds when that changes too. An absent
+marker counts as a change, so the first restart after upgrading to a build that
+has this table re-embeds once by design.
+
+The query prefix is the half that is **not** covered by the marker, because it
+changes nothing about the stored vectors and must not trigger a re-embed. It is
+also the half that fails silently: a query embedded with an instruction the
+documents never carried still returns a well-formed vector and a plausible
+ranking. So move it with the model, in the same edit — empty for a symmetric
+model such as bge-m3, the model's own task instruction for an asymmetric one
+such as Qwen3-Embedding.
 
 ## Dedicated host
 
