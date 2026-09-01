@@ -122,17 +122,46 @@ def _existing_embed_dim(conn) -> int | None:
 
 
 def _ensure_embed_dim(conn, dim: int) -> None:
-    """Migrate the ``embedding`` column to ``dim`` if the model's dimension changed.
+    """Re-embed the store when the embedding model, or its dimension, changed.
 
-    pgvector encodes the dimension in ``atttypmod``. When it differs, the stored
-    vectors were produced by a different model and cannot be reused, so every
-    learning is re-embedded with the current model and the column + HNSW index are
-    rebuilt at the new dimension (a one-time, potentially slow startup cost).
+    Two things can invalidate the stored vectors, and only one of them is
+    visible in the schema:
+
+    * The **dimension** changed. pgvector encodes it in ``atttypmod``, so a
+      mismatch is unambiguous and the column and HNSW index have to be rebuilt
+      as well as the vectors.
+    * The **model** changed at the same dimension. bge-m3 and
+      Qwen3-Embedding-0.6B are both 1024-wide, so nothing in the schema tells
+      them apart — but their vectors are not comparable, and a store holding
+      both retrieves badly rather than failing. ``meta.embed_model`` is the
+      only record of which one produced what is stored.
+
+    An absent marker is treated as a model change. Provenance cannot be proven
+    for vectors written before this table existed, and paying one re-embed is
+    cheaper than serving a silently mixed store.
     """
     existing = _existing_embed_dim(conn)
-    if existing is None or existing == dim:
-        return
-    _migrate_embed_dim(conn, dim)
+    stored_model = _stored_embed_model(conn)
+    if existing is not None and (existing != dim or stored_model != settings.embed_model):
+        _migrate_embed_dim(conn, dim)
+    _record_embed_model(conn)
+
+
+def _stored_embed_model(conn) -> str | None:
+    """Return the model recorded as the source of the stored vectors, if any."""
+    row = conn.execute("SELECT value FROM meta WHERE key = 'embed_model'").fetchone()
+    return row[0] if row else None
+
+
+def _record_embed_model(conn) -> None:
+    """Record the configured model as the source of what is now stored."""
+    conn.execute(
+        """
+        INSERT INTO meta (key, value) VALUES ('embed_model', %s)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+        """,
+        (settings.embed_model,),
+    )
 
 
 def _migrate_embed_dim(conn, dim: int) -> None:

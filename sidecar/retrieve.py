@@ -49,7 +49,7 @@ def query(
     q = _build_query(files, pr_body, query_text)
     if not q:
         return []
-    vec = vector_literal(get_embedder().embed_one(q))
+    vec = vector_literal(get_embedder().embed_query(q))
     k = top_k or settings.top_k
     cand_k = settings.candidate_k
     # Excluded in SQL rather than filtered afterwards: a disabled source that

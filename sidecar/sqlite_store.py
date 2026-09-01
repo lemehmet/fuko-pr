@@ -139,13 +139,24 @@ class SqliteVecStore:
 
         row = conn.execute("SELECT value FROM meta WHERE key = 'embed_dim'").fetchone()
         stored = int(row[0]) if row else None
+        # The model matters as much as the dimension: two 1024-wide models
+        # produce incomparable vectors, and a store holding both retrieves
+        # badly instead of failing. Same guard as the Postgres store's
+        # meta.embed_model -- see db.py's _ensure_embed_dim.
+        mrow = conn.execute("SELECT value FROM meta WHERE key = 'embed_model'").fetchone()
+        stored_model = mrow[0] if mrow else None
         migrated = False
         if stored is None:
             conn.execute("INSERT INTO meta(key, value) VALUES ('embed_dim', ?)", (str(dim),))
-        elif stored != dim:
+        elif stored != dim or stored_model != settings.embed_model:
             self._migrate_dim(conn, dim)
             conn.execute("UPDATE meta SET value = ? WHERE key = 'embed_dim'", (str(dim),))
             migrated = True
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES ('embed_model', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (settings.embed_model,),
+        )
         conn.commit()
         return conn, migrated
 
@@ -316,7 +327,7 @@ class SqliteVecStore:
         q = _build_query(files, pr_body, query_text)
         if not q:
             return []
-        vec = _pack(get_embedder().embed_one(q))
+        vec = _pack(get_embedder().embed_query(q))
         k = top_k or settings.top_k
         cand = settings.candidate_k
         digests = bool(settings.digest_retrieval)
