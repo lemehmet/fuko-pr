@@ -9,12 +9,22 @@ from .digest import DIGEST_SOURCE
 from .embed import get_embedder
 
 
+# The PR body is the one unbounded part of a query: descriptions carry pasted
+# logs, stack traces and generated changelogs, and bodies of 12k-20k tokens are
+# what used to 500 the embedder outright. Bound it *before* assembly, not by
+# capping the finished string -- a tail cut would drop the "Changed files:"
+# block, the most discriminative part of the query, and keep the middle of a
+# rambling body instead. Retrieval loses nothing worth having: one CLS-pooled
+# 1024-dim vector over 20k tokens is nearer noise than a query.
+_PR_BODY_CHARS = 6000
+
+
 def _build_query(files: list[str], pr_body: str | None, query_text: str | None) -> str:
     parts: list[str] = []
     if query_text:
         parts.append(query_text.strip())
     if pr_body:
-        parts.append(pr_body.strip())
+        parts.append(pr_body.strip()[:_PR_BODY_CHARS])
     if files:
         parts.append("Changed files:\n" + "\n".join(files))
     return "\n".join(p for p in parts if p).strip()

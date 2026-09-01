@@ -3,6 +3,7 @@
 import httpx
 import pytest
 
+from sidecar.config import settings
 from sidecar.embed import EmbedError, Embedder
 
 
@@ -21,3 +22,31 @@ def test_embed_surfaces_error_body(monkeypatch):
         Embedder().embed(["hi"])
     assert "bad model" in str(exc.value)
     assert "400" in str(exc.value)
+
+
+def test_embed_truncates_oversized_input(monkeypatch):
+    sent: list[list[str]] = []
+
+    def fake_post(self, url, headers=None, json=None):
+        sent.append(json["input"])
+        request = httpx.Request("POST", url)
+        return httpx.Response(200, request=request, json={"data": [{"embedding": [0.0]}]})
+
+    monkeypatch.setattr(httpx.Client, "post", fake_post)
+    monkeypatch.setattr(settings, "embed_max_chars", 100)
+    Embedder().embed(["x" * 5000])
+    assert sent == [["x" * 100]]
+
+
+def test_embed_leaves_a_short_input_alone(monkeypatch):
+    sent: list[list[str]] = []
+
+    def fake_post(self, url, headers=None, json=None):
+        sent.append(json["input"])
+        request = httpx.Request("POST", url)
+        return httpx.Response(200, request=request, json={"data": [{"embedding": [0.0]}]})
+
+    monkeypatch.setattr(httpx.Client, "post", fake_post)
+    monkeypatch.setattr(settings, "embed_max_chars", 100)
+    Embedder().embed(["short enough"])
+    assert sent == [["short enough"]]

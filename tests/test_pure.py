@@ -32,6 +32,16 @@ def test_build_query_combines_parts():
     assert "a.py" in q and "b.py" in q
 
 
+def test_build_query_bounds_the_pr_body_and_keeps_the_files_block():
+    body = "log line\n" * 5000
+    q = _build_query(["a.py"], body, "remember X")
+    assert len(q) < len(body)
+    # The files block is what a tail-truncation of the assembled query would
+    # have eaten; it has to survive a body that overflows the budget.
+    assert q.startswith("remember X")
+    assert q.endswith("Changed files:\na.py")
+
+
 def test_models_defaults():
     it = IngestItem(text="t", source="docs")
     assert it.file_globs == [] and it.source_url is None and it.origin_user is None

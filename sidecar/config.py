@@ -15,6 +15,14 @@ class Settings(BaseSettings):
     embed_api_key: str | None = None
     embed_dim: int = 1024
     embed_batch_size: int = 32
+    # Longest single input sent to the embedder, in characters. Oversized input
+    # is not a slow request, it is a failed review: embo serves bge-m3 with a
+    # 4096-token batch and 500s anything past it, and bge-m3 itself stops at
+    # 8192 tokens, so no server-side setting makes a long enough text work.
+    # 8000 characters keeps ~2 chars/token of headroom under that batch, which
+    # even symbol-dense diffs stay inside, while leaving file digests (6000
+    # chars) and markdown chunks (1500) untouched.
+    embed_max_chars: int = 8000
 
     host: str = "0.0.0.0"
     port: int = 8000
