@@ -480,7 +480,11 @@ class AgenticBackend:
     injection = "prompt"
 
     def __init__(self, config: ReviewConfig | None = None) -> None:
-        """Take the per-tool timeout and the turn cap from ``[review]``.
+        """Take the wall-clock budget and the turn cap from ``[review]``.
+
+        ``tool_timeout`` bounds this driver's WHOLE invocation, not one tool
+        call: the review is a single subprocess under a single timer, so a seat
+        that sleeps between tool calls spends that budget too.
 
         Both are per-INSTANCE, and an instance is built per branch, so
         ``runner._backend_for`` can layer a per-entry override on top without

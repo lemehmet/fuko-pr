@@ -130,8 +130,10 @@ class ModelConfig(BaseModel):
             "calls spends its whole `tool_timeout` -- which bounds the entire "
             "agentic invocation, not one tool call -- long before that cap "
             "binds, so it dies by the timeout's kill instead of at the "
-            "diagnosable turn-cap ending. Sizing the cap to the seat restores "
-            "that ordering (#229). "
+            "diagnosable turn-cap ending. Restoring that ordering takes BOTH "
+            "knobs, because the smaller bound is the one that fires: such a "
+            "seat needs its `tool_timeout` raised to cover its pacing first, "
+            "and then a cap under what that raised budget buys (#229). "
             "Applies to the whole BRANCH this entry starts, backups included "
             "(a failover mid-branch keeps the branch's cap), exactly as "
             "`tool_timeout` does."
@@ -323,7 +325,9 @@ class ReviewConfig(BaseModel):
             "[[review.models]] `max_turns` overrides it for that branch, same "
             "precedence as `tool_timeout`. The harness default is derived from "
             "an observed turn RATE, so it bounds wall-clock only for a seat "
-            "that runs at that rate; a self-paced seat needs its own number "
+            "that runs at that rate; a self-paced seat needs its own number -- "
+            "and, since the smaller bound fires, a `tool_timeout` raised to "
+            "cover its pacing, or the whole-invocation kill lands first "
             "(#229). Read by the agentic backend only."
         ),
     )
