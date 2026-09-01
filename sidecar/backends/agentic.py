@@ -580,11 +580,20 @@ class AgenticBackend:
         if auth == _AUTH_API_KEY:
             key = os.environ.get(preset.key_env or "", "")
             if not key:
+                # Do not offer subscription as the way out of a missing key when
+                # the preset is gateway-only: the guard above refuses that mode,
+                # so the operator would follow the advice and hit a second,
+                # less obvious error. Exporting the key is the ONLY fix there.
+                fallback = (
+                    ""
+                    if preset.requires_base_url
+                    else ", or use auth = 'subscription' to run as the runner's "
+                    "own logged-in Claude session"
+                )
                 raise ValueError(
                     f"model entry '{model.provider}/{model.name}' asks for "
                     f"auth = 'api-key' but {preset.key_env or '<no key env>'} is "
-                    f"not set; export it, or use auth = 'subscription' to run as "
-                    f"the runner's own logged-in Claude session."
+                    f"not set; export it{fallback}."
                 )
             env["ANTHROPIC_API_KEY"] = key
             base_url = model.base_url or preset.base_url

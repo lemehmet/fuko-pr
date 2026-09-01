@@ -283,6 +283,45 @@ def test_requires_base_url_preset_refuses_subscription_mode(monkeypatch):
         )
 
 
+def test_missing_key_message_offers_no_fallback_a_gateway_preset_cannot_take(
+    monkeypatch,
+):
+    """The missing-key error must not advise a mode the endpoint guard refuses.
+
+    For a `requires_base_url` preset, `auth = "subscription"` is not an
+    alternative to exporting the key -- it is the other half of the same
+    refusal. Advertising it sends the operator from one error into a second,
+    less obvious one.
+    """
+    monkeypatch.delenv("ANTHROPIC_COMPAT_KEY", raising=False)
+    with pytest.raises(ValueError) as excinfo:
+        AgenticBackend().build_env(
+            get_preset("anthropic-compatible"),
+            ModelConfig(
+                provider="anthropic-compatible",
+                name="local-model",
+                base_url="https://llm.example.internal/anthropic",
+                auth="api-key",
+            ),
+            knowledge="",
+            tools=["review"],
+        )
+    assert "subscription" not in str(excinfo.value)
+    assert "ANTHROPIC_COMPAT_KEY" in str(excinfo.value)
+
+
+def test_missing_key_message_keeps_the_fallback_for_a_normal_preset(monkeypatch):
+    """A preset with its own endpoint still gets the subscription suggestion."""
+    monkeypatch.delenv("QWEN_TOKEN_PLAN_KEY", raising=False)
+    with pytest.raises(ValueError, match="auth = 'subscription'"):
+        AgenticBackend().build_env(
+            get_preset("qwen-anthropic"),
+            ModelConfig(provider="qwen-anthropic", name="qwen3.8-max", auth="api-key"),
+            knowledge="",
+            tools=["review"],
+        )
+
+
 def test_requires_base_url_preset_refuses_auto_with_no_key(monkeypatch):
     """The realistic path into subscription mode is `auto` and a forgotten key.
 
