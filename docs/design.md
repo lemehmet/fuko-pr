@@ -174,6 +174,7 @@ Initial presets (the ones we actually use):
 | `prodia`       | `openai/`      | (none — per-rental, set on the model entry) | `PRODIA_KEY`  | custom_model_max_tokens 1048576, max_model_tokens 512000, ai_timeout 300 |
 | `openai`       | `openai/`      | (SDK default)                             | `OPENAI_KEY`    | —                                |
 | `anthropic`    | `anthropic/`   | (SDK default)                             | `ANTHROPIC_KEY` | —                                |
+| `anthropic-compatible` | `anthropic/` | (none — the deployment's, set on the model entry) | `ANTHROPIC_COMPAT_KEY` | — (no `small_model`: one model serves every slot) |
 
 ### ReviewBackend driver
 

@@ -400,9 +400,10 @@ auth = "subscription"   # "auto" (default) | "subscription" | "api-key"
   `CLAUDE_CONFIG_DIR`, both of which pass through to the agent untouched).
   A logged-out runner is caught by a preflight (`claude auth status`) and
   fails that branch immediately, before any clone.
-- **`api-key`** — `ANTHROPIC_KEY` (the preset's env var) is passed through as
-  `ANTHROPIC_API_KEY`, with `ANTHROPIC_BASE_URL` for a gateway. A missing key
-  is a config error, raised before the run.
+- **`api-key`** — the preset's env var (`ANTHROPIC_KEY`, or e.g.
+  `ANTHROPIC_COMPAT_KEY`) is passed through as `ANTHROPIC_API_KEY`, with
+  `ANTHROPIC_BASE_URL` for a gateway. A missing key is a config error, raised
+  before the run.
 - **`auto`** (default) — api-key when `ANTHROPIC_KEY` is set, else
   subscription.
 
@@ -420,6 +421,36 @@ An exhausted plan window ("You've hit your session/weekly limit") is
 classified as throttling, so the branch fails over to a backup entry; an
 authentication failure is deliberately **not**, because failing over would
 burn every provider in the pool on what is a one-line runner fix.
+
+### A self-hosted gateway: `anthropic-compatible`
+
+Any endpoint that speaks the Anthropic Messages API can host a seat — a LiteLLM
+or vLLM in front of local weights, a rented box, a provider without a preset of
+its own:
+
+```toml
+[[review.models]]
+provider = "anthropic-compatible"
+name = "Qwen3.8-Flash-Next-GGUF"   # the gateway's slug, verbatim
+base_url = "https://llm.example.internal/anthropic"
+auth = "api-key"                   # key from ANTHROPIC_COMPAT_KEY
+backend = "agentic"
+max_context = 262144
+role = "trial"
+```
+
+`base_url` is **required** on the entry, and omitting it is a config error
+rather than a default: the preset has no endpoint of its own, so the fallback
+would be `api.anthropic.com`. On a fleet whose runner also holds a real
+Anthropic key that is not a failed run but a *successful* one against the wrong
+model, under this entry's label — a substitution the receipt cannot detect,
+because the label and the requested model still agree.
+
+The preset deliberately carries no `small_model` quirk, so the entry's own
+model serves the harness's background haiku-class and subagent calls too. The
+vendor presets name a cheap tier there to keep those calls off an expensive
+model; a single-model deployment has no cheap tier, and naming a second slug
+would make the gateway swap models mid-review.
 
 ## Configuration
 
@@ -440,10 +471,14 @@ Current limits, on purpose:
 - **Runner prerequisite:** the `claude` CLI must be installed on the runner
   and authenticated per the mode above; a missing binary fails that branch
   with a clear message instead of throttling.
-- **`anthropic` preset only.** The headless-Claude harness authenticates via
-  `ANTHROPIC_API_KEY`. Other model families arrive with an OSS agentic harness
-  implementing the same `run_review` signature — the strategy and driver do
-  not change for it.
+- **Anthropic-protocol presets only.** The gate is the preset's
+  `litellm_prefix`, not its name: any preset whose prefix is `anthropic/`
+  qualifies, because the harness is headless Claude Code and it speaks that
+  protocol. That is `anthropic` itself, the vendor gateways
+  (`qwen-anthropic`, `zai-anthropic`) and `anthropic-compatible` — the model
+  behind those endpoints is not Claude. Other model families arrive with an
+  OSS agentic harness implementing the same `run_review` signature — the
+  strategy and driver do not change for it.
 - **Global `backend` scalar.** Mixing agentic and pr-agent entries in one
   fleet needs per-model backend selection + backend-attributed receipts,
   tracked as #99. Until then a repo opts in wholesale (or dogfoods it solo).

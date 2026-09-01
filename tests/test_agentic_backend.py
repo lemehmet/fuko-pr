@@ -212,6 +212,66 @@ def test_zai_anthropic_preset_builds_gateway_env(monkeypatch):
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "glm-5.3"
 
 
+def test_anthropic_compatible_preset_serves_every_slot_from_one_model(monkeypatch):
+    """A self-hosted gateway preset routes all three model slots to the entry.
+
+    `anthropic-compatible` carries no `small_model` quirk, unlike the vendor
+    gateways beside it, and that is the point: a single-model deployment has no
+    cheap tier, so naming a second slug for the background haiku-class calls
+    would make the gateway swap models mid-review. The base URL comes off the
+    ENTRY -- the preset has none.
+    """
+    monkeypatch.setenv("ANTHROPIC_COMPAT_KEY", "sk-local")
+    env = AgenticBackend().build_env(
+        get_preset("anthropic-compatible"),
+        ModelConfig(
+            provider="anthropic-compatible",
+            name="Qwen3.8-Flash-Next-GGUF",
+            base_url="https://llm.example.internal/anthropic",
+            auth="api-key",
+        ),
+        knowledge="",
+        tools=["review"],
+    )
+    assert env["ANTHROPIC_API_KEY"] == "sk-local"
+    assert env["ANTHROPIC_BASE_URL"] == "https://llm.example.internal/anthropic"
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "Qwen3.8-Flash-Next-GGUF"
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "Qwen3.8-Flash-Next-GGUF"
+    assert env["FUKO_AGENTIC_MODEL"] == "Qwen3.8-Flash-Next-GGUF"
+
+
+def test_requires_base_url_preset_without_one_is_a_config_error(monkeypatch):
+    """No endpoint + `requires_base_url` must raise, never fall back.
+
+    The silent alternative is the dangerous one: the harness would send the
+    gateway's key to api.anthropic.com, and a fleet whose runner also holds a
+    real Anthropic key would get a REAL review published under this entry's
+    label. The receipt cannot catch that -- the label and the requested model
+    still agree -- so the refusal has to happen here.
+    """
+    monkeypatch.setenv("ANTHROPIC_COMPAT_KEY", "sk-local")
+    with pytest.raises(ValueError, match="no default endpoint"):
+        AgenticBackend().build_env(
+            get_preset("anthropic-compatible"),
+            ModelConfig(provider="anthropic-compatible", name="local-model", auth="api-key"),
+            knowledge="",
+            tools=["review"],
+        )
+
+
+def test_configured_endpoint_reads_the_entry_when_the_preset_has_none(monkeypatch):
+    """Attribution follows the entry's base_url for a preset with no default."""
+    monkeypatch.setenv("ANTHROPIC_COMPAT_KEY", "sk-local")
+    model = ModelConfig(
+        provider="anthropic-compatible",
+        name="local-model",
+        base_url="https://llm.example.internal/anthropic",
+        auth="api-key",
+    )
+    endpoint = AgenticBackend().configured_endpoint(get_preset("anthropic-compatible"), model)
+    assert endpoint == "https://llm.example.internal/anthropic"
+
+
 def test_build_env_plain_anthropic_leaves_model_routing_alone(monkeypatch):
     """No base_url = real Anthropic: the harness's own `claude-*` defaults are
     correct there, so the routing vars must NOT be injected."""

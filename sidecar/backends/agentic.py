@@ -556,6 +556,20 @@ class AgenticBackend:
                 )
             env["ANTHROPIC_API_KEY"] = key
             base_url = model.base_url or preset.base_url
+            if not base_url and preset.requires_base_url:
+                # The pr-agent backend has always refused this; the agentic one
+                # never had to, because until `anthropic-compatible` no
+                # `requires_base_url` preset carried the `anthropic/` prefix
+                # that gets an entry this far. Silence here is the worst
+                # outcome available: the harness would send the gateway's key
+                # to api.anthropic.com, and a fleet whose runner also holds a
+                # real Anthropic key would get a REAL review under this entry's
+                # label -- a substitution the receipt cannot see, because the
+                # label and the requested model still agree.
+                raise ValueError(
+                    f"provider '{model.provider}' has no default endpoint; set "
+                    f"base_url on its [[review.models]] entry in .fuko.toml"
+                )
             if base_url:
                 env["ANTHROPIC_BASE_URL"] = base_url
                 # A gateway serves its own model family, so the harness's
