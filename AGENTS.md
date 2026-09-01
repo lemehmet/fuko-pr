@@ -6,7 +6,8 @@ Guidance for AI coding agents working on fuko-pr.
 
 fuko-pr is a thin RAG knowledge sidecar for PR-Agent (see `README.md`).
 Python 3.11+, FastAPI + psycopg3/pgvector, embeddings via any OpenAI-compatible
-endpoint (default: local Ollama `bge-m3`).
+endpoint, configured by `FUKO_EMBED_*` in the environment and nowhere else
+(default: `qwen3-embedding-0.6b`). `.fuko.toml` has no say in it — see #216.
 
 ## Rules (mandatory)
 

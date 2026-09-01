@@ -56,8 +56,11 @@ runs in 3–4, and only the driver knows the backend's injection seam and output
 
 ## `.fuko.toml`
 
-Committed to the repo. The single surface an engineer edits. Secrets are never in
-this file — each provider preset declares the env var that holds its key. TOML
+Committed to the repo. The single surface an engineer edits for *review* choices —
+backend, model provider, knowledge store. Secrets are never in this file, and
+neither is the embedding endpoint: that is `FUKO_EMBED_*` in the environment,
+because the sidecar reads it from a process that may hold no repo checkout (#216).
+Each provider preset declares the env var that holds its key. TOML
 (not YAML) so it parses with the stdlib `tomllib` — no new dependency, per the
 stdlib-first rule — and matches PR-Agent's own config convention.
 
@@ -84,11 +87,9 @@ store = "postgres"                # postgres | sqlite-vec
 # key = "my-repo/knowledge.db"
 # creds_env_prefix = "FUKO_S3"    # FUKO_S3_ACCESS_KEY_ID, ...
 
-[embedding]
-provider = "ollama"               # offline default (self-hosted runners)
-model = "bge-m3"
-base_url = "http://localhost:11434/v1"
-# On SaaS runners, prefer a remote embedding provider (see Storage notes).
+# No [embedding] section: the embedding endpoint is env-only (FUKO_EMBED_*),
+# because the sidecar is a separate process that may hold no repo checkout.
+# Writing one here fails the load rather than being ignored (#216).
 ```
 
 Switching the review model is a two-line edit plus a key:

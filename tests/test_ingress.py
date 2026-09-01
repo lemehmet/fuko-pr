@@ -132,7 +132,37 @@ def test_load_config_defaults_when_missing(tmp_path):
     assert isinstance(cfg, FukoConfig)
     assert cfg.review.backend == "pr-agent"
     assert cfg.knowledge.store == "postgres"
-    assert cfg.embedding.provider == "ollama"
+
+
+def test_load_config_rejects_embedding_section(tmp_path):
+    """A leftover [embedding] section must fail the load, not be ignored (#216).
+
+    This is the guard the removal is worth having: without it, deleting the dead
+    schema would leave every existing .fuko.toml quietly embedding with whatever
+    FUKO_EMBED_MODEL happened to say. Delete the raise in load_config and this
+    test fails.
+    """
+    p = tmp_path / ".fuko.toml"
+    p.write_text(
+        "\n".join(["[review]", 'backend = "pr-agent"', "[embedding]", 'model = "bge-m3"']),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError) as e:
+        load_config(p)
+    msg = str(e.value)
+    assert "[embedding]" in msg
+    for var in ("FUKO_EMBED_BASE_URL", "FUKO_EMBED_MODEL", "FUKO_EMBED_QUERY_PREFIX"):
+        assert var in msg
+
+
+def test_load_config_ignores_other_unknown_sections(tmp_path):
+    """Only [embedding] is rejected -- the loader stays tolerant of everything else."""
+    p = tmp_path / ".fuko.toml"
+    p.write_text(
+        "\n".join(["[review]", 'backend = "pr-agent"', "[future]", 'thing = "x"']),
+        encoding="utf-8",
+    )
+    assert load_config(p).review.backend == "pr-agent"
 
 
 def test_load_config_parses_toml(tmp_path):

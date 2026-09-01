@@ -1,10 +1,11 @@
 """Unified per-repo configuration, loaded from ``.fuko.toml``.
 
 This is the single surface an engineer edits to choose a review backend, the
-underlying model/provider, where the knowledge base lives, and the embedding
-provider. Secrets never live here -- each provider preset declares the env var
-that holds its key. Distinct from :mod:`sidecar.config`, which holds runtime
-(sidecar/server) settings read from the ``FUKO_`` environment.
+underlying model/provider, and where the knowledge base lives. Secrets never
+live here -- each provider preset declares the env var that holds its key.
+Distinct from :mod:`sidecar.config`, which holds runtime (sidecar/server)
+settings read from the ``FUKO_`` environment -- including the whole embedding
+endpoint, which is env-only (see ``EMBEDDING_MOVED_TO_ENV`` below).
 """
 
 import tomllib
@@ -343,27 +344,42 @@ class KnowledgeConfig(BaseModel):
     object_store: ObjectStoreConfig | None = None
 
 
-class EmbeddingConfig(BaseModel):
-    """Embedding provider for the knowledge base (OpenAI-compatible endpoint)."""
-
-    provider: str = "ollama"
-    model: str = "bge-m3"
-    base_url: str = "http://localhost:11434/v1"
-    api_key_env: str | None = None
-
-
 class FukoConfig(BaseModel):
     """The full ``.fuko.toml`` document."""
 
     review: ReviewConfig = Field(default_factory=ReviewConfig)
     knowledge: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
-    embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
+
+
+# Rejected loudly rather than ignored (#216). `[embedding]` used to parse into an
+# `EmbeddingConfig` that nothing ever read, so a file setting model = "bge-m3"
+# embedded with whatever `FUKO_EMBED_MODEL` said instead -- silently, and only
+# visibly once retrieval returned nothing. Dropping the schema alone would keep
+# that silence for every file already carrying the section (pydantic ignores
+# unknown keys), so the removal has to fail the load: an unbootable sidecar with
+# a one-line fix beats a knowledge base that answers with nothing for hours.
+EMBEDDING_MOVED_TO_ENV = (
+    "[embedding] is no longer read from .fuko.toml (#216) -- it never was, "
+    "despite being parsed. Delete the section and configure the embedding "
+    "endpoint through the environment instead: FUKO_EMBED_BASE_URL, "
+    "FUKO_EMBED_MODEL, FUKO_EMBED_API_KEY, FUKO_EMBED_QUERY_PREFIX "
+    "(set it to the empty string for a symmetric model such as bge-m3). "
+    "The sidecar runs as its own process and may hold no repo checkout at all, "
+    "so the endpoint has to come from somewhere it can always see."
+)
 
 
 def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> FukoConfig:
-    """Load ``.fuko.toml`` from ``path``, returning defaults if it does not exist."""
+    """Load ``.fuko.toml`` from ``path``, returning defaults if it does not exist.
+
+    Raises:
+        ValueError: if the file still carries an ``[embedding]`` section, which
+            has no effect and would otherwise be ignored in silence (#216).
+    """
     p = Path(path)
     if not p.exists():
         return FukoConfig()
     data = tomllib.loads(p.read_text(encoding="utf-8"))
+    if "embedding" in data:
+        raise ValueError(f"{p}: {EMBEDDING_MOVED_TO_ENV}")
     return FukoConfig.model_validate(data)
