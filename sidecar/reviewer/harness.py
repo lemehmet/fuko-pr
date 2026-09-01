@@ -514,9 +514,15 @@ def run_review(
     # The MODEL rides the line for the same reason it rides `_emit` above:
     # concurrent branches interleave on ONE stderr, so a line without it is
     # unassignable when two seats end badly in the same window.
+    #
+    # The subtype is FLATTENED for the same reason `_emit`'s argument is: it is
+    # a stream-derived string, so a value carrying a line break would put chosen
+    # text at column 0 of its own line and forge a gate downstream log consumers
+    # anchor on (#147). The guard tests the RAW value on purpose -- flattening
+    # first would let a crafted `success\n...` go quiet, which is backwards.
     if outcome.subtype and outcome.subtype != "success":
         print(
-            f"fuko: agentic {model} harness ended with result subtype={outcome.subtype}",
+            f"fuko: agentic {model} harness ended with result subtype={_flatten(outcome.subtype)}",
             file=sys.stderr,
             flush=True,
         )
