@@ -78,7 +78,13 @@ def _invoke(monkeypatch, backend: AgenticBackend, harness_result: HarnessResult,
 
     def fake_run_review(prompt, checkout, *, cwd, model, env, timeout, max_turns):
         captured.update(
-            prompt=prompt, checkout=checkout, cwd=cwd, model=model, env=env, timeout=timeout
+            prompt=prompt,
+            checkout=checkout,
+            cwd=cwd,
+            model=model,
+            env=env,
+            timeout=timeout,
+            max_turns=max_turns,
         )
         return harness_result
 
@@ -356,6 +362,24 @@ def test_invoke_stashes_and_filters(monkeypatch):
     assert stash.withheld_low == 1
     assert stash.over_cap == 0
     assert captured["timeout"] == 222
+
+
+def test_invoke_passes_configured_max_turns_to_the_harness(monkeypatch):
+    """#229: `[review].max_turns` reaches `run_review`, and unset keeps the default.
+
+    This is the config -> backend -> harness-kwarg segment; the kwarg -> argv
+    `--max-turns` link is pinned in test_agentic_reviewer.py. Without both, a
+    seat could carry a turn cap that nothing ever applies.
+    """
+    from sidecar.reviewer.harness import DEFAULT_MAX_TURNS
+
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5, max_turns=80))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert captured["max_turns"] == 80
+
+    default = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, default, HarnessResult(0, REVIEW_JSON))
+    assert captured["max_turns"] == DEFAULT_MAX_TURNS
 
 
 def test_invoke_strips_github_tokens_from_harness_env(monkeypatch):

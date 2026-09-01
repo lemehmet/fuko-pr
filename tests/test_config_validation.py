@@ -53,6 +53,20 @@ def test_positive_max_model_tokens_accepted():
     assert m.max_model_tokens == 256000
 
 
+def test_non_positive_max_turns_is_rejected_at_both_levels():
+    """#229: a turn cap of 0 or less is a config error, as the sibling knobs are."""
+    with pytest.raises(ValidationError):
+        ModelConfig(provider="anthropic", name="m", max_turns=0)
+    with pytest.raises(ValidationError):
+        ReviewConfig(max_turns=-1)
+
+
+def test_max_turns_defaults_to_none_at_both_levels():
+    """Unset at both levels means the harness default, not a number of our own."""
+    assert ModelConfig(provider="anthropic", name="m").max_turns is None
+    assert ReviewConfig().max_turns is None
+
+
 def test_unknown_strategy_is_rejected():
     with pytest.raises(ValidationError):
         ReviewConfig(strategy="round-robin")
@@ -97,6 +111,30 @@ def test_models_roles_parse_from_toml(tmp_path):
     ]
     assert loaded.review.models[0].token_env == "FUKO_GITHUB_TOKEN_DORIAN"
     assert loaded.review.models[1].token_env is None
+
+
+def test_max_turns_parses_from_toml_at_both_levels(tmp_path):
+    """#229: the knob is reachable from a real .fuko.toml, fleet-wide and per seat.
+
+    Hand-built model objects would not prove the TOML surface exists, which is
+    the only surface a downstream fleet has.
+    """
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text(
+        "[review]\n"
+        "max_turns = 250\n"
+        "[[review.models]]\n"
+        'provider = "anthropic"\n'
+        'name = "claude-x"\n'
+        "max_turns = 100\n"
+        "[[review.models]]\n"
+        'provider = "openrouter"\n'
+        'name = "deepseek/deepseek-v4-pro"\n',
+        encoding="utf-8",
+    )
+    loaded = load_config(cfg)
+    assert loaded.review.max_turns == 250
+    assert [m.max_turns for m in loaded.review.models] == [100, None]
 
 
 def test_models_unknown_role_is_rejected():
