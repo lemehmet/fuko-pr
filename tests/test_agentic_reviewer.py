@@ -1031,10 +1031,32 @@ def test_run_review_announces_a_non_success_terminal_subtype(monkeypatch, tmp_pa
         "_drive",
         _fake_drive({}, text="", returncode=1, subtype="error_max_turns"),
     )
-    run_review("p", tmp_path, cwd=tmp_path, model="m", env={}, timeout=5)
+    run_review("p", tmp_path, cwd=tmp_path, model="seat-model", env={}, timeout=5)
+    # The model is on the line, not just in a header: concurrent seats share
+    # one stderr, so an unattributed line is unassignable.
     assert (
-        "fuko: agentic harness ended with result subtype=error_max_turns" in capsys.readouterr().err
+        "fuko: agentic seat-model harness ended with result subtype=error_max_turns"
+        in capsys.readouterr().err
     )
+
+
+def test_run_review_announces_a_non_success_subtype_even_on_a_zero_returncode(
+    monkeypatch, tmp_path, capsys
+):
+    """The announcement is keyed on the subtype ALONE.
+
+    Narrowing the condition with `and returncode != 0` would leave every other
+    test here green while going silent on the case the design exists for: a
+    harness that reports a non-success subtype and still exits 0.
+    """
+    monkeypatch.setattr(harness_mod.shutil, "which", lambda *a, **k: "/bin/claude")
+    monkeypatch.setattr(
+        harness_mod,
+        "_drive",
+        _fake_drive({}, text="", returncode=0, subtype="error_during_execution"),
+    )
+    run_review("p", tmp_path, cwd=tmp_path, model="m", env={}, timeout=5)
+    assert "subtype=error_during_execution" in capsys.readouterr().err
 
 
 def test_run_review_stays_quiet_on_a_successful_terminal_subtype(monkeypatch, tmp_path, capsys):

@@ -511,9 +511,12 @@ def run_review(
     # line is a signal and not noise. It is keyed on the subtype alone, not on
     # the returncode, because the returncode is exactly what cannot tell these
     # endings apart -- `error_max_turns` exits 1 with an empty stderr (#149).
+    # The MODEL rides the line for the same reason it rides `_emit` above:
+    # concurrent branches interleave on ONE stderr, so a line without it is
+    # unassignable when two seats end badly in the same window.
     if outcome.subtype and outcome.subtype != "success":
         print(
-            f"fuko: agentic harness ended with result subtype={outcome.subtype}",
+            f"fuko: agentic {model} harness ended with result subtype={outcome.subtype}",
             file=sys.stderr,
             flush=True,
         )
