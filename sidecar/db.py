@@ -73,19 +73,24 @@ _latch_gen = 0
 _latch_lock = threading.Lock()
 
 
-def _resolve_embed_dim() -> int:
+def _resolve_embed_dim() -> tuple[int, bool]:
     """Determine the vector column dimension from the live embedding model.
 
     Probes the embedder so the schema matches whatever the configured model
     returns; falls back to ``FUKO_EMBED_DIM`` if the probe fails (e.g. the
     embeddings backend is down but we still need the pool for ``/forget``).
+
+    Returns the dimension and whether it came from a live probe. The second
+    value is what keeps that fallback worth having: a fallback dimension is a
+    guess, and :func:`_ensure_embed_dim` must not rebuild a column or claim
+    provenance on the strength of a guess.
     """
     from .embed import get_embedder
 
     try:
-        return get_embedder().probe_dim()
+        return get_embedder().probe_dim(), True
     except Exception:
-        return settings.embed_dim
+        return settings.embed_dim, False
 
 
 def _migration_sql(dim: int) -> list[str]:
@@ -121,7 +126,7 @@ def _existing_embed_dim(conn) -> int | None:
     return row[0]
 
 
-def _ensure_embed_dim(conn, dim: int) -> None:
+def _ensure_embed_dim(conn, dim: int, *, probed: bool = True) -> None:
     """Re-embed the store when the embedding model, or its dimension, changed.
 
     Two things can invalidate the stored vectors, and only one of them is
@@ -136,15 +141,48 @@ def _ensure_embed_dim(conn, dim: int) -> None:
       both retrieves badly rather than failing. ``meta.embed_model`` is the
       only record of which one produced what is stored.
 
-    An absent marker is treated as a model change. Provenance cannot be proven
-    for vectors written before this table existed, and paying one re-embed is
-    cheaper than serving a silently mixed store.
+    An absent marker is treated as a model change *for a store that holds
+    something*. Provenance cannot be proven for vectors written before this
+    table existed, and paying one re-embed is cheaper than serving a silently
+    mixed store; but an empty store has no vectors to be wrong about, so it is
+    marked in place rather than made to drop and rebuild the column and index
+    the migrations created moments earlier.
+
+    ``probed`` says whether ``dim`` came from a live probe. When it did not,
+    this whole pass is deferred: the re-embed needs the embedder that is by
+    definition unreachable, and ``_resolve_embed_dim``'s documented fallback --
+    open the pool anyway so ``/forget`` and the best-effort state paths keep
+    working while the embedder is down -- is only true if a pending re-embed
+    does not drag the embedder back into pool creation. Deferring also keeps
+    the marker honest: it is written for vectors this process actually
+    produced, never on the strength of a fallback dimension.
+
+    The deferral lasts until the next pool creation, which -- the pool being a
+    process-global singleton -- means the next process start. Nothing retrieves
+    against the stale vectors in the meantime: a query has to be embedded
+    first, so the same outage that deferred the re-embed also stops anything
+    from reading the store it left unmigrated. It is announced rather than
+    silent, because a store that stays unmigrated across restarts is an
+    embedder that never came back.
     """
+    if not probed:
+        print(
+            "fuko: embedding probe failed, deferring the re-embed check to the "
+            "next startup (embeddings backend unreachable?)",
+            file=sys.stderr,
+        )
+        return
     existing = _existing_embed_dim(conn)
     stored_model = _stored_embed_model(conn)
-    if existing is not None and (existing != dim or stored_model != settings.embed_model):
+    model_changed = stored_model != settings.embed_model and _has_learnings(conn)
+    if existing is not None and (existing != dim or model_changed):
         _migrate_embed_dim(conn, dim)
     _record_embed_model(conn)
+
+
+def _has_learnings(conn) -> bool:
+    """Return whether ``learnings`` holds any row."""
+    return conn.execute("SELECT 1 FROM learnings LIMIT 1").fetchone() is not None
 
 
 def _stored_embed_model(conn) -> str | None:
@@ -236,11 +274,11 @@ def get_pool(*, timeout: float | None = None) -> ConnectionPool:
             open=True,
         )
         try:
-            dim = _resolve_embed_dim()
+            dim, probed = _resolve_embed_dim()
             with pool.connection(timeout=timeout) as conn:
                 for stmt in _migration_sql(dim):
                     conn.execute(stmt)
-                _ensure_embed_dim(conn, dim)
+                _ensure_embed_dim(conn, dim, probed=probed)
                 register_vector(conn)
         except Exception:
             pool.close()

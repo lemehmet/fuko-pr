@@ -45,7 +45,15 @@ def _build_query(files: list[str], pr_body: str | None, query_text: str | None) 
     # an explicit query_text is the caller's own question, the files block is
     # what makes one PR's query differ from another's, and the body yields
     # first. Assembled order is unchanged; only the allocation is prioritised.
-    limit = max(0, settings.embed_max_chars)
+    #
+    # The query instruction comes out of the same budget, because it is charged
+    # to the same cap: ``Embedder.embed_query`` prepends it and ``_fit`` then
+    # cuts the *combined* string. Spending the full cap here and prefixing
+    # afterwards would push the assembled query past it by exactly the prefix's
+    # length -- and the cut lands on the tail, which is the files block this
+    # whole allocation exists to fund first. Every caller of ``_build_query``
+    # is a query path, so there is no document-side caller to over-charge.
+    limit = max(0, settings.embed_max_chars - len(settings.embed_query_prefix))
     head = (query_text or "").strip()
     body = (pr_body or "").strip()[:_PR_BODY_CHARS]
     files_block = "Changed files:\n" + "\n".join(files) if files else ""

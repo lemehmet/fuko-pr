@@ -286,8 +286,13 @@ def test_same_dimension_model_swap_still_re_embeds(tmp_path, monkeypatch):
     res = ss.SqliteVecStore(cfg).query("o/r", [], query_text="auth flow")
     assert [r["text"] for r in res] == ["auth flow"]
 
-    # Re-embedded in the new space, not merely re-read: the stored vector is
-    # the negated one model-b produces.
+    # Re-embedded in the new space, not merely re-read. The row coming back is
+    # not evidence on its own: the KNN pass applies no distance threshold, so
+    # the only stored row is returned whatever its vector says. The SCORE is
+    # the evidence -- cosine, so an identical vector scores 1.0 and the
+    # antiparallel one a stale row would still hold scores -1.0.
+    assert res[0]["score"] == pytest.approx(1.0)
+
     import sqlite3
 
     data, _ = ss.make_object_store(cfg.object_store).load()
@@ -296,6 +301,36 @@ def test_same_dimension_model_swap_still_re_embeds(tmp_path, monkeypatch):
     conn = sqlite3.connect(path)
     stored = conn.execute("SELECT value FROM meta WHERE key = 'embed_model'").fetchone()
     assert stored[0] == "model-b"
+
+
+def test_a_populated_store_with_no_dimension_marker_is_not_stamped_as_fresh(tmp_path, monkeypatch):
+    # A store file predating the meta bookkeeping has rows but no `embed_dim`
+    # row. Treating that as a fresh store would record the current model as the
+    # provenance of vectors nobody can account for -- a marker that is false
+    # exactly where the guard is needed, and permanently disabling for those
+    # rows. It has to take the migration path instead.
+    import sqlite3
+
+    cfg = _file_cfg(tmp_path)
+    monkeypatch.setattr(ss, "get_embedder", lambda: _FakeEmbedder())
+    monkeypatch.setattr(ss.settings, "embed_model", "model-a")
+    ss.SqliteVecStore(cfg).ingest("o/r", [IngestItem(text="auth flow", source="docs")])
+
+    obj = ss.make_object_store(cfg.object_store)
+    data, token = obj.load()
+    path = tmp_path / "unmarked.db"
+    path.write_bytes(data)
+    conn = sqlite3.connect(path)
+    conn.execute("DELETE FROM meta WHERE key IN ('embed_dim', 'embed_model')")
+    conn.commit()
+    conn.close()
+    obj.save(path.read_bytes(), token)
+
+    monkeypatch.setattr(ss, "get_embedder", lambda: _SameDimOtherModel())
+    monkeypatch.setattr(ss.settings, "embed_model", "model-b")
+    res = ss.SqliteVecStore(cfg).query("o/r", [], query_text="auth flow")
+    assert [r["text"] for r in res] == ["auth flow"]
+    assert res[0]["score"] == pytest.approx(1.0)
 
 
 def test_dim_migration_on_empty_store(tmp_path, monkeypatch):

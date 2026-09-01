@@ -145,13 +145,27 @@ class SqliteVecStore:
         # meta.embed_model -- see db.py's _ensure_embed_dim.
         mrow = conn.execute("SELECT value FROM meta WHERE key = 'embed_model'").fetchone()
         stored_model = mrow[0] if mrow else None
+        # A store with no dimension marker is only *fresh* if it also holds
+        # nothing. One that holds rows without a marker is an old file, and
+        # stamping the current model over vectors of unknown origin would
+        # record a provenance nobody established -- permanently disabling the
+        # guard for exactly the rows it exists to protect. `stored != dim` is
+        # then true by construction (None never equals an int), so such a file
+        # takes the migration path like any other unproven store.
         migrated = False
-        if stored is None:
-            conn.execute("INSERT INTO meta(key, value) VALUES ('embed_dim', ?)", (str(dim),))
-        elif stored != dim or stored_model != settings.embed_model:
+        empty = conn.execute("SELECT 1 FROM learnings LIMIT 1").fetchone() is None
+        fresh = stored is None and empty
+        if not fresh and (stored != dim or stored_model != settings.embed_model):
             self._migrate_dim(conn, dim)
-            conn.execute("UPDATE meta SET value = ? WHERE key = 'embed_dim'", (str(dim),))
             migrated = True
+        # Upserted rather than INSERTed-or-UPDATEd per branch: the marker-less
+        # store above has no row to UPDATE, and the fresh one has none to
+        # INSERT over.
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES ('embed_dim', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (str(dim),),
+        )
         conn.execute(
             "INSERT INTO meta(key, value) VALUES ('embed_model', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",

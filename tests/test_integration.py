@@ -447,5 +447,5 @@ def test_migrations_replay_cleanly_with_a_digest_row_present():
 
     # Exactly what get_pool() does on the next process start.
     with db() as conn:
-        for stmt in _migration_sql(_resolve_embed_dim()):
+        for stmt in _migration_sql(_resolve_embed_dim()[0]):
             conn.execute(stmt)

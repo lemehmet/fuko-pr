@@ -155,7 +155,16 @@ Read from the environment with a `FUKO_` prefix (see [`.env.example`](./.env.exa
 | `FUKO_TOP_K`           | `6`     | learnings injected into a review                                    |
 | `FUKO_INGEST_MAX_NEW`  | `10`    | new learnings embedded per `/ingest-threads` call                   |
 | `FUKO_EMBED_BASE_URL`  | Ollama  | any OpenAI-compatible `/embeddings` endpoint                        |
-| `FUKO_EMBED_MODEL`     | `bge-m3`| embedding model                                                     |
+| `FUKO_EMBED_MODEL`     | `qwen3-embedding-0.6b` | embedding model, and the provenance marker for the stored vectors |
+| `FUKO_EMBED_QUERY_PREFIX` | Qwen3 task instruction | prepended to *queries* only; set to empty for a symmetric model |
+
+`FUKO_EMBED_MODEL` doubles as the provenance marker: changing it re-embeds the
+whole knowledge base on the next startup, because two models at the same
+dimension produce incomparable vectors and nothing else would notice. It must
+name whatever the endpoint actually serves — for the compose stack below that
+is `bge-m3`, so `docker/runner-compose.yml` pins both it and an empty
+`FUKO_EMBED_QUERY_PREFIX`. Only the model is tracked; a query prefix that does
+not match it degrades retrieval silently, which is why the two move together.
 
 `FUKO_INGEST_MAX_NEW` bounds how long a single ingest request can take, not how
 much a sweep can ingest: the sweep re-posts a batch until the sidecar reports
@@ -211,7 +220,15 @@ Worth doing there:
   the job. Confirm `curl <FUKO_URL>/healthz` works from the runner and that the job
   actually ran on the runner you expected (labels matched).
 - **Embedding 400 / model not found** — `ollama pull bge-m3` not run, or
-  `FUKO_EMBED_MODEL`/`FUKO_EMBED_BASE_URL` mismatch.
+  `FUKO_EMBED_MODEL`/`FUKO_EMBED_BASE_URL` mismatch. `FUKO_EMBED_MODEL` defaults
+  to `qwen3-embedding-0.6b`, which this Ollama stack does not serve, so it has
+  to be pinned to `bge-m3` (the compose file does) rather than left unset.
+- **Retrieval got worse after an embedding-model change, with nothing in the
+  logs** — `FUKO_EMBED_QUERY_PREFIX` was not moved with `FUKO_EMBED_MODEL`. Only
+  the model is tracked in `meta`, so a mismatched query prefix embeds the query
+  side into a different shape than the documents and still returns well-formed
+  vectors. Clear it for a symmetric model (bge-m3), set the model's own
+  instruction for an asymmetric one (Qwen3-Embedding).
 - **The sweep reports `chunk N failed: timed out`** — the sidecar took too long to
   embed a batch. It retries on the next hourly sweep by itself; if it persists,
   lower `FUKO_INGEST_MAX_NEW` on the sidecar, or `FUKO_CHUNK_SIZE` on the repo.

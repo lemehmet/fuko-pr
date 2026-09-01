@@ -39,7 +39,14 @@ services:
     environment:
       FUKO_DATABASE_URL: postgresql://fuko:secret@pg:5432/fuko
       FUKO_EMBED_BASE_URL: http://ollama:11434/v1
+      # This stack embeds with bge-m3, which is symmetric: it has to override
+      # both knobs, not just the model. The code default is the asymmetric
+      # Qwen3-Embedding-0.6B, whose query instruction would otherwise be
+      # prepended to every query bge-m3 embeds while documents stayed raw --
+      # 1024 well-formed dimensions and quietly worse retrieval, with no
+      # marker, warning or re-embed to show for it.
       FUKO_EMBED_MODEL: bge-m3
+      FUKO_EMBED_QUERY_PREFIX: ""
       FUKO_AUTH_TOKEN: ${FUKO_AUTH_TOKEN:?set FUKO_AUTH_TOKEN (e.g. openssl rand -hex 16) before starting the stack}
     restart: unless-stopped
     ports:

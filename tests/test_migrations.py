@@ -13,6 +13,33 @@ from sidecar.models import SOURCES
 MIGRATIONS = Path(__file__).resolve().parent.parent / "migrations"
 
 
+def test_every_created_object_is_re_runnable():
+    """Replay-on-every-startup means a bare ``CREATE`` bricks the second boot.
+
+    ``get_pool`` keeps no applied-migrations table, so every file runs again on
+    each pool creation. A ``CREATE TABLE``/``CREATE INDEX`` without
+    ``IF NOT EXISTS`` therefore succeeds exactly once and aborts the whole
+    migration pass from then on -- including the files after it, which is how a
+    single non-idempotent statement takes the sidecar down permanently rather
+    than failing its own migration. Asserted structurally because the failure
+    only shows up on a *second* startup against a store the first one created,
+    which no unit test naturally reproduces.
+    """
+    offenders: list[str] = []
+    for path in sorted(MIGRATIONS.glob("*.sql")):
+        sql = re.sub(r"--[^\n]*", "", path.read_text())
+        for match in re.finditer(
+            r"CREATE\s+(?:UNIQUE\s+)?(?:TABLE|INDEX)\s+(?!IF\s+NOT\s+EXISTS)",
+            sql,
+            re.IGNORECASE,
+        ):
+            offenders.append(f"{path.name}: {sql[match.start() : match.start() + 60].strip()}")
+    assert not offenders, (
+        "migrations replay on every pool creation, so each CREATE must be "
+        f"IF NOT EXISTS: {offenders}"
+    )
+
+
 def _source_checks() -> list[tuple[str, set[str]]]:
     found: list[tuple[str, set[str]]] = []
     for path in sorted(MIGRATIONS.glob("*.sql")):
