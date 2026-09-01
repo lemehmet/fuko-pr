@@ -404,8 +404,13 @@ auth = "subscription"   # "auto" (default) | "subscription" | "api-key"
   `ANTHROPIC_COMPAT_KEY`) is passed through as `ANTHROPIC_API_KEY`, with
   `ANTHROPIC_BASE_URL` for a gateway. A missing key is a config error, raised
   before the run.
-- **`auto`** (default) — api-key when `ANTHROPIC_KEY` is set, else
-  subscription.
+- **`auto`** (default) — api-key when **the preset's own key env var** is set,
+  else subscription. Not `ANTHROPIC_KEY` specifically: `_resolve_auth` reads
+  `preset.key_env`, which is `QWEN_TOKEN_PLAN_KEY` for `qwen-anthropic`,
+  `ANTHROPIC_COMPAT_KEY` for `anthropic-compatible`, and so on. Exporting a
+  real `ANTHROPIC_KEY` does not make `auto` resolve to api-key for a gateway
+  entry — it resolves to subscription, which for a `requires_base_url` preset
+  is refused outright (see below).
 
 **Why the modes are mutually exclusive at the environment level:** Claude
 Code's credential precedence is `ANTHROPIC_AUTH_TOKEN` > `ANTHROPIC_API_KEY` >
@@ -465,15 +470,23 @@ would make the gateway swap models mid-review.
 
 ```toml
 [review]
-backend = "agentic"        # global until fuko-pr #99 lands per-model backend
+backend = "agentic"        # fleet default; any entry may override it
 
 [[review.models]]
 provider = "anthropic"
 name = "claude-sonnet-5"
-auth = "subscription"      # or "api-key" (ANTHROPIC_KEY); see Authentication
+auth = "subscription"      # or "api-key"; see Authentication
+# backend = "pr-agent"     # per-entry override (#99, landed)
 # extra_instructions = """
 # ...per-entry steering, same field the pr-agent backend uses (#98)."""
 ```
+
+Per-entry `backend` landed with #99 — `ReviewModel.backend`, validated at
+config-parse time and resolved per branch by `_backend_for`, with the driver
+recorded on the receipt. `[review].backend` is the fleet default an entry may
+override, which is what lets one fleet mix harnesses (the correlation fix the
+2026-07-31 audit motivated) and what a `role = "trial"` seat on a new driver
+rides in on.
 
 Current limits, on purpose:
 
@@ -488,18 +501,18 @@ Current limits, on purpose:
   behind those endpoints is not Claude. Other model families arrive with an
   OSS agentic harness implementing the same `run_review` signature — the
   strategy and driver do not change for it.
-- **Global `backend` scalar.** Mixing agentic and pr-agent entries in one
-  fleet needs per-model backend selection + backend-attributed receipts,
-  tracked as #99. Until then a repo opts in wholesale (or dogfoods it solo).
 - **One tool.** `review` only; `improve`/`describe` in `[review].tools` are
-  ignored for this backend.
-- **Failover stays inside the configured backend.** Because `backend` is a
-  single global scalar (above), every entry in the pool — actives and backups
-  alike — runs on the same driver, so an agentic branch fails over to another
-  *agentic* entry. A pr-agent backup rescuing an agentic branch is not
-  something this release can express; it becomes possible with #99's per-model
-  backend field, which is also where a per-entry say on mixing harnesses
-  belongs.
+  ignored for this backend — accepted rather than rejected so a shared list
+  keeps working. Worth knowing when sizing a job: the budget arithmetic
+  (`fleet_sequential_cost_minutes`) charges every branch `len(tools)`, so an
+  all-agentic fleet with `tools = ["review", "improve"]` books twice the
+  wall-clock it can actually spend.
+- **Failover stays inside a branch's own driver.** `backend` is per entry
+  (below), but a pool is not mixed: `_compatible_backups` filters a branch's
+  failover targets to entries on the same driver, so an agentic branch fails
+  over only to another *agentic* entry. A pr-agent backup cannot rescue an
+  agentic branch, and a promotion across drivers is refused too (#132). That
+  is a deliberate rule about what a substitute may be, not a missing feature.
 
 ## Cost & pacing
 
