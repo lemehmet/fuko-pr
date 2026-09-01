@@ -25,7 +25,11 @@ def _trim_files_block(block: str, room: int) -> str:
         return ""
     if len(block) <= room:
         return block
-    cut = block[:room].rpartition("\n")[0]
+    # A cut landing exactly on a path boundary already ends on a whole path;
+    # rewinding to the previous newline there would throw away a complete path
+    # for nothing, and with no body to absorb the freed room it can empty the
+    # query outright.
+    cut = block[:room] if block[room] == "\n" else block[:room].rpartition("\n")[0]
     # A block whose first line alone overruns the room leaves nothing whole to
     # keep; half a path matches no glob and embeds as noise, so keep none.
     return cut if "\n" in cut else ""

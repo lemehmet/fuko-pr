@@ -62,9 +62,14 @@ def test_build_query_keeps_the_files_block_within_the_transport_cap():
 
 
 def test_build_query_never_cuts_a_path_in_half(monkeypatch):
+    files = ["aaaaaaaaaaaaaaaaaaaa.py", "bbbbbbbbbbbbbbbbbbbb.py"]
     monkeypatch.setattr(settings, "embed_max_chars", 40)
-    q = _build_query(["aaaaaaaaaaaaaaaaaaaa.py", "bbbbbbbbbbbbbbbbbbbb.py"], None, None)
-    assert q == "Changed files:\naaaaaaaaaaaaaaaaaaaa.py"
+    assert _build_query(files, None, None) == "Changed files:\naaaaaaaaaaaaaaaaaaaa.py"
+    # A budget that ends exactly on a path boundary keeps that path: rewinding
+    # to the previous newline here would drop a whole path for nothing, and
+    # with no body to take the freed room the query would come out empty.
+    monkeypatch.setattr(settings, "embed_max_chars", 38)
+    assert _build_query(files, None, None) == "Changed files:\naaaaaaaaaaaaaaaaaaaa.py"
 
 
 def test_build_query_cuts_the_body_not_the_files_block(monkeypatch):
