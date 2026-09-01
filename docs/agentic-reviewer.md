@@ -467,16 +467,25 @@ the bound that binds first — the turn cap (`DEFAULT_MAX_TURNS`, 250) sits
 above what that budget buys at the observed ~5 turns/min, so it is a backstop
 against a pathological loop rather than a review-length limit.
 
-That ordering assumes a seat running at that rate. A seat that paces itself —
-sleeping between tool calls — takes hours to spend 250 turns, and
-`tool_timeout` cannot save it because it is a per-tool-CALL budget: the turn
-cap becomes the only bound below the CI job's own `timeout-minutes`, and being
-cancelled by the job cap loses *every* branch's output, not just the slow one.
-So the cap is configurable (#229): `[review].max_turns` sets the fleet default
-and a per-entry `[[review.models]].max_turns` overrides it for that branch,
-backups included — the same precedence and branch scope as `tool_timeout`.
-Unset at both levels means `DEFAULT_MAX_TURNS`. Note the turns-to-wall-clock
-mapping is per-seat and unmeasured; set a seat's number from its own observed
-pacing, not from the fleet's. Trial-seat
+That ordering assumes a seat running at that rate. `tool_timeout` bounds the
+whole agentic invocation — this driver runs one process per branch, not one per
+tool — so a seat that paces itself between tool calls reaches that bound long
+before 250 turns: the cap never binds, and the seat ends at the timeout's kill
+(throttle-class, so the branch fails over) rather than at the `error_max_turns`
+ending #213 made diagnosable. So the cap is configurable (#229):
+`[review].max_turns` sets the fleet default and a per-entry
+`[[review.models]].max_turns` overrides it for that branch — the same precedence
+and branch scope as `tool_timeout`, including the backups that answer a failover
+inside that branch's pool. Unset at both levels means `DEFAULT_MAX_TURNS`.
+
+Set the two knobs together, because the smaller bound is the one that fires. A
+paced seat that should finish its review needs its `tool_timeout` raised to cover
+its paced wall-clock first; only then is `max_turns` the bound that binds, and
+its number then has to sit under what that budget buys. Leave `tool_timeout` at a
+value the seat's pacing overruns and the seat still dies at the whole-run kill
+whatever `max_turns` says — which reads like a gateway outage rather than a
+capped review. The turns-to-wall-clock mapping is per-seat and unmeasured, so
+derive a seat's number from its own observed pacing, never the fleet's.
+Trial-seat
 first: run it as a non-gating `role = "trial"` entry and
 score marginal uniqueness receipts-only before letting it gate.

@@ -435,8 +435,10 @@ def test_backend_for_applies_per_entry_max_turns():
 
     Same shape as the tool_timeout override above, and it carries the same
     consequence: the instance is built per BRANCH and the whole pool reviews
-    through it, so a promoted backup runs the RESCUED seat's cap, not its own
-    (#204/#209), and a paced seat's cap cannot bleed into an unpaced sibling.
+    through it, so a backup answering a failover INSIDE the branch runs the
+    rescued seat's cap rather than its own, while an escalation promotion starts
+    a branch of its own and keeps its own (#204/#209) — and a paced seat's cap
+    cannot bleed into an unpaced sibling.
     """
     from sidecar.fukoconfig import ReviewConfig, ReviewModel
     from sidecar.reviewer.harness import DEFAULT_MAX_TURNS

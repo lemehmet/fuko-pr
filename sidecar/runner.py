@@ -1050,8 +1050,13 @@ def _backend_for(entry: ReviewModel, review: ReviewConfig):
     backend INSTANCE (constructed fresh per branch, so no cross-branch bleed):
     the whole branch — same-driver backups included — runs under the entry's
     budget, which is the honest reading of "this seat's tools cost more" and of
-    "this seat paces itself" (#229). A promoted backup therefore reviews under
-    the rescued seat's numbers, not its own, the rule #204/#209 established.
+    "this seat paces itself" (#229). "The whole branch" is the failover pool:
+    a backup that answers INSIDE this branch reviews under the rescued seat's
+    numbers. An escalation promotion is the other case and keeps its own —
+    :func:`plan_escalation` copies the backup to ``role="active"`` and it starts
+    a branch of its own, so it is the seat and there is no rescued lane to
+    inherit from. Same split :func:`_with_branch_ledger` documents for the
+    ledger flags (#204/#209).
     """
     backend = get_backend(entry.backend or review.backend, review)
     if getattr(entry, "tool_timeout", None):
