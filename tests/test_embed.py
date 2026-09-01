@@ -5,6 +5,7 @@ import pytest
 
 from sidecar.config import settings
 from sidecar.embed import EmbedError, Embedder
+from sidecar.retrieve import _build_query
 
 
 def test_embed_empty_returns_empty():
@@ -50,3 +51,22 @@ def test_embed_leaves_a_short_input_alone(monkeypatch):
     monkeypatch.setattr(settings, "embed_max_chars", 100)
     Embedder().embed(["short enough"])
     assert sent == [["short enough"]]
+
+
+def test_assembled_query_reaches_the_endpoint_with_its_files_block(monkeypatch):
+    # The end-to-end property the two caps have to compose into: what _fit
+    # actually posts still carries the "Changed files:" block, so the transport
+    # backstop never fires on a query _build_query assembled.
+    sent: list[list[str]] = []
+
+    def fake_post(self, url, headers=None, json=None):
+        sent.append(json["input"])
+        request = httpx.Request("POST", url)
+        return httpx.Response(200, request=request, json={"data": [{"embedding": [0.0]}]})
+
+    monkeypatch.setattr(httpx.Client, "post", fake_post)
+    files = [f"packages/shared/src/module_{i:04d}/index.ts" for i in range(300)]
+    q = _build_query(files, "log line\n" * 5000, None)
+    Embedder().embed([q])
+    assert sent == [[q]]
+    assert "Changed files:\npackages/shared/src/module_0000/index.ts" in sent[0][0]

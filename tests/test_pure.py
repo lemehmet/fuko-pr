@@ -1,12 +1,17 @@
 """Unit tests for pure logic (no database or embeddings backend required)."""
 
+import pytest
+from pydantic import ValidationError
+
 from sidecar.cli import (
     _collect_files,
     _configured_seat_labels,
     chunk_markdown,
     format_extra_instructions,
 )
+from sidecar.config import Settings, settings
 from sidecar.db import vector_literal
+from sidecar.embed import _fit
 from sidecar.ingest import _parse_dt
 from sidecar.models import ForgetRequest, IngestItem, IngestRequest, QueryRequest
 from sidecar.retrieve import _build_query
@@ -40,6 +45,44 @@ def test_build_query_bounds_the_pr_body_and_keeps_the_files_block():
     # have eaten; it has to survive a body that overflows the budget.
     assert q.startswith("remember X")
     assert q.endswith("Changed files:\na.py")
+
+
+def test_build_query_keeps_the_files_block_within_the_transport_cap():
+    # A body at its own cap plus a long file list used to overrun
+    # embed_max_chars, so the transport cut in embed._fit ate the tail of the
+    # files block -- the part the ordering exists to protect.
+    files = [f"packages/shared/src/module_{i:04d}/index.ts" for i in range(300)]
+    q = _build_query(files, "log line\n" * 5000, None)
+    assert len(q) <= settings.embed_max_chars
+    assert q == _fit(q)
+    assert "Changed files:" in q
+    # Whatever paths survive are whole paths, never a half-written one.
+    kept = q.split("Changed files:\n", 1)[1].split("\n")
+    assert kept and all(f in files for f in kept)
+
+
+def test_build_query_never_cuts_a_path_in_half(monkeypatch):
+    monkeypatch.setattr(settings, "embed_max_chars", 40)
+    q = _build_query(["aaaaaaaaaaaaaaaaaaaa.py", "bbbbbbbbbbbbbbbbbbbb.py"], None, None)
+    assert q == "Changed files:\naaaaaaaaaaaaaaaaaaaa.py"
+
+
+def test_build_query_cuts_the_body_not_the_files_block(monkeypatch):
+    # The body absorbs the whole shortfall; the files block is kept intact and
+    # is dropped only when there is no room for even one whole path.
+    monkeypatch.setattr(settings, "embed_max_chars", 30)
+    q = _build_query(["a.py"], "b" * 500, None)
+    assert q.endswith("Changed files:\na.py")
+    assert len(q) <= 30
+    monkeypatch.setattr(settings, "embed_max_chars", 19)
+    assert _build_query(["a.py"], "b" * 500, None) == "Changed files:\na.py"
+
+
+def test_embed_max_chars_must_be_positive():
+    with pytest.raises(ValidationError):
+        Settings(embed_max_chars=0)
+    with pytest.raises(ValidationError):
+        Settings(embed_max_chars=-1)
 
 
 def test_models_defaults():

@@ -1,5 +1,6 @@
 """Configuration loaded from environment variables (prefix FUKO_) and .env."""
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,8 +22,11 @@ class Settings(BaseSettings):
     # 8192 tokens, so no server-side setting makes a long enough text work.
     # 8000 characters keeps ~2 chars/token of headroom under that batch, which
     # even symbol-dense diffs stay inside, while leaving file digests (6000
-    # chars) and markdown chunks (1500) untouched.
-    embed_max_chars: int = 8000
+    # chars) and markdown chunks (1500) untouched. Constrained rather than left
+    # a bare int because it is used as a slice bound: 0 would embed the empty
+    # string and a negative value would cut from the end, so a misconfigured
+    # deployment would silently embed nothing instead of failing at startup.
+    embed_max_chars: int = Field(default=8000, gt=0)
 
     host: str = "0.0.0.0"
     port: int = 8000
