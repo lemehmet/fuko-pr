@@ -544,6 +544,38 @@ class AgenticBackend:
                 f"harness -- until then run them on the pr-agent backend."
             )
         auth = self._resolve_auth(preset, model)
+        # Both refusals below are ABOVE the auth branch on purpose. The
+        # pr-agent backend has always enforced `requires_base_url`; the agentic
+        # one never had to, because until `anthropic-compatible` no such preset
+        # carried the `anthropic/` prefix that gets an entry this far. Getting
+        # the placement wrong is not a missing error message, it is the exact
+        # substitution this refusal exists to prevent: a preset that reaches its
+        # model ONLY through `base_url` and does not inject one runs against
+        # api.anthropic.com, and if the entry's name happens to be a slug
+        # Anthropic serves, a REAL Claude review is published under this
+        # entry's label. The receipt cannot see it -- the label and the
+        # requested model still agree.
+        if preset.requires_base_url:
+            if not (model.base_url or preset.base_url):
+                raise ValueError(
+                    f"provider '{model.provider}' has no default endpoint; set "
+                    f"base_url on its [[review.models]] entry in .fuko.toml"
+                )
+            if auth != _AUTH_API_KEY:
+                # Subscription mode deliberately injects NO base URL (see
+                # `configured_endpoint`), so for this preset class it can only
+                # ever mean the wrong endpoint. The common way to arrive here is
+                # not `auth = "subscription"` but the `auto` default with the
+                # key never exported -- `_resolve_auth` reads a missing key as
+                # "this is a subscription runner", which is right for every
+                # other preset and wrong for this one.
+                raise ValueError(
+                    f"provider '{model.provider}' reaches its model only through "
+                    f"base_url, which auth = '{auth}' never injects -- the run "
+                    f"would go to Anthropic's own endpoint under the runner's "
+                    f"login. Set auth = 'api-key' and export "
+                    f"{preset.key_env or '<no key env>'}."
+                )
         env: dict[str, str] = {_ENV_MODEL: model.name, _ENV_AUTH: auth}
         if auth == _AUTH_API_KEY:
             key = os.environ.get(preset.key_env or "", "")
@@ -556,20 +588,6 @@ class AgenticBackend:
                 )
             env["ANTHROPIC_API_KEY"] = key
             base_url = model.base_url or preset.base_url
-            if not base_url and preset.requires_base_url:
-                # The pr-agent backend has always refused this; the agentic one
-                # never had to, because until `anthropic-compatible` no
-                # `requires_base_url` preset carried the `anthropic/` prefix
-                # that gets an entry this far. Silence here is the worst
-                # outcome available: the harness would send the gateway's key
-                # to api.anthropic.com, and a fleet whose runner also holds a
-                # real Anthropic key would get a REAL review under this entry's
-                # label -- a substitution the receipt cannot see, because the
-                # label and the requested model still agree.
-                raise ValueError(
-                    f"provider '{model.provider}' has no default endpoint; set "
-                    f"base_url on its [[review.models]] entry in .fuko.toml"
-                )
             if base_url:
                 env["ANTHROPIC_BASE_URL"] = base_url
                 # A gateway serves its own model family, so the harness's

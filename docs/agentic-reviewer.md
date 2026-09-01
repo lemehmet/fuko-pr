@@ -439,12 +439,21 @@ max_context = 262144
 role = "trial"
 ```
 
-`base_url` is **required** on the entry, and omitting it is a config error
-rather than a default: the preset has no endpoint of its own, so the fallback
-would be `api.anthropic.com`. On a fleet whose runner also holds a real
-Anthropic key that is not a failed run but a *successful* one against the wrong
-model, under this entry's label — a substitution the receipt cannot detect,
-because the label and the requested model still agree.
+`base_url` and `auth = "api-key"` are both **required**, and each is a config
+error rather than a default. The preset has no endpoint of its own, so a
+missing `base_url` falls back to `api.anthropic.com`; and subscription mode
+injects no base URL at all, so it reaches that same endpoint even when the
+entry names a gateway. Either way, if the entry's `name` happens to be a slug
+Anthropic serves, that is not a failed run but a *successful* one against the
+wrong model, published under this entry's label — a substitution the receipt
+cannot detect, because the label and the requested model still agree.
+
+The auth rule matters more than it looks, because the realistic way to hit it
+is not writing `auth = "subscription"`. It is leaving `auth` at its `auto`
+default and forgetting to export the key: `auto` reads a missing key as "this
+is a subscription runner", which is correct for every other preset and wrong
+for this one. Both refusals therefore run before the auth branch, not inside
+it.
 
 The preset deliberately carries no `small_model` quirk, so the entry's own
 model serves the harness's background haiku-class and subagent calls too. The

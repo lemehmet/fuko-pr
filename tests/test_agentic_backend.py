@@ -240,20 +240,66 @@ def test_anthropic_compatible_preset_serves_every_slot_from_one_model(monkeypatc
     assert env["FUKO_AGENTIC_MODEL"] == "Qwen3.8-Flash-Next-GGUF"
 
 
-def test_requires_base_url_preset_without_one_is_a_config_error(monkeypatch):
-    """No endpoint + `requires_base_url` must raise, never fall back.
+@pytest.mark.parametrize("auth", ["api-key", "subscription", "auto"])
+def test_requires_base_url_preset_without_one_is_a_config_error(monkeypatch, auth):
+    """No endpoint + `requires_base_url` must raise in EVERY auth mode.
 
-    The silent alternative is the dangerous one: the harness would send the
-    gateway's key to api.anthropic.com, and a fleet whose runner also holds a
-    real Anthropic key would get a REAL review published under this entry's
-    label. The receipt cannot catch that -- the label and the requested model
-    still agree -- so the refusal has to happen here.
+    The silent alternative is the dangerous one: the run reaches
+    api.anthropic.com, and if the entry's name is a slug Anthropic serves, a
+    REAL Claude review is published under this entry's label -- billed to the
+    key or to the runner's login depending on the mode. The receipt cannot
+    catch it, because the label and the requested model still agree.
     """
     monkeypatch.setenv("ANTHROPIC_COMPAT_KEY", "sk-local")
     with pytest.raises(ValueError, match="no default endpoint"):
         AgenticBackend().build_env(
             get_preset("anthropic-compatible"),
-            ModelConfig(provider="anthropic-compatible", name="local-model", auth="api-key"),
+            ModelConfig(provider="anthropic-compatible", name="local-model", auth=auth),
+            knowledge="",
+            tools=["review"],
+        )
+
+
+def test_requires_base_url_preset_refuses_subscription_mode(monkeypatch):
+    """A gateway-only preset cannot run on the runner's own Claude login.
+
+    Subscription mode deliberately injects no base URL, so for this preset
+    class it can only mean the wrong endpoint -- and the entry's `base_url`
+    being present makes that MORE dangerous, not less: the operator believes
+    the traffic goes to their gateway.
+    """
+    monkeypatch.delenv("ANTHROPIC_COMPAT_KEY", raising=False)
+    with pytest.raises(ValueError, match="reaches its model only through"):
+        AgenticBackend().build_env(
+            get_preset("anthropic-compatible"),
+            ModelConfig(
+                provider="anthropic-compatible",
+                name="local-model",
+                base_url="https://llm.example.internal/anthropic",
+                auth="subscription",
+            ),
+            knowledge="",
+            tools=["review"],
+        )
+
+
+def test_requires_base_url_preset_refuses_auto_with_no_key(monkeypatch):
+    """The realistic path into subscription mode is `auto` and a forgotten key.
+
+    `_resolve_auth` reads a missing key as "this is a subscription runner",
+    which is right for every other preset and wrong for this one: the
+    misconfiguration the endpoint guard targets is exactly the one that steers
+    around it. `auto` is the default, so this is the case that actually ships.
+    """
+    monkeypatch.delenv("ANTHROPIC_COMPAT_KEY", raising=False)
+    with pytest.raises(ValueError, match="auth = 'subscription' never injects"):
+        AgenticBackend().build_env(
+            get_preset("anthropic-compatible"),
+            ModelConfig(
+                provider="anthropic-compatible",
+                name="local-model",
+                base_url="https://llm.example.internal/anthropic",
+            ),
             knowledge="",
             tools=["review"],
         )
