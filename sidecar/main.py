@@ -3,7 +3,8 @@
 import sys
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from starlette.concurrency import run_in_threadpool
 
 from . import circuit_breaker
 from . import models
@@ -14,6 +15,7 @@ from . import run_metrics
 from . import web
 from . import threads as threads_mod
 from .config import settings
+from .objectstore import BlobExists, transcript_store, validate_blob_key
 from .stores import current_store
 
 
@@ -296,6 +298,69 @@ def metrics_run_endpoint(req: models.RunMetricRequest) -> dict:
 def metrics_summary_endpoint(repo: str | None = None, days: int = 30) -> dict:
     """Aggregate review runs per provider+model over the last ``days``."""
     return {"summary": run_metrics.summary(repo=repo, days=days)}
+
+
+@app.post("/transcripts/{key}", dependencies=[Depends(_auth)])
+async def transcripts_put_endpoint(key: str, request: Request) -> dict:
+    """Store one runner's session transcript as a write-once blob (#238).
+
+    A DEDICATED endpoint rather than a field on ``/metrics/run``: that path is a
+    small JSON row under a 10-second client timeout, and posting a
+    multi-megabyte NDJSON body over it is the shape that produced the
+    sweep-ingest timeout. This one is sized for the body it carries
+    (:data:`sidecar.reviewer.transcript_client.UPLOAD_TIMEOUT_S`), and it is
+    what lets the runner hold no blob-store credentials of its own.
+
+    The three failure modes are distinguished, because the runner does not
+    retry and a caller reading its logs needs to know which happened:
+
+    * **503** -- no store configured. The unconfigured deployment stays a
+      working deployment; this is the honest way to say transcripts are absent.
+    * **409** -- the key is taken. Blobs are write-once, so this is a
+      re-delivery, never something to resolve by overwriting.
+    * **400** -- the key is not a well-formed blob key.
+    * **413** -- the body is over ``FUKO_TRANSCRIPT_MAX_BYTES``.
+
+    ``async`` with the store call handed to the threadpool, rather than a plain
+    ``def``: the body has to be awaited off the wire, and boto3's ``put_object``
+    is blocking, so running it inline would hold the event loop -- and with it
+    ``/healthz`` and every other request -- for the length of an upload to
+    object storage.
+    """
+    try:
+        validate_blob_key(key)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    store = transcript_store()
+    if store is None:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "no transcript store configured (set FUKO_TRANSCRIPT_STORE_BACKEND)",
+        )
+    # Read against the cap rather than `request.body()`, which is unbounded. A
+    # client may omit Content-Length (or state one it then exceeds), so the
+    # bound is applied as the bytes arrive: it stops the read rather than
+    # reporting on a body already held whole.
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > settings.transcript_max_bytes:
+            # 413 as a literal: starlette renamed the constant
+            # (REQUEST_ENTITY_TOO_LARGE -> CONTENT_TOO_LARGE) and deprecated the
+            # old spelling, so naming either one ties this to a version range
+            # that `fastapi>=0.115` does not pin.
+            raise HTTPException(
+                413,
+                f"transcript exceeds FUKO_TRANSCRIPT_MAX_BYTES ({settings.transcript_max_bytes})",
+            )
+        chunks.append(chunk)
+    body = b"".join(chunks)
+    try:
+        await run_in_threadpool(store.put, key, body)
+    except BlobExists as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
+    return {"stored": True, "key": key, "bytes": len(body)}
 
 
 @app.post("/rh/observe", dependencies=[Depends(_auth)])

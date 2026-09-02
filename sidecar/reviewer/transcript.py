@@ -18,8 +18,12 @@ settled rather than a preference:
   everything that streamed before the cut on disk. That is also why the file is
   line-buffered: a tail lost to a buffer is the case this exists for.
 * **Scrubbed before any byte is written, irreversibly.** Scrubbing lives HERE,
-  inside :class:`Transcript`, rather than in whichever sink is configured, so a
-  later remote sink (#238) plugs in BELOW the scrub and cannot forget it.
+  inside :class:`Transcript`, rather than in whichever sink is configured, so
+  the remote sink (#238) plugs in BELOW the scrub and cannot forget it.
+  Exact-value replacement is per WHOLE line, and the one line that may not be
+  whole -- a trailing newline-less one, which only a kill or a mid-write death
+  can produce -- additionally has a trailing credential FRAGMENT redacted; see
+  :meth:`Scrubber.scrub_partial` and #251.
 * **Never fails a review.** Same direction as
   :func:`sidecar.review_state._best_effort`: a misconfigured destination, a
   disk that fills mid-stream, a sink that raises -- each degrades to one stderr
@@ -49,6 +53,16 @@ from pathlib import Path
 from typing import Protocol
 
 from ..config import settings
+from .transcript_client import ship, upload_target
+
+
+#: Shortest credential PREFIX :meth:`Scrubber.scrub_partial` will redact off the
+#: end of a truncated line. Four characters is short enough that no fragment
+#: worth having survives and long enough that a coincidental tail in
+#: non-JSON output is not silently eaten; see that method for why the real
+#: protection against over-redaction is the shape of a complete event, not this
+#: number.
+MIN_FRAGMENT = 4
 
 
 def _redaction(name: str) -> str:
@@ -108,6 +122,47 @@ class Scrubber:
                 text = text.replace(needle, marker)
         return text
 
+    def scrub_partial(self, text: str) -> str:
+        """Scrub a line that may have been CUT MID-VALUE (#251).
+
+        Exact-substring replacement holds for every whole line and fails for
+        exactly one: when ``tool_timeout`` kills the harness, or the child dies
+        mid-write, iterating the pipe yields a trailing line with no newline. If
+        the cut landed inside a credential the line holds only a PREFIX of the
+        needle, no registered value matches, and the fragment would be written
+        durably. So after the exact pass this also redacts a trailing suffix of
+        the line that is a proper prefix of some needle.
+
+        #237 accepted that residual on four mitigations, two of which -- a
+        ``0600`` file in a ``0700`` directory, and the harness read denylist --
+        are properties of the RUNNER'S COPY. #238 ships the bytes to shared
+        object storage, where neither applies, so the residual widens exactly
+        where it stops being bounded to one owner-only file. That is why the
+        guard lands here rather than at the upload: by upload time the signal is
+        gone, because :meth:`FileTranscriptSink.write` normalizes every line by
+        appending a newline, so the file never ends without one.
+
+        Chosen over #251's option 2 (drop the newline-less line on a timeout)
+        because dropping it would also discard a COMPLETE final event -- the
+        ``result`` event among them -- and "a run cut short keeps everything
+        that streamed before the cut" is a settled decision of #236. This keeps
+        the line and removes only the fragment.
+
+        Over-redaction is bounded to nothing in practice: a complete NDJSON
+        event ends in ``}``, and no credential value begins with ``}``, so on a
+        clean run whose last write merely lacked a newline every candidate
+        suffix fails at its first character. :data:`MIN_FRAGMENT` is the guard
+        for the other case -- a final line that is not JSON at all -- where a
+        one- or two-character coincidence would otherwise eat real text.
+        """
+        text = self.scrub(text)
+        for needle, marker in self.replacements:
+            # A full match was already handled by `scrub`, hence `len(needle) - 1`.
+            for size in range(min(len(text), len(needle) - 1), MIN_FRAGMENT - 1, -1):
+                if text.endswith(needle[:size]):
+                    return text[:-size] + marker
+        return text
+
 
 class TranscriptSink(Protocol):
     """Where scrubbed transcript lines go.
@@ -148,6 +203,10 @@ class FileTranscriptSink:
     def __init__(self, path: Path) -> None:
         """Record the destination path; nothing is created until first write."""
         self.path = path
+        #: Whether anything was ever written, and therefore whether the path
+        #: names a file at all. Survives `close()`, which clears the handle, so
+        #: a wrapping sink can tell "empty run" from "closed" (#238).
+        self.opened = False
         self._handle = None
 
     def write(self, line: str) -> None:
@@ -160,6 +219,7 @@ class FileTranscriptSink:
             # the umask, which can only narrow it further -- never widen it.
             fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, self.FILE_MODE)
             self._handle = open(fd, "a", encoding="utf-8", buffering=1)
+            self.opened = True
         self._handle.write(line if line.endswith("\n") else line + "\n")
 
     def close(self) -> None:
@@ -167,6 +227,58 @@ class FileTranscriptSink:
         if self._handle is not None:
             self._handle.close()
             self._handle = None
+
+
+class ShippingTranscriptSink:
+    """A local sink whose finished file is sent to shared storage on close (#238).
+
+    A DECORATOR rather than a replacement, because the local file is not a
+    staging artifact: #237 ships with a workflow uploading it as a run artifact,
+    and the run-order-sortable directory is what an operator greps on the box.
+    So the write path is unchanged -- line-buffered, write-through, one event of
+    peak memory -- and shipping is one bounded act at the end, on bytes that are
+    already whole and already scrubbed.
+
+    Why close-time rather than per line: a keyed write-once blob is created by
+    one request, and there is no append. Streaming events individually would
+    mean either a request per event or an interface with a commit, and the
+    upload would then straddle the review instead of following it.
+
+    An INERT transcript (a sink failure partway through, see
+    :meth:`Transcript._fail`) is still shipped. What is on disk in that case is
+    a clean PREFIX -- capture goes inert on the first failure rather than
+    skipping a line and resuming -- which is the same shape a kill leaves, and
+    #236 keeps those. A run that wrote nothing at all ships nothing: there is no
+    file, and an empty blob would only make ``#239``'s index row point at one.
+    """
+
+    def __init__(self, inner: FileTranscriptSink, key: str, ship) -> None:
+        """Wrap ``inner``, shipping its file under ``key`` via the ``ship`` callable."""
+        self.path = inner.path
+        self._inner = inner
+        self._key = key
+        self._ship = ship
+
+    def write(self, line: str) -> None:
+        """Append one already-scrubbed line to the local file."""
+        self._inner.write(line)
+
+    def close(self) -> None:
+        """Close the local file, then ship it; any failure propagates to the caller.
+
+        Closing FIRST is load-bearing: the handle is line-buffered, so the last
+        line is only guaranteed on disk once it is closed, and shipping before
+        that would upload a file missing its own tail.
+
+        Exceptions are deliberately not swallowed here. :meth:`Transcript.close`
+        is the one place that decides what a capture failure costs -- one stderr
+        line and an inert transcript, never a fault in the review path -- and a
+        second, quieter handler here would report the same failure twice or not
+        at all.
+        """
+        self._inner.close()
+        if self._inner.opened:
+            self._ship(self._key, self.path)
 
 
 class Transcript:
@@ -199,16 +311,29 @@ class Transcript:
         would put unparseable lines in an NDJSON file for no gain. Everything
         else is written AS RECEIVED, including lines the fold skips -- the
         ``user`` tool-result events, and anything the CLI's schema grows next.
+
+        A line WITHOUT a trailing newline is scrubbed as a possibly-truncated
+        one (:meth:`Scrubber.scrub_partial`, #251). Only the last line a pipe
+        yields can lack its newline, so this costs the extra pass at most once
+        per run and needs nothing plumbed in about how the run ended -- which is
+        also what makes it cover a mid-write death, not just the timeout kill.
         """
         if self._failed or self._closed or not line.strip():
             return
+        scrub = self._scrubber.scrub if line.endswith("\n") else self._scrubber.scrub_partial
         try:
-            self._sink.write(self._scrubber.scrub(line))
+            self._sink.write(scrub(line))
         except Exception as e:
             self._fail(e)
 
     def close(self) -> None:
-        """Close the sink; idempotent, and never raises into the review path."""
+        """Close the sink; idempotent, and never raises into the review path.
+
+        With a shipping sink configured this is where the transcript leaves the
+        runner, so it may do bounded network I/O -- bounded by that sink's own
+        timeout, which is the whole latency #238 allows the review's completion
+        path to take on.
+        """
         if self._closed:
             return
         self._closed = True
@@ -296,6 +421,13 @@ def open_transcript(
     ``secrets`` are ``(name, value)`` pairs; see the module docstring for the
     rule they follow. ``label`` names the seat on the announcement line, which
     is what makes a transcript findable (a workflow uploads it as an artifact).
+
+    The local file is always written; shipping it to shared storage (#238) is
+    added on top when there is somewhere to ship it
+    (:func:`sidecar.reviewer.transcript_client.upload_target`). Gating on a
+    destination rather than on a second opt-in switch is what keeps a
+    capture-only deployment silent: with no store reachable there is no attempt
+    and therefore no failure to report.
     """
     try:
         destination = transcript_dir(directory)
@@ -303,15 +435,19 @@ def open_transcript(
             return None
         key = mint_key()
         path = destination / f"{key}.ndjson"
-        transcript = Transcript(key, FileTranscriptSink(path), Scrubber.for_secrets(secrets))
+        local = FileTranscriptSink(path)
+        target = upload_target()
+        sink: TranscriptSink = ShippingTranscriptSink(local, key, ship) if target else local
+        transcript = Transcript(key, sink, Scrubber.for_secrets(secrets))
     except Exception as e:
         # Misconfiguration must degrade like every other capture failure: the
         # review runs, and the operator gets a line saying why it has no
         # transcript.
         print(f"fuko: transcript capture unavailable: {e}", file=sys.stderr)
         return None
+    where = f"{path} -> {target}" if target else str(path)
     print(
-        f"fuko: agentic {label} transcript {path}" if label else f"fuko: transcript {path}",
+        f"fuko: agentic {label} transcript {where}" if label else f"fuko: transcript {where}",
         file=sys.stderr,
     )
     return transcript

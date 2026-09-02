@@ -48,6 +48,18 @@ services:
       FUKO_EMBED_MODEL: bge-m3
       FUKO_EMBED_QUERY_PREFIX: ""
       FUKO_AUTH_TOKEN: ${FUKO_AUTH_TOKEN:?set FUKO_AUTH_TOKEN (e.g. openssl rand -hex 16) before starting the stack}
+      # Where agentic session transcripts land, once runners are capturing them
+      # with FUKO_TRANSCRIPT_DIR (#238). Unset means no store: the sidecar
+      # starts and reviews run exactly as they do now, with transcripts staying
+      # on whichever runner produced them. Runners need no credentials of their
+      # own -- they POST /transcripts/<key> with the FUKO_TOKEN they already
+      # hold. See docs/deployment.md.
+      #
+      # FUKO_TRANSCRIPT_STORE_BACKEND: file          # "" (off) | file | s3 | r2
+      # FUKO_TRANSCRIPT_STORE_ROOT: /var/lib/fuko/transcript-blobs   # mount a volume, or the blobs die with the container
+      # FUKO_TRANSCRIPT_STORE_BUCKET: fuko-transcripts       # s3/r2 instead of ROOT
+      # FUKO_TRANSCRIPT_STORE_PREFIX: transcripts
+      # FUKO_TRANSCRIPT_STORE_ENDPOINT_URL: https://<accountid>.r2.cloudflarestorage.com
     restart: unless-stopped
     ports:
       - "8000:8000"

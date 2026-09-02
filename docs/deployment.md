@@ -104,6 +104,57 @@ FUKO_EMBED_QUERY_PREFIX=          # empty unless the model is asymmetric
 changing it re-embeds the knowledge base. Embeddings are cheap (pennies), and the
 file is small, so each run's download/query/upload is fast.
 
+## Session transcripts in object storage (optional)
+
+Two object stores, and they are unrelated. The one above holds **the knowledge
+base** as a single mutable sqlite file and only exists in the server-free
+deployment. This one holds **agentic session transcripts** as many write-once
+blobs, and it is newly relevant to a **Postgres** deployment, which has never
+needed object storage before (#238).
+
+It is entirely optional. Leave `FUKO_TRANSCRIPT_STORE_BACKEND` unset and the
+sidecar starts, reviews run and transcripts are simply absent — no error, no
+change from before. Turn it on only if you have also turned capture on with
+`FUKO_TRANSCRIPT_DIR` (see [`agentic-reviewer.md`](agentic-reviewer.md), which
+is where the whole feature and its privacy properties are documented).
+
+Configure it **on the sidecar**, through the environment — the deployed sidecar
+image has no repo checkout and therefore no `.fuko.toml` to read (the same
+reason the embedding endpoint is environment-only, #216):
+
+```bash
+FUKO_TRANSCRIPT_STORE_BACKEND=r2          # "" (off) | file | s3 | r2
+FUKO_TRANSCRIPT_STORE_BUCKET=fuko-transcripts
+FUKO_TRANSCRIPT_STORE_PREFIX=transcripts               # optional
+FUKO_TRANSCRIPT_STORE_ENDPOINT_URL=https://<accountid>.r2.cloudflarestorage.com
+FUKO_TRANSCRIPT_STORE_CREDS_ENV_PREFIX=FUKO_S3         # reads <prefix>_ACCESS_KEY_ID / _SECRET_ACCESS_KEY / _REGION
+```
+
+or, for a single host with no bucket:
+
+```bash
+FUKO_TRANSCRIPT_STORE_BACKEND=file
+FUKO_TRANSCRIPT_STORE_ROOT=/var/lib/fuko/transcript-blobs
+```
+
+**Runners need nothing.** They ship what they captured to the sidecar they
+already talk to, over `POST /transcripts/<key>` with the `FUKO_TOKEN` they
+already hold; no storage credentials are added to any workflow. An IAM user
+limited to `s3:PutObject`/`s3:GetObject` on the bucket is enough, and the bucket
+should be private: a transcript holds the reviewed repository as the agent read
+it.
+
+`FUKO_TRANSCRIPT_MAX_BYTES` (default 256 MiB) bounds what one upload can make
+the sidecar hold; an upload over it is refused whole (`413`) rather than stored
+truncated, since a partial blob under a write-once key could never be corrected.
+It is a memory ceiling, not a retention policy — real sessions are tens of MB.
+
+**Growth is unbounded by design** — every agentic seat, every push, kept
+forever (epic #236). Budget for it, and note that renaming
+`FUKO_TRANSCRIPT_STORE_CREDS_ENV_PREFIX` means adding the new variable names to
+the driver's scrub list, or the credential that stores the transcript can be
+written into one.
+
 ## Ollama in Docker
 
 PR-Agent runs in a container; for a host Ollama, set the review model's

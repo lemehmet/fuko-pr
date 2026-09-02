@@ -5,6 +5,7 @@ import os
 import re
 import sys
 
+import httpx
 import pytest
 
 from sidecar.backends.agentic import _transcript_secrets
@@ -15,6 +16,7 @@ from sidecar.reviewer.harness import run_review
 from sidecar.reviewer.transcript import (
     FileTranscriptSink,
     Scrubber,
+    ShippingTranscriptSink,
     Transcript,
     mint_key,
     open_transcript,
@@ -470,3 +472,168 @@ def test_scrubber_skips_values_it_must_not_replace(value):
     """Only the two that cannot name a credential occurrence: an empty needle
     (matches everywhere) and a non-string (has no spelling on the wire)."""
     assert Scrubber.for_secrets([("X", value)]).replacements == ()
+
+
+# --- a truncated line cannot keep a credential fragment (#251) --------------
+
+
+def test_a_credential_prefix_left_by_a_cut_is_redacted_off_a_truncated_line():
+    """Exact-substring scrubbing matches whole values only, so a line cut
+    mid-credential holds a prefix nothing matches (#251)."""
+    scrubber = Scrubber.for_secrets([("ANTHROPIC_API_KEY", SECRET)])
+    cut = '{"type":"user","content":"token=' + SECRET[:20]
+    assert scrubber.scrub(cut) == cut  # the gap #251 documents
+    assert (
+        scrubber.scrub_partial(cut)
+        == '{"type":"user","content":"token=[REDACTED:ANTHROPIC_API_KEY]'
+    )
+
+
+def test_a_complete_event_is_untouched_by_the_truncated_line_pass():
+    """The real protection against over-redaction: a whole NDJSON event ends in
+    `}`, and no credential begins with one."""
+    scrubber = Scrubber.for_secrets([("ANTHROPIC_API_KEY", SECRET)])
+    line = json.dumps({"type": "result", "ok": True})
+    assert scrubber.scrub_partial(line) == line
+
+
+def test_a_fragment_shorter_than_the_minimum_is_left_alone():
+    scrubber = Scrubber.for_secrets([("ANTHROPIC_API_KEY", SECRET)])
+    short = "trailing text ending in " + SECRET[: transcript_mod.MIN_FRAGMENT - 1]
+    assert scrubber.scrub_partial(short) == short
+
+
+def test_a_line_with_a_newline_never_takes_the_truncated_pass(monkeypatch):
+    """Only the last line a pipe yields can lack its newline, so the extra pass
+    costs at most one line per run."""
+    calls = []
+    transcript, sink = _transcript([("ANTHROPIC_API_KEY", SECRET)])
+    monkeypatch.setattr(
+        transcript_mod.Scrubber, "scrub_partial", lambda self, text: calls.append(text) or text
+    )
+    transcript.write('{"a": 1}\n')
+    assert calls == []
+    transcript.write('{"a": 1')
+    assert calls == ['{"a": 1']
+
+
+def test_a_timeout_kill_that_cuts_a_credential_leaves_no_fragment_on_disk(tmp_path):
+    """#251's acceptance, driven through the real kill path: the harness is
+    killed while a credential is half-written, and nothing of it reaches disk."""
+    events = [{"type": "assistant", "n": index} for index in range(3)]
+    straddle = '{"type":"user","content":"export TOKEN=' + SECRET[:20]
+    assert _feed_script(
+        tmp_path,
+        events,
+        tail=f"sys.stdout.write({straddle!r})\nsys.stdout.flush()\ntime.sleep(60)\n",
+    ).exists()
+    transcript = open_transcript(
+        [("GITHUB_APP_TOKEN", SECRET)], directory=str(tmp_path / "transcripts")
+    )
+    result = run_review(
+        "p",
+        tmp_path,
+        cwd=tmp_path,
+        model="m",
+        env={**os.environ, "PATH": str(tmp_path)},
+        timeout=2,
+        transcript=transcript,
+    )
+    assert result.timed_out is True
+    written = (tmp_path / "transcripts" / f"{transcript.key}.ndjson").read_text()
+    assert SECRET[: transcript_mod.MIN_FRAGMENT] not in written
+    assert "[REDACTED:GITHUB_APP_TOKEN]" in written
+    # Everything that streamed before the cut still survives (#236).
+    assert [json.loads(line) for line in written.splitlines()[:3]] == events
+
+
+def test_a_clean_run_keeps_a_final_event_that_ends_without_a_newline(tmp_path):
+    """The companion #251 asks for: the guard must not cost a complete final
+    event, which is why the line is kept and only the fragment removed."""
+    assert _feed_script(
+        tmp_path,
+        [{"type": "assistant", "n": 0}],
+        tail=f"sys.stdout.write(json.dumps({RESULT_EVENT!r}))\n",
+    ).exists()
+    transcript = open_transcript(
+        [("GITHUB_APP_TOKEN", SECRET)], directory=str(tmp_path / "transcripts")
+    )
+    result = run_review(
+        "p",
+        tmp_path,
+        cwd=tmp_path,
+        model="m",
+        env={**os.environ, "PATH": str(tmp_path)},
+        timeout=30,
+        transcript=transcript,
+    )
+    assert result.timed_out is False
+    written = (tmp_path / "transcripts" / f"{transcript.key}.ndjson").read_text().splitlines()
+    assert json.loads(written[-1]) == RESULT_EVENT
+
+
+# --- shipping the finished file off the runner (#238) ----------------------
+
+
+def test_the_finished_file_is_shipped_on_close_and_only_then(tmp_path):
+    shipped = []
+    inner = FileTranscriptSink(tmp_path / "t.ndjson")
+    sink = ShippingTranscriptSink(
+        inner, "k", lambda key, path: shipped.append((key, path.read_bytes()))
+    )
+    sink.write('{"a": 1}')
+    assert shipped == []
+    sink.close()
+    assert shipped == [("k", b'{"a": 1}\n')]
+
+
+def test_a_run_that_wrote_nothing_ships_nothing(tmp_path):
+    shipped = []
+    inner = FileTranscriptSink(tmp_path / "t.ndjson")
+    ShippingTranscriptSink(inner, "k", lambda key, path: shipped.append(key)).close()
+    assert shipped == []
+    assert not (tmp_path / "t.ndjson").exists()
+
+
+def test_a_transcript_that_went_inert_is_still_shipped(tmp_path):
+    """What is on disk is a clean PREFIX -- capture goes inert on the first
+    failure rather than skipping a line and resuming -- which is the shape #236
+    keeps."""
+    shipped = []
+    inner = FileTranscriptSink(tmp_path / "t.ndjson")
+    sink = ShippingTranscriptSink(inner, "k", lambda key, path: shipped.append(key))
+    transcript = Transcript("k", sink, Scrubber())
+    transcript.write('{"a": 1}')
+    transcript._fail(OSError("no space left on device"))
+    transcript.write('{"a": 2}')
+    transcript.close()
+    assert shipped == ["k"]
+    assert (tmp_path / "t.ndjson").read_text() == '{"a": 1}\n'
+
+
+def test_a_failed_upload_is_one_stderr_line_and_never_a_fault(tmp_path, capsys):
+    def _boom(key, path):
+        raise httpx.ConnectError("sidecar unreachable")
+
+    inner = FileTranscriptSink(tmp_path / "t.ndjson")
+    transcript = Transcript("k", ShippingTranscriptSink(inner, "k", _boom), Scrubber())
+    transcript.write('{"a": 1}')
+    transcript.close()
+    err = capsys.readouterr().err
+    assert err.count("fuko: transcript k capture failed") == 1
+    assert "sidecar unreachable" in err
+
+
+def test_capture_only_deployments_never_wrap_the_sink(tmp_path, monkeypatch):
+    """With nowhere to ship, #237's behaviour is unchanged -- a local file and
+    no attempt, rather than a failure reported once a run."""
+    monkeypatch.setattr(transcript_mod, "upload_target", lambda: "")
+    transcript = open_transcript([], directory=str(tmp_path))
+    assert isinstance(transcript._sink, FileTranscriptSink)
+
+
+def test_a_reachable_destination_wraps_the_sink_and_is_announced(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(transcript_mod, "upload_target", lambda: "sidecar")
+    transcript = open_transcript([], directory=str(tmp_path))
+    assert isinstance(transcript._sink, ShippingTranscriptSink)
+    assert "-> sidecar" in capsys.readouterr().err

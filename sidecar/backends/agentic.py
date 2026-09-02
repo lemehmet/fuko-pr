@@ -403,11 +403,15 @@ _FUKO_SECRET_VARS = (
     "FUKO_AUTH_TOKEN",
     "FUKO_EMBED_API_KEY",
     "FUKO_DATABASE_URL",
-    # The object store's default credential spelling
-    # (``object_store.creds_env_prefix``, :mod:`sidecar.objectstore`). A
-    # deployment that renames the prefix must add its two names here; the
-    # sibling ``_REGION`` variable is deliberately absent, being a region code
-    # rather than a credential.
+    # The object store's default credential spelling, shared by BOTH stores in
+    # :mod:`sidecar.objectstore`: the knowledge file's
+    # ``object_store.creds_env_prefix`` and the transcript blob store's
+    # ``FUKO_TRANSCRIPT_STORE_CREDS_ENV_PREFIX`` (#238), which default to the
+    # same ``FUKO_S3``. A deployment that renames either must add its two names
+    # here -- and for the transcript store that matters twice over, since the
+    # credential would otherwise be written into the very transcript it stores.
+    # The sibling ``_REGION`` variable is deliberately absent, being a region
+    # code rather than a credential.
     "FUKO_S3_ACCESS_KEY_ID",
     "FUKO_S3_SECRET_ACCESS_KEY",
 )
