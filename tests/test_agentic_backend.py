@@ -2160,6 +2160,33 @@ def test_a_renamed_store_credential_prefix_is_stripped_from_the_harness_env(monk
     assert captured["env"]["MYCO_S3_REGION"] == "auto"
 
 
+def test_boto3s_default_credential_chain_never_reaches_the_harness(monkeypatch):
+    """Not `FUKO_`-prefixed, so the namespace strip does not reach them -- and
+    the `FUKO_URL`-unset path puts a bucket credential in this process for the
+    first time. The container-credentials token is a bearer credential like the
+    other three; the sibling `*_URI` variables are endpoints, not secrets."""
+    for name in (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    ):
+        monkeypatch.setenv(name, f"value-of-{name}")
+    monkeypatch.setenv("AWS_CONTAINER_CREDENTIALS_FULL_URI", "http://169.254.170.2/creds")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    for name in (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    ):
+        assert name not in captured["env"]
+    # The endpoint is not a secret and is deliberately left alone -- scrubbing a
+    # URI by value would corrupt a transcript wherever it legitimately appears.
+    assert captured["env"]["AWS_CONTAINER_CREDENTIALS_FULL_URI"] == "http://169.254.170.2/creds"
+
+
 def test_a_local_blob_store_root_is_denied_beside_the_capture_dir(monkeypatch, tmp_path):
     """With the `file` backend on this host the shipped blobs are a SECOND,
     longer-lived copy of the same corpus -- the capture directory can be

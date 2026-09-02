@@ -454,10 +454,17 @@ def _store_credential_vars() -> frozenset[str]:
 #: through a sidecar. They are credentials by name in every deployment and the
 #: agent has no use for any of them, so they are stripped from its environment
 #: and scrubbed by value from the transcript unconditionally.
+#: ``AWS_CONTAINER_AUTHORIZATION_TOKEN`` is the container-credentials leg of the
+#: same chain: with ``AWS_CONTAINER_CREDENTIALS_FULL_URI`` set, botocore sends
+#: it to authenticate the fetch. It is a bearer credential like the other three.
+#: The sibling ``*_URI`` variables are deliberately absent -- an endpoint is not
+#: a secret, and scrubbing a URI by value would corrupt a transcript wherever it
+#: legitimately appears, which is the rule :data:`_FUKO_SECRET_VARS` states.
 _AWS_DEFAULT_CRED_VARS = (
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
 )
 
 #: Credential-bearing ``FUKO_`` variables whose full names this module cannot
