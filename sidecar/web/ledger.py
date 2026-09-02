@@ -130,7 +130,7 @@ def _detail(summary: str, full: str) -> str:
     """Render a collapsible block: an escaped one-line summary over escaped full text."""
     head = summary[:_BODY_PREVIEW_CHARS].replace("\n", " ")
     ellipsis = "…" if len(summary) > _BODY_PREVIEW_CHARS else ""
-    return f"<details><summary>{c.esc(head)}{ellipsis}</summary><pre>{c.esc(full)}</pre></details>"
+    return c.disclosure(f"{c.esc(head)}{ellipsis}", c.esc(full))
 
 
 def _lane_row(lane: review_state.LaneStat, *, linked: bool) -> str:

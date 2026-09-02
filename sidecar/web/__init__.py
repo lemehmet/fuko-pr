@@ -18,10 +18,10 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
 
-from . import kb, ledger, metrics, security
+from . import kb, ledger, metrics, security, transcripts
 from .layout import PAGES, PREFIX
 
-_MODULES = (metrics, kb, ledger, security)
+_MODULES = (metrics, kb, ledger, transcripts, security)
 
 router = APIRouter()
 for _module in _MODULES:

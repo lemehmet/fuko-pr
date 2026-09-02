@@ -175,7 +175,8 @@ _LIST_SQL = (
     " FROM review_runs WHERE transcript_key = t.key"
     " ORDER BY started_at DESC LIMIT 1"
     ") r ON true "
-    "WHERE (%s::text IS NULL OR r.repo = %s::text)"
+    "WHERE (%s::text IS NULL OR t.key = %s::text)"
+    " AND (%s::text IS NULL OR r.repo = %s::text)"
     " AND (%s::integer IS NULL OR r.pr = %s::integer)"
     " AND (%s::text IS NULL OR r.slot = %s::text)"
     " AND (%s::timestamptz IS NULL OR t.created_at >= %s::timestamptz)"
@@ -225,6 +226,7 @@ def list_transcripts(
     until: str | datetime | None = None,
     limit: int = DEFAULT_ROWS,
     offset: int = 0,
+    key: str | None = None,
 ) -> TranscriptPage:
     """List captured transcripts, newest first, with the run that produced each.
 
@@ -254,6 +256,10 @@ def list_transcripts(
             of that day rather than at its end.
         limit: Rows per page, clamped to ``[1, MAX_ROWS]``.
         offset: Rows to skip, clamped at zero.
+        key: Restrict to one transcript key, or ``None`` for every key. Unlike
+            the other filters this one narrows on ``review_transcripts`` itself,
+            so it keeps a transcript that has no run row -- which is what makes
+            :func:`describe` able to answer for #258's un-indexed legs.
 
     Returns:
         The page of rows and the total number of transcripts that matched.
@@ -274,6 +280,8 @@ def list_transcripts(
         rows = conn.execute(
             _LIST_SQL,
             (
+                key,
+                key,
                 repo,
                 repo,
                 pr,
@@ -309,6 +317,28 @@ def list_transcripts(
         for row in rows
     )
     return TranscriptPage(rows=runs, total=int(rows[0][15]) if rows else 0)
+
+
+def describe(key: str) -> TranscriptRun | None:
+    """Return the index row for one transcript, or ``None`` when it is not indexed.
+
+    The chrome of a single-session view: which run produced this transcript,
+    what it spent, and whether the feed reached its end. It is the same query
+    :func:`list_transcripts` runs -- one key predicate rather than a second join
+    -- because a detail view that learned a transcript's identity from a
+    differently-shaped read would be free to disagree with the listing that
+    linked to it.
+
+    ``None`` is not an error and not an empty store: a blob can exist with no
+    row behind it (#258's un-indexed failover legs, or a lost metrics post), and
+    :func:`fetch` deliberately serves it anyway. A caller that renders the
+    session must therefore treat a missing index row as missing CHROME rather
+    than as a missing transcript.
+
+    RAISES on an unreachable store, for :func:`list_transcripts`' reason.
+    """
+    page = list_transcripts(key=key, limit=1)
+    return page.rows[0] if page.rows else None
 
 
 def fetch(key: str) -> bytes | None:

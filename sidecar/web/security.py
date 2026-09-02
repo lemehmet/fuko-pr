@@ -1,9 +1,14 @@
-"""Browser sessions for the mutating UI routes: signed cookie, CSRF, login page.
+"""Browser sessions for the gated UI routes: signed cookie, CSRF, login page.
 
 The read-only pages stay open -- that was the deliberate call for the metrics
 view on a LAN-only deployment. Anything that *writes* needs proof the caller
 holds ``FUKO_AUTH_TOKEN``, and a browser cannot send a bearer header on a plain
 navigation, so the token is exchanged once at a login form for a signed cookie.
+
+One READ takes the same session (#241): the single-session transcript view
+renders a reviewed repository's own file contents rather than figures about a
+review, which is a different exposure from the aggregates the LAN argument
+covers. See ``docs/web-ui.md``.
 
 No new secret and no new configuration: the cookie is an HMAC over the same
 ``FUKO_AUTH_TOKEN`` the API already requires, so a deployment that can serve the
@@ -171,8 +176,9 @@ def render_login(*, next_path: str, error: str = "") -> str:
     else:
         body.append(
             c.notice(
-                "Editing the knowledge base needs the sidecar's FUKO_AUTH_TOKEN. "
-                "Browsing does not.",
+                "Editing the knowledge base, and reading a captured session "
+                "transcript, need the sidecar's FUKO_AUTH_TOKEN. Browsing the "
+                "other pages does not.",
             )
         )
     body.append(

@@ -95,6 +95,18 @@ def badge(text: object, *, css: str = "") -> str:
     return f'<span class="badge {escape(css, quote=True)}">{esc(text)}</span>'
 
 
+def disclosure(summary: str, body: str) -> str:
+    """Render a collapsible block: ``summary`` over ``body`` in a preformatted box.
+
+    Both arguments are already-escaped markup, for :func:`raw_cell`'s reason --
+    a caller folds a mixture of its own chrome and escaped text, and only it
+    knows which is which. Every page that folds long stored text shares this
+    shape, so a change to how a folded block looks is one edit rather than one
+    per page.
+    """
+    return f"<details><summary>{summary}</summary><pre>{body}</pre></details>"
+
+
 def table(headers: list[Column], rows: list[str], empty: str) -> str:
     """Render a table, or a muted notice in its place when there are no rows.
 
