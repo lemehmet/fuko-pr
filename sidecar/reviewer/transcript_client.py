@@ -97,10 +97,21 @@ PHASE_TIMEOUT_S = 30.0
 #: connect, then the absolutely-bounded body, then one more phase. Conservative
 #: because the last term cannot be paid twice -- either the deadline passes and
 #: the run ends inside the write already in flight (no response is ever
-#: awaited), or the body finishes in time and only the response remains. It is
-#: summed once for whichever occurs. Nothing else is attempted -- there is no
-#: retry -- so this is the ceiling, not a typical cost (a real upload finishes
-#: in well under a second on a LAN).
+#: awaited), or the body finishes in time and the response's STATUS LINE is
+#: awaited under the same bound. It is summed once for whichever occurs.
+#:
+#: This holds only because :func:`ship` never reads the response BODY (see the
+#: comment there): a read to completion is bounded per chunk, not in total, and
+#: would make this number a claim rather than a ceiling. Nothing else is
+#: attempted -- there is no retry -- so this is the ceiling, not a typical cost
+#: (a real upload finishes in well under a second on a LAN).
+#:
+#: It is a CLIENT-side bound, and the sidecar's own store call is not inside it:
+#: a pathological bucket endpoint can hold ``put_object`` for longer than this
+#: waits for the response, in which case the runner reports a failure for a
+#: transcript that then lands. Nothing is lost or duplicated -- keys are freshly
+#: minted and there is no retry -- but a reader of that stderr line should not
+#: assume the blob is missing.
 UPLOAD_CEILING_S = CONNECT_TIMEOUT_S + UPLOAD_TIMEOUT_S + PHASE_TIMEOUT_S
 
 
@@ -160,8 +171,18 @@ def ship(key: str, path: Path) -> None:
     if token:
         headers["Authorization"] = "Bearer " + token
     deadline = time.monotonic() + UPLOAD_TIMEOUT_S
+    # STREAMED, and the response body is never read. `httpx.post` reads the
+    # response to completion before returning, and its `read` timeout bounds the
+    # gap between chunks rather than the whole read -- so a peer trickling a
+    # body would keep this blocked past any ceiling this module could state.
+    # Everything the caller needs is the status line and one header, both
+    # available before the body, so not reading it is both the cheaper and the
+    # only bounded option. `raise_for_status` builds its message from the
+    # status and the URL, never from content, so it is safe on an unread
+    # response.
     with path.open("rb") as handle:
-        resp = httpx.post(
+        with httpx.stream(
+            "POST",
             f"{fuko_url.rstrip('/')}/transcripts/{key}",
             content=_deadlined(handle, deadline),
             headers=headers,
@@ -171,17 +192,19 @@ def ship(key: str, path: Path) -> None:
                 write=PHASE_TIMEOUT_S,
                 pool=CONNECT_TIMEOUT_S,
             ),
-        )
-    if resp.status_code == 503 and resp.headers.get(STORE_HEADER) == STORE_UNCONFIGURED:
-        # Storage is not turned on. That is the OFF STATE, not this run's
-        # failure: reporting it would print a line per run, per seat, on every
-        # fleet that turned capture on before storage -- which is the staged
-        # rollout the deployment docs recommend.
-        #
-        # ONLY this shape. A 503 without the header means a store that was
-        # meant to work does not (an unknown backend, a missing bucket, a
-        # bucket backend without boto3), and swallowing that would make the
-        # feature store nothing in silence -- the exact failure the endpoint's
-        # distinguished statuses exist to prevent. It raises like any other.
-        return
-    resp.raise_for_status()
+        ) as resp:
+            status_code, resp_headers = resp.status_code, resp.headers
+            if status_code == 503 and resp_headers.get(STORE_HEADER) == STORE_UNCONFIGURED:
+                # Storage is not turned on. That is the OFF STATE, not this
+                # run's failure: reporting it would print a line per run, per
+                # seat, on every fleet that turned capture on before storage --
+                # which is the staged rollout the deployment docs recommend.
+                #
+                # ONLY this shape. A 503 without the header means a store that
+                # was meant to work does not (an unknown backend, a missing
+                # bucket, a bucket backend without boto3), and swallowing that
+                # would make the feature store nothing in silence -- the exact
+                # failure the endpoint's distinguished statuses exist to
+                # prevent. It raises like any other.
+                return
+            resp.raise_for_status()

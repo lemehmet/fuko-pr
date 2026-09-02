@@ -45,7 +45,7 @@ import httpx
 
 from ..config import settings
 from ..fukoconfig import ModelConfig, ReviewConfig
-from ..objectstore import BlobStoreConfig
+from ..objectstore import BlobStoreConfig, local_blob_root
 from ..logfmt import flatten_for_log as _flatten_for_log
 from ..presets import PRESETS, ProviderPreset
 from ..reviewer.checkout import (
@@ -967,11 +967,18 @@ class AgenticBackend:
         # bigger prize readable through exactly the channel #237 closed.
         # Configured is enough; it does not have to be THIS run's destination.
         deny_dirs = [str(deny_dir)] if deny_dir is not None else []
-        blob_cfg = BlobStoreConfig.from_settings()
-        if blob_cfg.backend == "file" and blob_cfg.root:
-            # `.resolve()` like `transcript_dir()` does: a deny rule written
-            # against a symlinked root is bypassed by naming the real path.
-            deny_dirs.append(str(Path(blob_cfg.root).expanduser().resolve()))
+        try:
+            blob_root = local_blob_root(BlobStoreConfig.from_settings())
+        except ValueError as e:
+            # A root the denylist cannot cover -- refused by the same rule and
+            # for the same reason `transcript_dir()` refuses one, and refused
+            # HERE too so the driver and the store agree: `make_blob_store`
+            # raises on it as well, so shipping fails loudly rather than
+            # writing a corpus no rule reaches.
+            print(f"fuko: transcript store unavailable: {e}", file=sys.stderr)
+            blob_root = None
+        if blob_root is not None:
+            deny_dirs.append(str(blob_root))
         if deny_dirs:
             harness_env[_ENV_TRANSCRIPT_DENY_DIR] = "\n".join(deny_dirs)
         # DELIVERY-side receipt (mepro#2012 r2, both gating seats converged):

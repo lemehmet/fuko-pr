@@ -9,6 +9,7 @@ name SHADOWS the shared guard, which is worse than nothing the day the shared
 one grows another variable.
 """
 
+import contextlib
 from urllib.parse import urlsplit
 
 import httpx
@@ -33,6 +34,26 @@ def store_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "transcript_store_backend", "file")
     monkeypatch.setattr(settings, "transcript_store_root", str(root))
     return root
+
+
+def _as_stream(fake_post):
+    """Adapt a ``(url, content, headers, timeout) -> Response`` fake to the
+    shape `ship` now calls: :func:`httpx.stream`, a context manager over a
+    response whose BODY has not been read.
+
+    `ship` switched off `httpx.post` because that one reads the response to
+    completion, under a `read` timeout that bounds the gap between chunks
+    rather than the whole read -- which made `UPLOAD_CEILING_S` a claim rather
+    than a ceiling. The fakes stay written against the simpler shape; this
+    adapts them, and asserts the method so a regression to a GET is visible.
+    """
+
+    @contextlib.contextmanager
+    def fake_stream(method, url, content=None, headers=None, timeout=None):
+        assert method == "POST"
+        yield fake_post(url, content=content, headers=headers, timeout=timeout)
+
+    return fake_stream
 
 
 def _client(monkeypatch):
@@ -82,6 +103,21 @@ def test_an_unconfigured_store_answers_503_and_the_sidecar_still_serves(monkeypa
     assert client.get("/healthz").json() == {"ok": True}
 
 
+def test_a_filesystem_root_store_is_refused_rather_than_left_undenied(monkeypatch, capsys):
+    """`_permission_settings` rstrips a candidate to the empty string and drops
+    it silently, so a root store would keep a transcript corpus that no read
+    deny rule covers and nothing reports -- the same third spelling of
+    "written but undenied" that `transcript_dir()` refuses."""
+    monkeypatch.setattr(settings, "transcript_store_backend", "file")
+    monkeypatch.setattr(settings, "transcript_store_root", "/")
+    with pytest.raises(ValueError, match="filesystem root"):
+        transcript_store()
+    resp = _client(monkeypatch).post(f"/transcripts/{KEY}", content=BODY)
+    assert resp.status_code == 503
+    assert "filesystem root" in resp.json()["detail"]
+    assert "transcript store unusable" in capsys.readouterr().err
+
+
 def test_a_configured_but_unusable_store_is_a_503_with_the_reason(monkeypatch):
     """The store is built per request, so a bad configuration would otherwise
     reach the caller as a 500 and a traceback on every single upload."""
@@ -103,6 +139,45 @@ def test_a_bucket_backend_without_boto3_is_a_503_naming_the_extra(monkeypatch):
     resp = _client(monkeypatch).post(f"/transcripts/{KEY}", content=BODY)
     assert resp.status_code == 503
     assert "boto3" in resp.json()["detail"]
+
+
+def test_the_unconfigured_503_is_answered_only_after_the_body_is_drained(monkeypatch):
+    """Answering before the body is consumed closes the connection under a
+    client that is still sending, so the runner gets a write error instead of
+    the marked 503 it reads as the off state -- and the "no failure line per
+    run" promise becomes a failure line per run. A few-byte body never shows
+    this; a real transcript would show nothing else."""
+    monkeypatch.setattr(settings, "transcript_store_backend", "")
+    sent = []
+
+    def chunks():
+        for chunk in (b"a" * 16, b"b" * 16, b"c" * 16):
+            sent.append(chunk)
+            yield chunk
+
+    resp = _client(monkeypatch).post(f"/transcripts/{KEY}", content=chunks())
+    assert resp.status_code == 503
+    assert resp.headers.get(objectstore.STORE_HEADER) == objectstore.STORE_UNCONFIGURED
+    # Every chunk was pulled before the refusal was written.
+    assert sent == [b"a" * 16, b"b" * 16, b"c" * 16]
+
+
+def test_a_store_that_fails_when_used_is_a_503_and_a_named_log_line(monkeypatch, capsys):
+    """A store can construct and then fail at request time -- credentials boto3
+    resolves lazily, an unreachable endpoint, a full disk. Unmapped, those
+    escaped the endpoint's own taxonomy as a 500 and a traceback per upload."""
+
+    class _Failing:
+        def put(self, key, data):
+            raise RuntimeError("Unable to locate credentials")
+
+    monkeypatch.setattr(main, "transcript_store", lambda: _Failing())
+    resp = _client(monkeypatch).post(f"/transcripts/{KEY}", content=BODY)
+    assert resp.status_code == 503
+    assert "Unable to locate credentials" in resp.json()["detail"]
+    # Not the off state: the runner must report this one.
+    assert objectstore.STORE_HEADER not in resp.headers
+    assert "transcript store failed" in capsys.readouterr().err
 
 
 def test_the_upload_endpoint_needs_the_sidecar_token(monkeypatch, store_dir):
@@ -161,7 +236,7 @@ def test_the_runner_streams_the_file_to_the_sidecar_under_its_token(tmp_path, mo
 
     monkeypatch.setenv("FUKO_URL", "http://sidecar:8000/")
     monkeypatch.setenv("FUKO_TOKEN", "runner-token")
-    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(httpx, "stream", _as_stream(fake_post))
     path = tmp_path / "t.ndjson"
     path.write_bytes(BODY)
     transcript_client.ship(KEY, path)
@@ -201,7 +276,7 @@ def test_an_upload_that_outlives_its_ceiling_is_abandoned_rather_than_prolonged(
         raise AssertionError("the upload should not have completed")
 
     monkeypatch.setenv("FUKO_URL", "http://sidecar:8000")
-    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(httpx, "stream", _as_stream(fake_post))
     monkeypatch.setattr(transcript_client, "UPLOAD_TIMEOUT_S", -1.0)
     path = tmp_path / "t.ndjson"
     path.write_bytes(BODY)
@@ -220,7 +295,7 @@ def test_the_body_is_chunked_by_size_rather_than_by_event(tmp_path, monkeypatch)
 
     monkeypatch.setenv("FUKO_URL", "http://sidecar:8000")
     monkeypatch.setattr(transcript_client, "UPLOAD_CHUNK_BYTES", 16)
-    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(httpx, "stream", _as_stream(fake_post))
     path = tmp_path / "t.ndjson"
     path.write_bytes(BODY)
     transcript_client.ship(KEY, path)
@@ -246,7 +321,7 @@ def test_every_sidecar_failure_reaches_the_caller_to_be_reported(tmp_path, monke
         return outcome
 
     monkeypatch.setenv("FUKO_URL", "http://sidecar:8000")
-    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(httpx, "stream", _as_stream(fake_post))
     path = tmp_path / "t.ndjson"
     path.write_bytes(BODY)
     with pytest.raises(httpx.HTTPError):
@@ -269,7 +344,7 @@ def test_a_sidecar_with_storage_turned_off_is_the_off_state_not_a_failure(tmp_pa
         )
 
     monkeypatch.setenv("FUKO_URL", "http://sidecar:8000")
-    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(httpx, "stream", _as_stream(fake_post))
     path = tmp_path / "t.ndjson"
     path.write_bytes(BODY)
     transcript_client.ship(KEY, path)  # returns, raises nothing
@@ -289,7 +364,7 @@ def test_a_503_from_a_store_that_was_meant_to_work_still_reports(tmp_path, monke
         )
 
     monkeypatch.setenv("FUKO_URL", "http://sidecar:8000")
-    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(httpx, "stream", _as_stream(fake_post))
     path = tmp_path / "t.ndjson"
     path.write_bytes(BODY)
     with pytest.raises(httpx.HTTPError):
@@ -324,7 +399,7 @@ def test_the_whole_path_end_to_end_from_ship_to_stored_blob(tmp_path, monkeypatc
 
     monkeypatch.setenv("FUKO_URL", "http://sidecar:8000")
     monkeypatch.setenv("FUKO_TOKEN", _TOKEN)
-    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(httpx, "stream", _as_stream(fake_post))
     path = tmp_path / "t.ndjson"
     path.write_bytes(BODY)
     transcript_client.ship(KEY, path)

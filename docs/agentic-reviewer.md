@@ -591,7 +591,9 @@ for trying the path out before there is a bucket.
   has no request lifetime, only per-phase timeouts, so the deadline rides on
   the body stream itself; the phases it cannot interleave with (connect, the
   one write already in flight, the response) are bounded separately, and the
-  true worst case is `transcript_client.UPLOAD_CEILING_S` — 160 seconds. There
+  true worst case is `transcript_client.UPLOAD_CEILING_S` — 160 seconds, which
+  holds because the response body is never read (a read to completion is
+  bounded per chunk, not in total). There
   is no retry: the blob is write-once, so a retry after a client-side timeout
   would race an upload that may already have landed.
 - **A local blob store is denied to the agent.** With the `file` backend on the

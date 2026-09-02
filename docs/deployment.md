@@ -145,7 +145,8 @@ The **`s3`/`r2` backends need `boto3`**, which `docker/Dockerfile.sidecar`
 installs via the `s3` extra (`pip install ".[s3]"`). Running the sidecar from a
 plain `pip install fuko-pr` instead? Install `fuko-pr[s3]` or the bucket
 backends answer `503 transcript store unusable: No module named 'boto3'` on
-every upload. The `file` backend and the unconfigured default need nothing.
+every upload, and log the same line on the sidecar. The `file` backend and the
+unconfigured default need nothing.
 
 **Runners need nothing.** They ship what they captured to the sidecar they
 already talk to, over `POST /transcripts/<key>` with the `FUKO_TOKEN` they

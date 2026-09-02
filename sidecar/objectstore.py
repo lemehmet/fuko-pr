@@ -348,6 +348,37 @@ class BlobStoreConfig:
         )
 
 
+def local_blob_root(cfg: BlobStoreConfig) -> Path | None:
+    """The resolved directory the ``file`` backend writes into, or ``None``.
+
+    ``None`` for every other backend: an ``s3``/``r2`` root is a bucket prefix
+    and names nothing on this host.
+
+    ONE resolver for the two callers that must agree -- :func:`make_blob_store`,
+    which opens the store, and :mod:`sidecar.backends.agentic`, which hands the
+    directory to the reviewer's read denylist. They have to see the same path or
+    the blobs land somewhere no rule covers, which is the whole hazard
+    :func:`sidecar.reviewer.transcript.transcript_dir` was written against.
+
+    Resolved, and the filesystem ROOT is refused, for exactly the reasons stated
+    there: ``_permission_settings`` normalizes a candidate with ``rstrip("/")``,
+    which turns ``"/"`` into the empty string, and an empty candidate is dropped
+    WITHOUT reaching the non-POSIX announcement -- so a root store would keep a
+    transcript corpus that no rule covers and nothing reports. A symlinked root
+    is the same failure in a different spelling: the rule would name the alias
+    while the store writes through to the target.
+    """
+    if cfg.backend != "file" or not cfg.root:
+        return None
+    resolved = Path(cfg.root).expanduser().resolve()
+    if resolved.parent == resolved:
+        raise ValueError(
+            f"transcript store root {resolved} is the filesystem root; "
+            "set FUKO_TRANSCRIPT_STORE_ROOT to a dedicated directory"
+        )
+    return resolved
+
+
 def make_blob_store(cfg: BlobStoreConfig):
     """Build the blob store ``cfg`` selects, or ``None`` when no backend is set.
 
@@ -368,11 +399,18 @@ def make_blob_store(cfg: BlobStoreConfig):
     if cfg.backend == "file":
         if not cfg.root:
             raise ValueError("the 'file' transcript store needs FUKO_TRANSCRIPT_STORE_ROOT")
-        return FileBlobStore(cfg.root)
+        return FileBlobStore(str(local_blob_root(cfg)))
     if cfg.backend not in ("s3", "r2"):
         raise ValueError(f"unknown transcript store backend {cfg.backend!r} (file | s3 | r2)")
     if not cfg.bucket:
         raise ValueError("the s3/r2 transcript store needs FUKO_TRANSCRIPT_STORE_BUCKET")
+    # `boto3` before `botocore`, deliberately: on an install without the `s3`
+    # extra BOTH are missing, and whichever is imported first names the module
+    # in the `ModuleNotFoundError` the endpoint turns into a 503. Naming the
+    # package an operator installs (`fuko-pr[s3]` -> boto3) rather than its
+    # transitive dependency is the difference between a log line that answers
+    # the question and one that starts another.
+    import boto3  # noqa: F401
     from botocore.config import Config
 
     client = _s3_client(

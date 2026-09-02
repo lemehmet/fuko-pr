@@ -332,12 +332,48 @@ async def transcripts_put_endpoint(key: str, request: Request) -> dict:
     * **400** -- the key is not a well-formed blob key.
     * **413** -- the body is over ``FUKO_TRANSCRIPT_MAX_BYTES``.
 
+    A 503 also covers a store that constructs and then fails when USED --
+    credentials boto3 resolves lazily, an unreachable endpoint, a full disk --
+    for the same reason: the caller cannot act on any of them, and an
+    unclassified 500 with a traceback per upload is the shape this taxonomy
+    exists to replace.
+
     ``async`` with the store call handed to the threadpool, rather than a plain
     ``def``: the body has to be awaited off the wire, and boto3's ``put_object``
     is blocking, so running it inline would hold the event loop -- and with it
     ``/healthz`` and every other request -- for the length of an upload to
     object storage.
     """
+    # DRAIN FIRST, classify second. Every refusal below is a response the
+    # runner has to actually receive -- the `unconfigured` 503 above all, since
+    # that is the one it reads as the silent off state. Answering before the
+    # body is consumed means the connection must close after the response, and a
+    # client still sending a multi-megabyte transcript gets a write error
+    # instead: the off state would then print a "capture failed" line per run,
+    # which is precisely what marking it was for. The suite's few-byte bodies
+    # never show this; a real transcript would show nothing else.
+    #
+    # ONE growing buffer, handed to the store as-is. A list of chunks plus a
+    # closing `b"".join` holds the whole body TWICE at the moment it joins, so
+    # the cap would price a peak of double its own value; `bytearray` grows in
+    # place and both stores take a bytes-like body, so peak stays one copy.
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > settings.transcript_max_bytes:
+            # The one refusal that CANNOT wait for the body: it exists to stop
+            # reading. A client mid-send may see a transport error rather than
+            # this status, which is the accepted cost of not buffering past the
+            # cap -- and unlike the off state, this shape is meant to be loud.
+            #
+            # 413 as a literal: starlette renamed the constant
+            # (REQUEST_ENTITY_TOO_LARGE -> CONTENT_TOO_LARGE) and deprecated the
+            # old spelling, so naming either one ties this to a version range
+            # that `fastapi>=0.115` does not pin.
+            raise HTTPException(
+                413,
+                f"transcript exceeds FUKO_TRANSCRIPT_MAX_BYTES ({settings.transcript_max_bytes})",
+            )
+        body += chunk
     try:
         validate_blob_key(key)
     except ValueError as e:
@@ -345,11 +381,11 @@ async def transcripts_put_endpoint(key: str, request: Request) -> dict:
     try:
         store = transcript_store()
     except (ValueError, ImportError) as e:
-        # Configured but unusable -- an unknown backend, a missing bucket, or a
-        # bucket backend without `boto3` (`pip install fuko-pr[s3]`). The store
-        # is built per request, so this would otherwise reach the caller as a
-        # 500 with a traceback on every upload rather than as the deployment
-        # fault it is.
+        # Configured but unusable -- an unknown backend, a missing bucket or a
+        # root that no deny rule can cover, or a bucket backend without `boto3`
+        # (`pip install fuko-pr[s3]`). The store is built per request, so this
+        # would otherwise reach the caller as a 500 with a traceback on every
+        # upload rather than as the deployment fault it is.
         #
         # Logged HERE, on stderr, because `HTTPException` writes nothing: the
         # access log shows a bare 503 and the runner deliberately says nothing
@@ -371,30 +407,22 @@ async def transcripts_put_endpoint(key: str, request: Request) -> dict:
             "no transcript store configured (set FUKO_TRANSCRIPT_STORE_BACKEND)",
             headers={STORE_HEADER: STORE_UNCONFIGURED},
         )
-    # Read against the cap rather than `request.body()`, which is unbounded. A
-    # client may omit Content-Length (or state one it then exceeds), so the
-    # bound is applied as the bytes arrive: it stops the read rather than
-    # reporting on a body already held whole.
-    # ONE growing buffer, handed to the store as-is. A list of chunks plus a
-    # closing `b"".join` holds the whole body TWICE at the moment it joins, so
-    # the cap would price a peak of double its own value; `bytearray` grows in
-    # place and both stores take a bytes-like body, so peak stays one copy.
-    body = bytearray()
-    async for chunk in request.stream():
-        if len(body) + len(chunk) > settings.transcript_max_bytes:
-            # 413 as a literal: starlette renamed the constant
-            # (REQUEST_ENTITY_TOO_LARGE -> CONTENT_TOO_LARGE) and deprecated the
-            # old spelling, so naming either one ties this to a version range
-            # that `fastapi>=0.115` does not pin.
-            raise HTTPException(
-                413,
-                f"transcript exceeds FUKO_TRANSCRIPT_MAX_BYTES ({settings.transcript_max_bytes})",
-            )
-        body += chunk
     try:
         await run_in_threadpool(store.put, key, body)
     except BlobExists as e:
         raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
+    except Exception as e:
+        # A store that CONSTRUCTS and then fails at request time: credentials
+        # never exported (boto3 resolves them lazily, so the client builds
+        # fine and `put_object` raises `NoCredentialsError`), an endpoint URL
+        # that is unreachable or stalls out the retry ladder, a disk that
+        # fills. Same class as the construction failures above -- a deployment
+        # fault the caller cannot act on -- so it gets the same answer instead
+        # of escaping as an unclassified 500 and a traceback per upload.
+        print(f"fuko: transcript store failed: {e}", file=sys.stderr)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, f"transcript store failed: {e}"
+        ) from e
     return {"stored": True, "key": key, "bytes": len(body)}
 
 

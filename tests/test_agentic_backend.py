@@ -2164,6 +2164,23 @@ def test_a_local_blob_store_root_is_denied_beside_the_capture_dir(monkeypatch, t
     assert f"Read(//{str(blobs).lstrip('/')}/**)" in deny
 
 
+def test_a_filesystem_root_blob_store_is_refused_not_silently_undenied(
+    monkeypatch, tmp_path, capsys
+):
+    """`_permission_settings` rstrips `/` to the empty string and drops the
+    candidate without even the non-POSIX announcement, so a root store would be
+    kept where no rule reaches and nothing says so. Refused on BOTH sides --
+    `make_blob_store` raises too -- so the driver and the store agree."""
+    corpus = (tmp_path / "corpus").resolve()
+    monkeypatch.setattr(settings, "transcript_dir", str(corpus), raising=False)
+    monkeypatch.setattr(settings, "transcript_store_backend", "file", raising=False)
+    monkeypatch.setattr(settings, "transcript_store_root", "/", raising=False)
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert captured["env"]["FUKO_TRANSCRIPT_DENY_DIR"] == str(corpus)
+    assert "filesystem root" in capsys.readouterr().err
+
+
 def test_a_bucket_blob_store_adds_no_deny_dir(monkeypatch, tmp_path):
     """Only a LOCAL store puts bytes on this host; an s3/r2 root is a bucket
     prefix and would render a rule matching nothing."""
