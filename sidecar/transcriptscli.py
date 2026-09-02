@@ -289,6 +289,17 @@ def _list(args) -> None:
         sys.exit("fuko transcripts: the listing response carried no 'transcripts' field")
     if not isinstance(resp["transcripts"], list):
         sys.exit("fuko transcripts: the listing response's 'transcripts' field is not a list")
+    # `count` gets the same treatment, and that completes the contract:
+    # `TranscriptListResponse` declares these two fields and no others, so with
+    # both checked there is no part of this body left to arrive malformed. A
+    # missing one used to become `0` through `.get(..., 0)` and print as
+    # "0 shown · 0 total" -- the healthy-empty answer again, from a response
+    # that never carried a total. `bool` is excluded for the reason it is on the
+    # tool-call counts: `isinstance(True, int)` holds, and `True` as a total is
+    # a shape error rather than one transcript.
+    total = resp.get("count")
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+        sys.exit("fuko transcripts: the listing response's 'count' is not a non-negative integer")
     # The same closed-pipe contract `get` has: `list | head` and
     # `list --json | jq -e ... | head` are documented uses, and a reader that
     # walked away is not a fault to report.
@@ -301,7 +312,7 @@ def _list(args) -> None:
             sys.stdout.flush()
             return
         items = resp["transcripts"]
-        print(_color(f"{len(items)} shown · {resp.get('count', 0)} total\n", _BOLD))
+        print(_color(f"{len(items)} shown · {total} total\n", _BOLD))
         for item in items:
             _print_run(item, args.full)
         sys.stdout.flush()
@@ -327,13 +338,20 @@ def _get(args) -> None:
                 handle = open(args.out, "wb")
             except OSError as e:
                 sys.exit(f"fuko transcripts: cannot write {args.out} ({e})")
+            # The failure is RECORDED here and acted on after the `with` block,
+            # never inside it. Cleanup has to run with the file already closed:
+            # POSIX unlinks an open file happily, but Windows refuses, and
+            # `_partial_gone` swallows that refusal -- so cleaning up from
+            # inside would leave behind exactly the truncated session it exists
+            # to remove, on the one platform where it is hardest to notice.
+            failure = None
             try:
                 with handle:
                     # Copied in chunks rather than read whole: a long session is
                     # megabytes, and this command exists to make one greppable
                     # on a box that may have far less memory than the sidecar.
                     #
-                    # The read and the write are caught SEPARATELY even though
+                    # The read and the write are recorded SEPARATELY even though
                     # both raise `OSError`: this command writes multi-megabyte
                     # files onto boxes chosen for having less memory than the
                     # sidecar, so ENOSPC/EDQUOT is a plausible failure here, and
@@ -344,22 +362,27 @@ def _get(args) -> None:
                         try:
                             chunk = resp.read(1 << 20)
                         except _BODY_FAILURES as e:
-                            _partial_gone(args.out)
-                            _body_failed(base, e)
+                            failure = ("transfer", e)
+                            break
                         if not chunk:
                             break
                         try:
                             handle.write(chunk)
                         except OSError as e:
-                            _partial_gone(args.out)
-                            sys.exit(f"fuko transcripts: cannot write {args.out} ({e})")
+                            failure = ("write", e)
+                            break
                         written += len(chunk)
             except OSError as e:
                 # The buffered flush `with handle:` performs on the way out --
                 # a local write like any other, and the one place ENOSPC most
                 # often actually surfaces.
+                failure = ("write", e)
+            if failure is not None:
                 _partial_gone(args.out)
-                sys.exit(f"fuko transcripts: cannot write {args.out} ({e})")
+                kind, error = failure
+                if kind == "transfer":
+                    _body_failed(base, error)
+                sys.exit(f"fuko transcripts: cannot write {args.out} ({error})")
             print(f"wrote {written} bytes to {args.out}", file=sys.stderr)
             return
         out = sys.stdout.buffer

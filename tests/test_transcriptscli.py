@@ -123,7 +123,9 @@ def test_list_calls_the_endpoint_and_prints_the_figures(monkeypatch, capsys):
 
 
 def test_list_caps_the_tool_list_unless_full(monkeypatch, capsys):
-    monkeypatch.setattr(transcriptscli, "_call", lambda p, params=None: {"transcripts": [_ROW]})
+    monkeypatch.setattr(
+        transcriptscli, "_call", lambda p, params=None: {"transcripts": [_ROW], "count": 1}
+    )
     transcriptscli._list(_ns())
     capped = capsys.readouterr().out
     assert "+1 more" in capped and "Glob=1" not in capped
@@ -137,14 +139,18 @@ def test_list_caps_the_tool_list_unless_full(monkeypatch, capsys):
 
 def test_list_flags_an_incomplete_transcript(monkeypatch, capsys):
     row = {**_ROW, "complete": False}
-    monkeypatch.setattr(transcriptscli, "_call", lambda p, params=None: {"transcripts": [row]})
+    monkeypatch.setattr(
+        transcriptscli, "_call", lambda p, params=None: {"transcripts": [row], "count": 1}
+    )
     transcriptscli._list(_ns())
     assert "INCOMPLETE" in capsys.readouterr().out
 
 
 def test_list_names_a_transcript_no_run_row_claims(monkeypatch, capsys):
     row = {**_ROW, "repo": None, "pr": None, "seat": None, "model": None, "started_at": None}
-    monkeypatch.setattr(transcriptscli, "_call", lambda p, params=None: {"transcripts": [row]})
+    monkeypatch.setattr(
+        transcriptscli, "_call", lambda p, params=None: {"transcripts": [row], "count": 1}
+    )
     transcriptscli._list(_ns())
     out = capsys.readouterr().out
     assert "(no run row)" in out and "None" not in out
@@ -183,7 +189,9 @@ def test_list_json_prints_the_body_unchanged(monkeypatch, capsys):
 
 def test_a_run_with_no_tool_calls_says_so_rather_than_showing_nothing(monkeypatch, capsys):
     row = {**_ROW, "tool_calls": {}}
-    monkeypatch.setattr(transcriptscli, "_call", lambda p, params=None: {"transcripts": [row]})
+    monkeypatch.setattr(
+        transcriptscli, "_call", lambda p, params=None: {"transcripts": [row], "count": 1}
+    )
     transcriptscli._list(_ns())
     assert "no tool calls" in capsys.readouterr().out
 
@@ -498,6 +506,36 @@ def test_an_error_body_that_cannot_be_read_still_names_the_status(monkeypatch):
 
 
 # --- the success body's shape.
+
+
+@pytest.mark.parametrize("count", [None, "7", 1.5, True, -1, {"n": 1}])
+def test_a_count_that_is_not_a_non_negative_integer_is_fatal(monkeypatch, count):
+    # With `transcripts` and `count` both checked the body contract is complete:
+    # TranscriptListResponse declares these two fields and no others. `None` is
+    # the case that mattered -- `.get("count", 0)` printed it as a real total of
+    # zero, which is the healthy-empty answer from a body that carried none.
+    payload = {"transcripts": []}
+    if count is not None:
+        payload["count"] = count
+    body = json.dumps(payload).encode()
+    monkeypatch.setattr(
+        transcriptscli.urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(body)
+    )
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._list(_ns())
+    assert "'count'" in str(e.value)
+
+
+def test_the_count_is_validated_before_the_json_dump_too(monkeypatch):
+    # `--json` prints the body unchanged, so without this check it would hand a
+    # malformed body straight to whatever is downstream of the pipe.
+    body = json.dumps({"transcripts": [], "count": None}).encode()
+    monkeypatch.setattr(
+        transcriptscli.urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(body)
+    )
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._list(_ns(json=True))
+    assert "'count'" in str(e.value)
 
 
 @pytest.mark.parametrize("body", [b"null", b"[1, 2]", b'"a string"', b"42"])
