@@ -64,6 +64,14 @@ def _url(path: str, params: dict | None = None) -> tuple[str, str]:
     return base, url
 
 
+#: What a transfer raises when it fails anywhere urllib does not reach. urllib
+#: wraps only what its own handler raises around ``h.request``, so both the
+#: ``h.getresponse()`` that follows and every read after the response opened
+#: surface bare: ``TimeoutError``/``ConnectionResetError`` (both ``OSError``
+#: since 3.10), or an ``http.client`` ``IncompleteRead`` / ``BadStatusLine``.
+_BODY_FAILURES = (OSError, http.client.HTTPException)
+
+
 def _open(url: str, base: str):
     """Open an authenticated GET, mapping every failure to a fatal message.
 
@@ -77,7 +85,13 @@ def _open(url: str, base: str):
     try:
         return urllib.request.urlopen(req, timeout=_TIMEOUT_S)
     except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")[:500]
+        # `e.read()` is itself a socket read, so it gets the same treatment the
+        # body reads below do: a peer that dies while we are collecting its
+        # error text must still exit with a message rather than a traceback.
+        try:
+            detail = e.read().decode("utf-8", "replace")[:500]
+        except _BODY_FAILURES:
+            detail = "(error body could not be read)"
         # The body is decoded ONLY when it is the object the sidecar's own
         # HTTPException produces. Valid JSON that is not a mapping -- `null`, a
         # list, a bare string, all of which an intermediary proxy may return --
@@ -95,14 +109,14 @@ def _open(url: str, base: str):
         sys.exit(f"fuko transcripts: cannot reach {base} ({e.reason})")
     except ValueError as e:
         sys.exit(f"fuko transcripts: invalid URL {url!r} ({e})")
-
-
-#: What a transfer that died AFTER the response opened raises. urllib maps only
-#: connect- and header-time faults into :class:`urllib.error.URLError`, so a
-#: socket that stalls or is reset once the body is streaming surfaces as a bare
-#: ``TimeoutError``/``ConnectionResetError`` (both ``OSError`` since 3.10) or an
-#: ``http.client.IncompleteRead`` -- none of them caught by :func:`_open`.
-_BODY_FAILURES = (OSError, http.client.HTTPException)
+    except _BODY_FAILURES as e:
+        # urllib wraps only what its OWN handler raises around `h.request`; the
+        # `h.getresponse()` that follows is unguarded, so a peer that hangs up
+        # or stalls while sending its status line arrives here as a bare
+        # `RemoteDisconnected`, `BadStatusLine` or `TimeoutError` rather than as
+        # a `URLError`. Same fault the operator sees for a refused connection,
+        # so it gets the same named exit.
+        sys.exit(f"fuko transcripts: cannot reach {base} ({e})")
 
 
 def _body_failed(base: str, error: Exception) -> None:
@@ -140,15 +154,25 @@ def _exit_closed_pipe() -> None:
 
 
 def _call(path: str, params: dict | None = None) -> dict:
-    """GET ``path`` and return the decoded JSON body."""
+    """GET ``path`` and return the decoded JSON body, which must BE an object.
+
+    The type is checked here rather than left to the caller's first `.get`: a
+    200 carrying valid JSON that is not a mapping -- ``null``, a list, a bare
+    string, all of which an intermediary can answer with -- would otherwise
+    reach the listing as an ``AttributeError`` traceback out of the module that
+    promises to name every fault.
+    """
     base, url = _url(path, params)
     with _open(url, base) as resp:
         try:
-            return json.load(resp)
+            body = json.load(resp)
         except ValueError as e:
             sys.exit(f"fuko transcripts: non-JSON response from {base} ({e})")
         except _BODY_FAILURES as e:
             _body_failed(base, e)
+    if not isinstance(body, dict):
+        sys.exit(f"fuko transcripts: {base} answered with JSON that is not an object")
+    return body
 
 
 def _human_bytes(count: int) -> str:
@@ -237,16 +261,30 @@ def _list(args) -> None:
             "offset": args.offset,
         },
     )
-    if args.json:
-        # The raw body, so `| jq` works on the listing the same way `get` makes
-        # it work on the session. Nothing is reformatted for the same reason.
-        json.dump(resp, sys.stdout, indent=2)
-        print()
-        return
-    items = resp.get("transcripts") or []
-    print(_color(f"{len(items)} shown · {resp.get('count', 0)} total\n", _BOLD))
-    for item in items:
-        _print_run(item, args.full)
+    # A body with no `transcripts` key at all is not an empty corpus, it is
+    # something other than this sidecar answering -- and "0 shown · 0 total" is
+    # exactly the rendering #240 exists to keep faults out of. Checked before
+    # anything is printed, so the operator never sees a listing at all.
+    if "transcripts" not in resp:
+        sys.exit("fuko transcripts: the listing response carried no 'transcripts' field")
+    # The same closed-pipe contract `get` has: `list | head` and
+    # `list --json | jq -e ... | head` are documented uses, and a reader that
+    # walked away is not a fault to report.
+    try:
+        if args.json:
+            # The raw body, so `| jq` works on the listing the same way `get`
+            # makes it work on the session. Nothing is reformatted, same reason.
+            json.dump(resp, sys.stdout, indent=2)
+            print()
+            sys.stdout.flush()
+            return
+        items = resp.get("transcripts") or []
+        print(_color(f"{len(items)} shown · {resp.get('count', 0)} total\n", _BOLD))
+        for item in items:
+            _print_run(item, args.full)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        _exit_closed_pipe()
 
 
 def _get(args) -> None:

@@ -475,7 +475,7 @@ async def transcripts_put_endpoint(key: str, request: Request) -> dict:
 )
 def transcripts_list_endpoint(
     repo: str | None = None,
-    pr: int | None = None,
+    pr: str | None = None,
     seat: str | None = None,
     since: str | None = None,
     until: str | None = None,
@@ -497,11 +497,15 @@ def transcripts_list_endpoint(
       would render exactly the empty list a healthy, empty corpus does.
     * **200 with nothing** -- the corpus really is empty for these filters.
 
-    ``since``/``until`` are taken as TEXT, not as typed ``datetime`` parameters:
-    a malformed one is then this endpoint's own 400 naming the offending value,
-    rather than a 422 body about a query parameter, and the same strings a
-    ``/ui`` form will submit parse through one function
-    (:func:`sidecar.transcripts._instant`) for both readers.
+    ``since``/``until``/``pr`` are taken as TEXT, not as typed ``datetime`` /
+    ``int`` parameters: a malformed one is then this endpoint's own 400 naming
+    the offending value, rather than a 422 body about a query parameter, and the
+    same strings a ``/ui`` form will submit parse through one function
+    (:func:`sidecar.transcripts._instant`) for both readers. ``pr`` needs the
+    text form for a second reason -- a browser submits an untouched box as
+    ``pr=``, and ``int | None`` admits an ABSENT parameter, not an empty one, so
+    a typed parameter would 422 the whole listing over a blank field
+    (:func:`sidecar.web.components.form_int` exists for the same reason).
     """
     if not settings.database_url:
         raise HTTPException(
@@ -509,6 +513,16 @@ def transcripts_list_endpoint(
             "transcript index needs the Postgres store (FUKO_DATABASE_URL unset); "
             "this is not an empty corpus",
         )
+    # An unfilled `pr` box is no filter; anything else that is not a number is
+    # this endpoint's own 400, matching what a malformed date gets rather than
+    # `form_int`'s silent drop -- the ledger PAGE can afford to discard a filter
+    # nobody can read, but a JSON reader that asked for one PR must not be
+    # handed every PR and no indication of it.
+    number: int | None = None
+    if pr:
+        if not (pr.isascii() and pr.isdigit()):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"pr is not a number: {pr!r}")
+        number = int(pr)
     try:
         # `repo or None` / `seat or None` for the reason
         # :func:`sidecar.transcripts._instant` maps "" to `None`: an HTML form
@@ -520,7 +534,7 @@ def transcripts_list_endpoint(
         # empty string" still can.
         page = transcripts.list_transcripts(
             repo=repo or None,
-            pr=pr,
+            pr=number,
             seat=seat or None,
             since=since,
             until=until,

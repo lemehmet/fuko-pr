@@ -686,7 +686,7 @@ Filters are AND-ed, so combining them narrows. `--since` is inclusive and
 `--until` exclusive, both UTC when given as a bare date, so adjacent windows
 tile without counting a transcript twice.
 
-#241's `/ui` page shares these query shapes rather than reimplementing them:
+Issue #241's `/ui` page shares these query shapes rather than reimplementing them:
 they live in `sidecar/transcripts.py` (`list_transcripts`, `fetch`), which is
 what that page will import, the way `sidecar/web/ledger.py` imports
 `sidecar/review_state.py`.

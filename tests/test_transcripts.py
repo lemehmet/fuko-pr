@@ -321,10 +321,20 @@ def test_list_endpoint_treats_an_empty_filter_box_as_no_filter(monkeypatch, pg):
     monkeypatch.setattr(main.settings, "database_url", "postgresql://x/y")
     conn = pg([])
     _client(monkeypatch).get(
-        "/transcripts", params={"repo": "", "seat": "", "since": "", "until": ""}
+        "/transcripts", params={"repo": "", "seat": "", "since": "", "until": "", "pr": ""}
     )
     _, params = conn.statements[0]
-    assert params[0] is None and params[4] is None
+    assert params[0] is None and params[2] is None and params[4] is None
+
+
+def test_list_endpoint_rejects_a_non_numeric_pr_with_400(monkeypatch, pg):
+    # Named here rather than left to FastAPI's 422, matching what a malformed
+    # date gets: one taxonomy for every filter this endpoint parses itself.
+    monkeypatch.setattr(main.settings, "database_url", "postgresql://x/y")
+    pg([])
+    resp = _client(monkeypatch).get("/transcripts", params={"pr": "twelve"})
+    assert resp.status_code == 400
+    assert "twelve" in resp.json()["detail"]
 
 
 def test_list_endpoint_without_a_database_is_503_not_an_empty_list(monkeypatch):

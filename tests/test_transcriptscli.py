@@ -410,6 +410,88 @@ def test_a_closed_stdout_pipe_redirects_the_fd_before_leaving(monkeypatch, tmp_p
     assert seen["target"] == 4321
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        http.client.RemoteDisconnected("peer closed"),
+        http.client.BadStatusLine("garbage"),
+        TimeoutError("timed out waiting for headers"),
+    ],
+)
+def test_a_connection_that_dies_before_the_headers_is_named(monkeypatch, error):
+    # urllib wraps only what its handler raises around `h.request`; the
+    # `h.getresponse()` after it is unguarded, so these arrive bare.
+    def boom(req, timeout=None):
+        raise error
+
+    monkeypatch.setattr(transcriptscli.urllib.request, "urlopen", boom)
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._call("/transcripts")
+    assert "cannot reach http://sidecar:8000" in str(e.value)
+
+
+def test_an_error_body_that_cannot_be_read_still_names_the_status(monkeypatch):
+    class _DeadBody(io.BytesIO):
+        def read(self, size=-1):
+            raise ConnectionResetError(104, "Connection reset by peer")
+
+    def boom(req, timeout=None):
+        raise urllib.error.HTTPError(
+            "http://sidecar:8000/transcripts", 502, "Bad Gateway", {}, _DeadBody(b"")
+        )
+
+    monkeypatch.setattr(transcriptscli.urllib.request, "urlopen", boom)
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._call("/transcripts")
+    assert "502" in str(e.value)
+
+
+# --- the success body's shape.
+
+
+@pytest.mark.parametrize("body", [b"null", b"[1, 2]", b'"a string"', b"42"])
+def test_a_200_body_that_is_not_an_object_is_fatal_not_an_empty_listing(monkeypatch, body):
+    # The one outcome #240 exists to prevent: something other than the sidecar
+    # answering 200, and the CLI rendering it as "the corpus is empty".
+    monkeypatch.setattr(
+        transcriptscli.urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(body)
+    )
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._call("/transcripts")
+    assert "not an object" in str(e.value)
+
+
+def test_a_200_object_without_the_expected_field_is_fatal(monkeypatch):
+    monkeypatch.setattr(
+        transcriptscli.urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(b"{}")
+    )
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._list(_ns())
+    assert "'transcripts'" in str(e.value)
+
+
+def test_a_closed_pipe_on_the_listing_exits_zero_like_the_fetch_path(monkeypatch):
+    body = json.dumps({"transcripts": [_ROW], "count": 1}).encode()
+    monkeypatch.setattr(
+        transcriptscli.urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(body)
+    )
+
+    class _PipedText(_PipedStdout):
+        def write(self, data):
+            raise BrokenPipeError(32, "Broken pipe")
+
+        def flush(self):
+            raise BrokenPipeError(32, "Broken pipe")
+
+        def isatty(self):
+            return False
+
+    monkeypatch.setattr(transcriptscli.sys, "stdout", _PipedText())
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._list(_ns())
+    assert e.value.code == 0
+
+
 @pytest.mark.parametrize("body", [b"null", b"[1, 2]", b'"a string"', b"42"])
 def test_a_json_error_body_that_is_not_an_object_is_still_named(monkeypatch, body):
     # A proxy between the operator and the sidecar can answer with valid JSON
