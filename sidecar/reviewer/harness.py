@@ -59,6 +59,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..throttle import TIMEOUT_RETURNCODE
+from .transcript import Transcript
 
 ALLOWED_TOOLS = "Read,Grep,Glob"
 
@@ -436,6 +437,7 @@ def run_review(
     env: dict[str, str],
     timeout: int,
     max_turns: int = DEFAULT_MAX_TURNS,
+    transcript: Transcript | None = None,
 ) -> HarnessResult:
     """Run headless Claude Code over ``repo_dir`` and return its final text.
 
@@ -466,6 +468,12 @@ def run_review(
 
     A timeout maps to :data:`sidecar.throttle.TIMEOUT_RETURNCODE` so the driver
     classifies a hung run as throttle-class, same as a hung PR-Agent container.
+
+    An optional ``transcript`` (:mod:`sidecar.reviewer.transcript`) tees the raw
+    feed to durable storage as it streams, INCLUDING the ``user`` tool-result
+    events this fold skips (#237). It sits beside the fold rather than inside
+    it: what comes back here is byte-identical whether capture is on, off, or
+    failing, and passing ``None`` leaves the stream untouched.
     """
     binary = shutil.which("claude", path=env.get("PATH"))
     if binary is None:
@@ -516,7 +524,7 @@ def run_review(
         )
 
     returncode, outcome, stderr, timed_out = _drive(
-        cmd, prompt=prompt, cwd=cwd, env=env, timeout=timeout, emit=_emit
+        cmd, prompt=prompt, cwd=cwd, env=env, timeout=timeout, emit=_emit, transcript=transcript
     )
     # Only a non-success subtype is announced: a clean run stays quiet so the
     # line is a signal and not noise. It is keyed on the subtype alone, not on
@@ -678,6 +686,23 @@ def _consume_stream(lines, emit) -> _StreamOutcome:
     )
 
 
+def _tee(lines, transcript: Transcript):
+    """Yield each raw feed line after handing a copy to ``transcript``.
+
+    A GENERATOR, so the fold downstream keeps iterating the pipe lazily and the
+    capture holds one line at a time -- collecting the feed to write it after
+    the run would reintroduce exactly the memory cost the streaming design
+    avoids, on the runs that are largest (#237).
+
+    The copy is written BEFORE the line is yielded, so whatever the fold has
+    seen is already durable: a mid-stream kill can lose the line that was in
+    flight, never one the review already acted on.
+    """
+    for raw in lines:
+        transcript.write(raw)
+        yield raw
+
+
 def _drive(
     cmd: list[str],
     *,
@@ -686,8 +711,13 @@ def _drive(
     env: dict[str, str],
     timeout: int,
     emit,
+    transcript: Transcript | None = None,
 ) -> tuple[int, _StreamOutcome, str, bool]:
     """Run ``cmd`` streaming stdout through :func:`_consume_stream`.
+
+    With a ``transcript``, the pipe is wrapped in :func:`_tee` on the way to the
+    fold; without one it is passed through untouched, so capture that is off
+    costs nothing per event rather than a no-op call per event.
 
     Returns ``(returncode, outcome, stderr, timed_out)``. Three pipes need
     three actors to avoid deadlock on a large prompt or chatty child: stdin is
@@ -729,9 +759,16 @@ def _drive(
     stdin_thread = threading.Thread(target=_feed, daemon=True)
     stdin_thread.start()
     try:
-        outcome = _consume_stream(proc.stdout, emit)
+        stream = proc.stdout if transcript is None else _tee(proc.stdout, transcript)
+        outcome = _consume_stream(stream, emit)
         proc.wait()
     finally:
         timer.cancel()
+        # Closed here rather than only by the caller: the feed is over the
+        # moment the fold returns, on the kill path as much as the clean one.
+        # `close()` is idempotent, so the driver's own `finally` -- which also
+        # covers the paths that never reach this function -- still holds.
+        if transcript is not None:
+            transcript.close()
     stderr_thread.join(timeout=5)
     return proc.returncode, outcome, "".join(stderr_chunks), timed_out.is_set()

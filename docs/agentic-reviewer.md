@@ -24,6 +24,7 @@ sidecar/reviewer/            the reviewer (harness-agnostic core)
   prompt.py                  review strategy + JSON output contract   <- the value
   harness.py                 agent runtimes (headless Claude Code today)
   ledger.py                  per-seat findings + coverage policy (carry in / settle)
+  transcript.py              scrubbed, streaming capture of the harness event feed
 sidecar/backends/agentic.py  the fuko driver (ReviewBackend protocol)
 ```
 
@@ -465,6 +466,46 @@ model serves the harness's background haiku-class and subagent calls too. The
 vendor presets name a cheap tier there to keep those calls off an expensive
 model; a single-model deployment has no cheap tier, and naming a second slug
 would make the gateway swap models mid-review.
+
+## Session transcripts (`FUKO_TRANSCRIPT_DIR`)
+
+The harness reads the CLI's whole NDJSON event feed and folds it away, keeping
+only `assistant` and `result` events — so the `user` events, where tool
+**results** live (~91% of a review's token spend), were read and discarded in
+the same pass. Setting `FUKO_TRANSCRIPT_DIR` tees that feed to
+`<dir>/<key>.ndjson` as it streams (#237, epic #236):
+
+```bash
+FUKO_TRANSCRIPT_DIR=/var/lib/fuko/transcripts   # unset = capture off
+```
+
+Properties worth knowing before turning it on:
+
+- **Off by default, and off means free.** With the variable unset the feed is
+  iterated exactly as before — no tee, no per-event cost. There is deliberately
+  no default path: this writes a file per agentic branch per push and keeps it.
+- **Credentials are scrubbed at capture, irreversibly.** The driver hands the
+  transcript the exact values it holds — the checkout's GitHub App token, the
+  seat's injected provider credential, and the ambient secrets it strips from
+  the harness environment — and each is replaced by `[REDACTED:<VAR>]` before
+  any byte reaches disk, including inside a tool result that echoed it. Values
+  the driver does not hold are written verbatim: nothing is inferred from a
+  string's shape, because an over-broad rule silently corrupts the corpus and
+  cannot be undone.
+- **Streamed, never buffered.** One line at a time, line-buffered, so peak
+  memory does not track transcript size and a run killed at `tool_timeout`
+  keeps everything that arrived before the cut.
+- **Capture never fails a review.** An unwritable destination, a full disk, a
+  misconfigured path: one stderr line, an inert transcript, and a review whose
+  text, `usage`, `cost_usd`, `turns` and `subtype` are identical to a run with
+  no capture at all.
+- **The key is the transcript's own.** Minted at run start (`review_runs` is
+  inserted afterwards and never returns its id), so later work can key a stored
+  blob and an index row on it.
+
+Nothing reads these files yet — a workflow can upload one as a run artifact.
+Shipping them off the runner (#238), the derived per-tool metrics (#239), and
+the readers (#240, #241) are the rest of the epic.
 
 ## Configuration
 

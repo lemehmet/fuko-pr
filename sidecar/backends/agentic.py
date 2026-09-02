@@ -69,6 +69,7 @@ from ..reviewer.prompt import (
     build_prompt,
     parse_review,
 )
+from ..reviewer.transcript import Transcript, open_transcript
 from ..signals import ReviewSignal, make_id, with_marker, with_visible_label
 from ..throttle import TIMEOUT_RETURNCODE, is_throttle
 from .base import ENV_SEAT, InvokeResult, PRRef
@@ -383,6 +384,60 @@ def _provider_key_vars() -> frozenset[str]:
     a handful of entries, so the cost is nothing next to a review run.
     """
     return frozenset(p.key_env for p in PRESETS.values() if p.key_env)
+
+
+#: fuko's own credential-bearing variables, scrubbed from a transcript by VALUE.
+#:
+#: Named rather than taken as the whole ``FUKO_`` namespace (which is what the
+#: harness environment strips): scrubbing replaces every occurrence of a value,
+#: so widening it to variables that are not credentials -- ``FUKO_URL``, a repo
+#: name, a model slug -- would corrupt transcripts wherever those strings
+#: legitimately appear, irreversibly. ``FUKO_DATABASE_URL`` is here for the
+#: password inside it, not for being a URL.
+_FUKO_SECRET_VARS = (
+    "FUKO_TOKEN",
+    "FUKO_AUTH_TOKEN",
+    "FUKO_EMBED_API_KEY",
+    "FUKO_DATABASE_URL",
+)
+
+
+def _transcript_secrets(harness_env: dict[str, str], token: str) -> list[tuple[str, str]]:
+    """The exact credential values a transcript must never contain (#237).
+
+    Assembled HERE because this is the only place that knows the whole set: the
+    GitHub App token belongs to the checkout rather than to the harness
+    environment (``invoke`` resolves it, ``_GITHUB_CRED_VARS`` strips every
+    spelling of it before the agent starts), the seat's provider credential is
+    injected from config under a different name than the workflow exported it
+    under, and the rest is what this process holds and deliberately withheld.
+
+    Three sources, all by exact value:
+
+    * the checkout token, which authenticates the fetch of the reviewed head;
+    * what the harness environment ACTUALLY carries, so the seat's own
+      credential is scrubbed under the name it was injected as;
+    * the ambient values this driver strips -- other seats' provider keys,
+      every GitHub spelling, fuko's own secrets. They never reach the agent's
+      environment, but this process's environment is readable through
+      ``/proc/<pid>/environ`` (the reason the harness denies those paths at
+      all), and a transcript is durable storage.
+
+    Nothing is inferred from a value's SHAPE, and nothing is derived from a
+    variable's name looking credential-ish: the driver's credential lists are
+    the single source of truth, and a heuristic beside them would drift into
+    scrubbing text that is not a secret.
+    """
+    secrets: list[tuple[str, str]] = [("GITHUB_APP_TOKEN", token)] if token else []
+    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+        value = harness_env.get(key, "")
+        if value:
+            secrets.append((key, value))
+    for key in (*_GITHUB_CRED_VARS, *sorted(_provider_key_vars()), *_FUKO_SECRET_VARS):
+        value = os.environ.get(key, "")
+        if value:
+            secrets.append((key, value))
+    return secrets
 
 
 #: How many completed-but-unclaimed reviews to retain. Generous next to any real
@@ -740,6 +795,13 @@ class AgenticBackend:
         and the prompt is byte-for-byte the one this backend built before the
         ledger existed.
 
+        With ``FUKO_TRANSCRIPT_DIR`` configured, the run's whole event feed is
+        additionally teed to a scrubbed NDJSON file as it streams (#237),
+        including the tool-result events the fold discards. Capture is
+        best-effort in the same sense the ledger is: it cannot change what this
+        method returns, and a destination it cannot write degrades to a stderr
+        line.
+
         Every path that reached the harness also carries what the run spent --
         tokens, dollars, turns (#152) -- lifted from the CLI's terminal event by
         :func:`_run_costs`. This is the only backend that can report it today;
@@ -844,8 +906,11 @@ class AgenticBackend:
 
         # Everything from here owns the checkout, so every exit path -- including
         # a failure to create the scratch cwd or to build the prompt -- goes
-        # through the `finally` that removes it.
+        # through the `finally` that removes it. The transcript joins that
+        # ownership: it is opened around the run and closed on every exit path,
+        # including the ones that never reach the harness.
         workdir: Path | None = None
+        transcript: Transcript | None = None
         try:
             workdir = Path(mkdtemp(prefix="fuko-agentic-cwd-"))
             # PER-BRANCH CLAUDE STATE DIRECTORY.
@@ -930,6 +995,10 @@ class AgenticBackend:
                 prior_state=carried.text,
             )
             strip_agent_config(Path(checkout))
+            # Minted at run START (#236): `run_metrics.record()` inserts the
+            # `review_runs` row after the run and never returns its id, so a
+            # transcript cannot be keyed on it and carries its own identity.
+            transcript = open_transcript(_transcript_secrets(harness_env, token), label=model_name)
             result = run_review(
                 prompt,
                 Path(checkout),
@@ -938,12 +1007,15 @@ class AgenticBackend:
                 env=harness_env,
                 timeout=self.tool_timeout,
                 max_turns=self.max_turns,
+                transcript=transcript,
             )
         except HarnessNotAvailableError as e:
             return _failure_result("failed:exit 1", str(e))
         except OSError as e:
             return _failure_result("failed:exit 1", f"could not prepare the review sandbox: {e}")
         finally:
+            if transcript is not None:
+                transcript.close()
             rmtree(checkout, ignore_errors=True)
             if workdir is not None:
                 rmtree(workdir, ignore_errors=True)

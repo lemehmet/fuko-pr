@@ -973,9 +973,15 @@ def test_run_review_missing_binary(monkeypatch, tmp_path):
 
 
 def _fake_drive(seen, text='{"findings": []}', returncode=0, timed_out=False, **outcome):
-    def fake(cmd, *, prompt, cwd, env, timeout, emit):
+    def fake(cmd, *, prompt, cwd, env, timeout, emit, transcript=None):
         seen["cmd"] = cmd
-        seen["kwargs"] = {"prompt": prompt, "cwd": cwd, "env": env, "timeout": timeout}
+        seen["kwargs"] = {
+            "prompt": prompt,
+            "cwd": cwd,
+            "env": env,
+            "timeout": timeout,
+            "transcript": transcript,
+        }
         return (
             returncode,
             harness_mod._StreamOutcome(text=text, saw_result=True, **outcome),

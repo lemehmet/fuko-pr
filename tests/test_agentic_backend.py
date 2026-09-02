@@ -76,7 +76,7 @@ def _invoke(monkeypatch, backend: AgenticBackend, harness_result: HarnessResult,
     monkeypatch.setattr(agentic_mod, "check_auth", lambda *a, **k: {"loggedIn": True})
     captured = {}
 
-    def fake_run_review(prompt, checkout, *, cwd, model, env, timeout, max_turns):
+    def fake_run_review(prompt, checkout, *, cwd, model, env, timeout, max_turns, transcript=None):
         captured.update(
             prompt=prompt,
             checkout=checkout,
@@ -85,6 +85,7 @@ def _invoke(monkeypatch, backend: AgenticBackend, harness_result: HarnessResult,
             env=env,
             timeout=timeout,
             max_turns=max_turns,
+            transcript=transcript,
         )
         return harness_result
 

@@ -60,5 +60,12 @@ class Settings(BaseSettings):
     # deployment turns it on, which is what #159's trial seat is for.
     digest_retrieval: bool = False
 
+    # Directory the agentic reviewer writes session transcripts into (#237).
+    # Empty means capture is OFF: a default path would have every runner
+    # writing NDJSON to a location nobody chose, and the corpus this feeds is
+    # kept forever by design. Set it per deployment (a workflow can then upload
+    # the file as a run artifact).
+    transcript_dir: str = ""
+
 
 settings = Settings()
