@@ -113,9 +113,13 @@ blobs, and it is newly relevant to a **Postgres** deployment, which has never
 needed object storage before (#238).
 
 It is entirely optional. Leave `FUKO_TRANSCRIPT_STORE_BACKEND` unset and the
-sidecar starts, reviews run and transcripts are simply absent — no error, no
-change from before. Turn it on only if you have also turned capture on with
-`FUKO_TRANSCRIPT_DIR` (see [`agentic-reviewer.md`](agentic-reviewer.md), which
+sidecar starts, reviews run and no transcript is ever stored *here* — no error,
+no change from before. Note what that does **not** mean: a runner with
+`FUKO_TRANSCRIPT_DIR` set still writes its own local transcript, exactly as it
+did before this feature existed. Unset means shared-store persistence is off,
+not that capture is; the runner-resident copy of the reviewed repository is
+governed by `FUKO_TRANSCRIPT_DIR` alone. Turn shipping on only if you have also
+turned capture on there (see [`agentic-reviewer.md`](agentic-reviewer.md), which
 is where the whole feature and its privacy properties are documented).
 
 Configure it **on the sidecar**, through the environment — the deployed sidecar
@@ -136,6 +140,12 @@ or, for a single host with no bucket:
 FUKO_TRANSCRIPT_STORE_BACKEND=file
 FUKO_TRANSCRIPT_STORE_ROOT=/var/lib/fuko/transcript-blobs
 ```
+
+The **`s3`/`r2` backends need `boto3`**, which `docker/Dockerfile.sidecar`
+installs via the `s3` extra (`pip install ".[s3]"`). Running the sidecar from a
+plain `pip install fuko-pr` instead? Install `fuko-pr[s3]` or the bucket
+backends answer `503 transcript store unusable: No module named 'boto3'` on
+every upload. The `file` backend and the unconfigured default need nothing.
 
 **Runners need nothing.** They ship what they captured to the sidecar they
 already talk to, over `POST /transcripts/<key>` with the `FUKO_TOKEN` they

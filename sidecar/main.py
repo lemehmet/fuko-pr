@@ -314,8 +314,12 @@ async def transcripts_put_endpoint(key: str, request: Request) -> dict:
     The three failure modes are distinguished, because the runner does not
     retry and a caller reading its logs needs to know which happened:
 
-    * **503** -- no store configured. The unconfigured deployment stays a
-      working deployment; this is the honest way to say transcripts are absent.
+    * **503** -- nothing here can store a transcript: no store configured
+      (the unconfigured deployment stays a working deployment, and this is the
+      honest way to say transcripts are absent), a store configured
+      incompletely, or a bucket backend whose ``boto3`` is not installed. All
+      three are the operator's to fix and none is the caller's, so they answer
+      alike and carry the reason in the detail rather than a traceback.
     * **409** -- the key is taken. Blobs are write-once, so this is a
       re-delivery, never something to resolve by overwriting.
     * **400** -- the key is not a well-formed blob key.
@@ -331,7 +335,17 @@ async def transcripts_put_endpoint(key: str, request: Request) -> dict:
         validate_blob_key(key)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
-    store = transcript_store()
+    try:
+        store = transcript_store()
+    except (ValueError, ImportError) as e:
+        # Configured but unusable -- an unknown backend, a missing bucket, or a
+        # bucket backend without `boto3` (`pip install fuko-pr[s3]`). The store
+        # is built per request, so this would otherwise reach the caller as a
+        # 500 with a traceback on every upload rather than as the deployment
+        # fault it is.
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, f"transcript store unusable: {e}"
+        ) from e
     if store is None:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -341,11 +355,13 @@ async def transcripts_put_endpoint(key: str, request: Request) -> dict:
     # client may omit Content-Length (or state one it then exceeds), so the
     # bound is applied as the bytes arrive: it stops the read rather than
     # reporting on a body already held whole.
-    chunks: list[bytes] = []
-    size = 0
+    # ONE growing buffer, handed to the store as-is. A list of chunks plus a
+    # closing `b"".join` holds the whole body TWICE at the moment it joins, so
+    # the cap would price a peak of double its own value; `bytearray` grows in
+    # place and both stores take a bytes-like body, so peak stays one copy.
+    body = bytearray()
     async for chunk in request.stream():
-        size += len(chunk)
-        if size > settings.transcript_max_bytes:
+        if len(body) + len(chunk) > settings.transcript_max_bytes:
             # 413 as a literal: starlette renamed the constant
             # (REQUEST_ENTITY_TOO_LARGE -> CONTENT_TOO_LARGE) and deprecated the
             # old spelling, so naming either one ties this to a version range
@@ -354,8 +370,7 @@ async def transcripts_put_endpoint(key: str, request: Request) -> dict:
                 413,
                 f"transcript exceeds FUKO_TRANSCRIPT_MAX_BYTES ({settings.transcript_max_bytes})",
             )
-        chunks.append(chunk)
-    body = b"".join(chunks)
+        body += chunk
     try:
         await run_in_threadpool(store.put, key, body)
     except BlobExists as e:

@@ -23,7 +23,9 @@ timeout. It is paid for here rather than papered over:
   seconds, instead of widening the metrics row into a body it was never sized
   for;
 * the body is STREAMED off disk rather than read into memory, so the runner's
-  peak stays what #237 made it -- one event, not one session;
+  peak stays what #237 made it -- one chunk, not one session -- and the stream
+  carries an ABSOLUTE deadline, because ``httpx``'s ``timeout=`` is per phase
+  and would otherwise let a slow peer outlast the ceiling this promises;
 * exactly ONE attempt. The blob is write-once, so a retry after a client-side
   timeout races the upload that may already have landed and answers ``409``;
   and a transcript is an observability artifact, so a second chance at it is
@@ -37,6 +39,8 @@ sidecar) writes straight to the configured store, mirroring
 from __future__ import annotations
 
 import os
+import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import httpx
@@ -50,6 +54,41 @@ import httpx
 #: review's completion in the worst case, which is why it is a ceiling rather
 #: than a generous ceiling.
 UPLOAD_TIMEOUT_S = 120.0
+
+#: How much of the file is handed to the transport at a time.
+#:
+#: Iterating the open handle directly would yield one chunk per NDJSON LINE --
+#: a chunked write per event, on a file whose whole point is that it has many.
+#: A fixed read keeps the peak at one chunk while making the number of writes a
+#: function of size rather than of event count.
+UPLOAD_CHUNK_BYTES = 64 * 1024
+
+#: Per-phase bound on the parts of the request a deadline cannot reach.
+#:
+#: :data:`UPLOAD_TIMEOUT_S` bounds the body transfer ABSOLUTELY (see
+#: :func:`_deadlined`); connecting and waiting for the response are still
+#: phase-scoped, because there is nothing to interleave a clock check with.
+CONNECT_TIMEOUT_S = 10.0
+
+
+def _deadlined(handle, deadline: float) -> Iterator[bytes]:
+    """Yield ``handle`` in chunks, refusing to continue past ``deadline``.
+
+    ``httpx``'s ``timeout=`` is PER PHASE -- connect, write, read, pool -- and
+    it has no request lifetime, so a peer that accepts a chunk just often enough
+    to reset the write timeout can hold the upload open indefinitely. The
+    docstring above promises :data:`UPLOAD_TIMEOUT_S` is the entire latency this
+    adds to a review's completion, and a per-phase timeout does not deliver
+    that; checking the clock between chunks does, for the phase that carries the
+    bytes.
+    """
+    while True:
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"transcript upload exceeded UPLOAD_TIMEOUT_S ({UPLOAD_TIMEOUT_S}s)")
+        chunk = handle.read(UPLOAD_CHUNK_BYTES)
+        if not chunk:
+            return
+        yield chunk
 
 
 def upload_target() -> str:
@@ -87,11 +126,14 @@ def ship(key: str, path: Path) -> None:
     token = os.environ.get("FUKO_TOKEN", "")
     if token:
         headers["Authorization"] = "Bearer " + token
+    deadline = time.monotonic() + UPLOAD_TIMEOUT_S
     with path.open("rb") as handle:
         resp = httpx.post(
             f"{fuko_url.rstrip('/')}/transcripts/{key}",
-            content=handle,
+            content=_deadlined(handle, deadline),
             headers=headers,
-            timeout=UPLOAD_TIMEOUT_S,
+            timeout=httpx.Timeout(
+                UPLOAD_TIMEOUT_S, connect=CONNECT_TIMEOUT_S, pool=CONNECT_TIMEOUT_S
+            ),
         )
     resp.raise_for_status()

@@ -154,13 +154,25 @@ class Scrubber:
         suffix fails at its first character. :data:`MIN_FRAGMENT` is the guard
         for the other case -- a final line that is not JSON at all -- where a
         one- or two-character coincidence would otherwise eat real text.
+
+        The LONGEST match across every needle wins, not the first needle that
+        matches at all. ``replacements`` is ordered by needle length, which is
+        not the same as match length: a long secret whose first four characters
+        happen to end the line would otherwise claim the redaction and leave the
+        rest of a different, genuinely truncated secret on disk -- under the
+        wrong marker. Scanning all of them costs one pass over a handful of
+        registered values, once per run.
         """
         text = self.scrub(text)
+        best_size, best_marker = 0, ""
         for needle, marker in self.replacements:
             # A full match was already handled by `scrub`, hence `len(needle) - 1`.
-            for size in range(min(len(text), len(needle) - 1), MIN_FRAGMENT - 1, -1):
-                if text.endswith(needle[:size]):
-                    return text[:-size] + marker
+            for size in range(min(len(text), len(needle) - 1), best_size, -1):
+                if size >= MIN_FRAGMENT and text.endswith(needle[:size]):
+                    best_size, best_marker = size, marker
+                    break
+        if best_size:
+            return text[:-best_size] + best_marker
         return text
 
 
@@ -203,9 +215,11 @@ class FileTranscriptSink:
     def __init__(self, path: Path) -> None:
         """Record the destination path; nothing is created until first write."""
         self.path = path
-        #: Whether anything was ever written, and therefore whether the path
-        #: names a file at all. Survives `close()`, which clears the handle, so
-        #: a wrapping sink can tell "empty run" from "closed" (#238).
+        #: Whether a line ever LANDED -- set after the first successful write,
+        #: not merely after the file is created, so a first write that raises
+        #: leaves an empty file that a wrapping sink will not ship (#238).
+        #: Survives `close()`, which clears the handle, so that sink can tell
+        #: "empty run" from "closed".
         self.opened = False
         self._handle = None
 
@@ -219,8 +233,8 @@ class FileTranscriptSink:
             # the umask, which can only narrow it further -- never widen it.
             fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, self.FILE_MODE)
             self._handle = open(fd, "a", encoding="utf-8", buffering=1)
-            self.opened = True
         self._handle.write(line if line.endswith("\n") else line + "\n")
+        self.opened = True
 
     def close(self) -> None:
         """Close the file if it was ever opened."""
@@ -258,6 +272,7 @@ class ShippingTranscriptSink:
         self._inner = inner
         self._key = key
         self._ship = ship
+        self._closed = False
 
     def write(self, line: str) -> None:
         """Append one already-scrubbed line to the local file."""
@@ -275,7 +290,16 @@ class ShippingTranscriptSink:
         line and an inert transcript, never a fault in the review path -- and a
         second, quieter handler here would report the same failure twice or not
         at all.
+
+        Idempotent, as :class:`TranscriptSink` promises: the key is write-once,
+        so a second close that shipped again would answer ``409`` and turn a
+        harmless repeat call into a reported failure. The flag is set BEFORE the
+        upload, so a failed ship is not retried by a later close either -- one
+        attempt is the decision this module already made.
         """
+        if self._closed:
+            return
+        self._closed = True
         self._inner.close()
         if self._inner.opened:
             self._ship(self._key, self.path)

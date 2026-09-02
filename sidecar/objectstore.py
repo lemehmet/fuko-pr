@@ -13,7 +13,9 @@ about how a bucket is reached.
   fast disks, breaking the optimistic-concurrency check).
 * **Many keyed, write-once blobs** (:class:`FileBlobStore` /
   :class:`S3BlobStore`, #238). A session transcript is written once, under a
-  key minted before its first byte exists, and never modified. A concurrency
+  key minted before its first byte exists, and never modified. ``put`` takes
+  any bytes-like body so the sidecar can hand over the ``bytearray`` it
+  accumulated the request into without copying it whole a second time. A concurrency
   token means nothing for that: there is no prior version to be unchanged
   since, and the only conflict worth naming is "this key is already taken",
   which is :class:`BlobExists`. Hence a sibling interface rather than a
@@ -217,7 +219,7 @@ class FileBlobStore:
         """Store the directory that holds the blobs; it is created on first put."""
         self._root = Path(root)
 
-    def put(self, key: str, data: bytes) -> None:
+    def put(self, key: str, data: bytes | bytearray) -> None:
         """Write ``data`` under ``key``, or raise :class:`BlobExists` if taken."""
         target = self._root / validate_blob_key(key)
         self._root.mkdir(mode=self.DIR_MODE, parents=True, exist_ok=True)
@@ -262,7 +264,7 @@ class S3BlobStore:
         cleaned = prefix.strip().strip("/")
         self._prefix = f"{cleaned}/" if cleaned else ""
 
-    def put(self, key: str, data: bytes) -> None:
+    def put(self, key: str, data: bytes | bytearray) -> None:
         """Conditionally create the object, mapping a lost race to ``BlobExists``."""
         try:
             self._client.put_object(

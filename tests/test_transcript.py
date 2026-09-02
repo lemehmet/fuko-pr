@@ -8,7 +8,9 @@ import sys
 import httpx
 import pytest
 
+from sidecar.backends import agentic
 from sidecar.backends.agentic import _transcript_secrets
+from sidecar.backends.agentic import settings as agentic_settings
 from sidecar.config import settings
 from sidecar.reviewer import harness as harness_mod
 from sidecar.reviewer import transcript as transcript_mod
@@ -467,6 +469,30 @@ def test_a_run_with_no_checkout_token_registers_no_empty_secret(monkeypatch):
     assert not any(value == "" for _name, value in _transcript_secrets({}, ""))
 
 
+def test_a_renamed_store_credential_prefix_is_still_stripped_and_scrubbed(monkeypatch):
+    """`FUKO_TRANSCRIPT_STORE_CREDS_ENV_PREFIX` is a supported setting, and a
+    value outside the `FUKO_` namespace is neither stripped by the namespace
+    filter nor covered by the literal default names -- so the credential that
+    stores the transcript would be written into it."""
+    monkeypatch.setattr(agentic_settings, "transcript_store_creds_env_prefix", "MYCO_S3")
+    monkeypatch.setenv("MYCO_S3_ACCESS_KEY_ID", "the-access-key-id")
+    monkeypatch.setenv("MYCO_S3_SECRET_ACCESS_KEY", "the-secret-access-key")
+
+    assert agentic._store_credential_vars() == {
+        "MYCO_S3_ACCESS_KEY_ID",
+        "MYCO_S3_SECRET_ACCESS_KEY",
+    }
+    values = dict(_transcript_secrets({}, ""))
+    assert values["MYCO_S3_ACCESS_KEY_ID"] == "the-access-key-id"
+    assert values["MYCO_S3_SECRET_ACCESS_KEY"] == "the-secret-access-key"
+
+
+def test_an_unset_store_credential_prefix_names_nothing(monkeypatch):
+    """An empty prefix must not resolve to bare `_ACCESS_KEY_ID`."""
+    monkeypatch.setattr(agentic_settings, "transcript_store_creds_env_prefix", "")
+    assert agentic._store_credential_vars() == set()
+
+
 @pytest.mark.parametrize("value", ["", None, 1234])
 def test_scrubber_skips_values_it_must_not_replace(value):
     """Only the two that cannot name a credential occurrence: an empty needle
@@ -495,6 +521,26 @@ def test_a_complete_event_is_untouched_by_the_truncated_line_pass():
     scrubber = Scrubber.for_secrets([("ANTHROPIC_API_KEY", SECRET)])
     line = json.dumps({"type": "result", "ok": True})
     assert scrubber.scrub_partial(line) == line
+
+
+def test_the_longest_fragment_wins_rather_than_the_first_needle_to_match():
+    """`replacements` is ordered by needle LENGTH, which is not match length.
+    Returning on the first needle that matches at all would redact four
+    characters of a coincidence and leave the rest of a genuinely truncated
+    second credential on disk, under the wrong marker."""
+    cut_secret = "B" * 30
+    long_secret = "BBBB" + "z" * 40  # sorts first: the longest needle
+    scrubber = Scrubber.for_secrets([("LONG_KEY", long_secret), ("CUT_KEY", cut_secret)])
+    # The cut left 20 characters of CUT_KEY on the line; their last four also
+    # happen to be LONG_KEY's first four, which is all a first-match-wins scan
+    # would redact -- leaving 16 characters of a live credential behind it.
+    line = "trailing " + cut_secret[:20]
+    assert scrubber.scrub_partial(line) == "trailing [REDACTED:CUT_KEY]"
+
+    # And the ordinary case: the longer of two genuine fragments is taken.
+    other = "B" * 10 + "y" * 20
+    scrubber = Scrubber.for_secrets([("OTHER", other), ("CUT_KEY", cut_secret)])
+    assert scrubber.scrub_partial("trailing " + cut_secret[:20]) == ("trailing [REDACTED:CUT_KEY]")
 
 
 def test_a_fragment_shorter_than_the_minimum_is_left_alone():
@@ -593,6 +639,60 @@ def test_a_run_that_wrote_nothing_ships_nothing(tmp_path):
     ShippingTranscriptSink(inner, "k", lambda key, path: shipped.append(key)).close()
     assert shipped == []
     assert not (tmp_path / "t.ndjson").exists()
+
+
+def test_closing_twice_ships_once(tmp_path):
+    """`TranscriptSink.close` promises repeat calls are safe, and the key is
+    write-once -- a second ship would answer 409 and turn a harmless repeat
+    call into a reported capture failure."""
+    shipped = []
+    inner = FileTranscriptSink(tmp_path / "t.ndjson")
+    sink = ShippingTranscriptSink(inner, "k", lambda key, path: shipped.append(key))
+    sink.write('{"a": 1}')
+    sink.close()
+    sink.close()
+    assert shipped == ["k"]
+
+
+def test_a_close_after_a_failed_ship_does_not_retry_it(tmp_path):
+    """One attempt is the decision this module already made: the blob is
+    write-once, so a retry races an upload that may already have landed."""
+    calls = []
+
+    def _boom(key, path):
+        calls.append(key)
+        raise RuntimeError("sidecar unreachable")
+
+    inner = FileTranscriptSink(tmp_path / "t.ndjson")
+    sink = ShippingTranscriptSink(inner, "k", _boom)
+    sink.write('{"a": 1}')
+    with pytest.raises(RuntimeError):
+        sink.close()
+    sink.close()
+    assert calls == ["k"]
+
+
+def test_a_first_write_that_fails_ships_nothing(tmp_path, monkeypatch):
+    """`opened` has to mean a line LANDED, not that the file was created:
+    otherwise a failure on the very first write ships an empty blob under a
+    write-once key, contradicting "a run that wrote nothing ships nothing"."""
+    shipped = []
+    inner = FileTranscriptSink(tmp_path / "t.ndjson")
+    sink = ShippingTranscriptSink(inner, "k", lambda key, path: shipped.append(key))
+    transcript = Transcript("k", sink, Scrubber())
+
+    monkeypatch.setattr(FileTranscriptSink, "write", lambda self, line: _fail_after_create(self))
+    transcript.write('{"a": 1}')
+    monkeypatch.undo()
+    transcript.close()
+    assert shipped == []
+
+
+def _fail_after_create(sink):
+    """Create the file the way `write` does, then fail before any line lands."""
+    sink.path.parent.mkdir(mode=sink.DIR_MODE, parents=True, exist_ok=True)
+    sink.path.touch(mode=sink.FILE_MODE)
+    raise OSError("no space left on device")
 
 
 def test_a_transcript_that_went_inert_is_still_shipped(tmp_path):

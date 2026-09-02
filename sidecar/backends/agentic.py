@@ -43,6 +43,7 @@ from tempfile import mkdtemp
 
 import httpx
 
+from ..config import settings
 from ..fukoconfig import ModelConfig, ReviewConfig
 from ..logfmt import flatten_for_log as _flatten_for_log
 from ..presets import PRESETS, ProviderPreset
@@ -403,18 +404,44 @@ _FUKO_SECRET_VARS = (
     "FUKO_AUTH_TOKEN",
     "FUKO_EMBED_API_KEY",
     "FUKO_DATABASE_URL",
-    # The object store's default credential spelling, shared by BOTH stores in
+    # The object store's DEFAULT credential spelling, shared by both stores in
     # :mod:`sidecar.objectstore`: the knowledge file's
     # ``object_store.creds_env_prefix`` and the transcript blob store's
-    # ``FUKO_TRANSCRIPT_STORE_CREDS_ENV_PREFIX`` (#238), which default to the
-    # same ``FUKO_S3``. A deployment that renames either must add its two names
-    # here -- and for the transcript store that matters twice over, since the
-    # credential would otherwise be written into the very transcript it stores.
+    # ``FUKO_TRANSCRIPT_STORE_CREDS_ENV_PREFIX`` (#238). A renamed transcript
+    # prefix is covered at runtime by :func:`_store_credential_vars`; these two
+    # stay listed because the default has to hold when settings are absent.
     # The sibling ``_REGION`` variable is deliberately absent, being a region
     # code rather than a credential.
     "FUKO_S3_ACCESS_KEY_ID",
     "FUKO_S3_SECRET_ACCESS_KEY",
 )
+
+
+def _store_credential_vars() -> frozenset[str]:
+    """The transcript store's credential variable names, as configured.
+
+    ``FUKO_TRANSCRIPT_STORE_CREDS_ENV_PREFIX`` is a SUPPORTED deployment
+    setting, so the names it selects cannot be a hardcoded list: renamed to
+    anything outside the ``FUKO_`` namespace, the two variables are neither
+    stripped from the harness environment (:data:`_FUKO_ENV_PREFIX` is a
+    prefix match) nor scrubbed by value, and the credential that stores the
+    transcript would be written into the transcript. Derived rather than
+    documented, so using the knob correctly does not require a source edit.
+
+    Read live rather than snapshotted at import, for the same reason
+    :func:`_provider_key_vars` is: the value is deployment configuration and
+    the cost is nothing next to a review run.
+
+    ``.fuko.toml``'s ``[knowledge.object_store] creds_env_prefix`` is NOT read
+    here. It is a runner-side toml key that predates this path and reading it
+    would mean loading the config file from inside the credential list; its
+    default spelling is covered by :data:`_FUKO_SECRET_VARS` above.
+    """
+    prefix = (settings.transcript_store_creds_env_prefix or "").strip()
+    if not prefix:
+        return frozenset()
+    return frozenset({f"{prefix}_ACCESS_KEY_ID", f"{prefix}_SECRET_ACCESS_KEY"})
+
 
 #: Credential-bearing ``FUKO_`` variables whose full names this module cannot
 #: know, matched by PREFIX over the live environment.
@@ -488,6 +515,7 @@ def _transcript_secrets(harness_env: dict[str, str], token: str) -> list[tuple[s
         *_GITHUB_CRED_VARS,
         *sorted(_provider_key_vars()),
         *_FUKO_SECRET_VARS,
+        *sorted(_store_credential_vars()),
         *_AMBIENT_ANTHROPIC_VARS,
         *sorted(k for k in os.environ if k.startswith(_FUKO_SECRET_PREFIXES)),
     )
@@ -889,6 +917,10 @@ class AgenticBackend:
         auth = env.get(_ENV_AUTH, _AUTH_SUBSCRIPTION)
 
         provider_key_vars = _provider_key_vars()
+        # A renamed `FUKO_TRANSCRIPT_STORE_CREDS_ENV_PREFIX` puts the store's
+        # credentials outside the `FUKO_` namespace the line below strips, so
+        # they are named explicitly rather than inherited.
+        store_cred_vars = _store_credential_vars()
         harness_env = {
             k: v
             for k, v in os.environ.items()
@@ -896,6 +928,7 @@ class AgenticBackend:
             and not k.startswith(_FUKO_ENV_PREFIX)
             and k not in _ANTHROPIC_INHERITED_VARS
             and k not in provider_key_vars
+            and k not in store_cred_vars
         }
         # Auth-mode-independent: the entry's context window rides along
         # whenever build_env derived one (from `max_context`). The ambient

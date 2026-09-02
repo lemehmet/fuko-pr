@@ -56,14 +56,22 @@ services:
       # hold. See docs/deployment.md.
       #
       # FUKO_TRANSCRIPT_STORE_BACKEND: file          # "" (off) | file | s3 | r2
-      # FUKO_TRANSCRIPT_STORE_ROOT: /var/lib/fuko/transcript-blobs   # mount a volume, or the blobs die with the container
+      # FUKO_TRANSCRIPT_STORE_ROOT: /var/lib/fuko/transcript-blobs
+      #   ...and with the `file` backend, uncomment the matching volume in the
+      #   `volumes:` block below -- without it the blobs die with the container.
       # FUKO_TRANSCRIPT_STORE_BUCKET: fuko-transcripts       # s3/r2 instead of ROOT
       # FUKO_TRANSCRIPT_STORE_PREFIX: transcripts
       # FUKO_TRANSCRIPT_STORE_ENDPOINT_URL: https://<accountid>.r2.cloudflarestorage.com
     restart: unless-stopped
+    # Uncomment together with FUKO_TRANSCRIPT_STORE_BACKEND: file above -- the
+    # blobs are kept forever by design (#236), so an unmounted ROOT loses them
+    # every time the container is replaced.
+    # volumes:
+    #   - transcripts:/var/lib/fuko/transcript-blobs
     ports:
       - "8000:8000"
 
 volumes:
   pgdata: {}
   ollama: {}
+  # transcripts: {}

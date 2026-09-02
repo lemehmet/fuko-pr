@@ -16,6 +16,20 @@ KEY = "20260901T101500Z-abcdef012345"
 BODY = b'{"type":"assistant"}\n{"type":"user"}\n{"type":"result"}\n'
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_sidecar(monkeypatch):
+    """Start every test from "this host has no sidecar".
+
+    `ship` and `upload_target` branch on `FUKO_URL` being unset, and it is a
+    variable a developer or a CI job may legitimately have exported -- under
+    which the no-sidecar assertions below would silently exercise the HTTP
+    branch and POST at whatever host it names. The absence has to be arranged,
+    not assumed; the tests that want the sidecar branch set it themselves.
+    """
+    monkeypatch.delenv("FUKO_URL", raising=False)
+    monkeypatch.delenv("FUKO_TOKEN", raising=False)
+
+
 @pytest.fixture
 def store_dir(tmp_path, monkeypatch):
     """Point the sidecar's transcript store at a local directory."""
@@ -72,6 +86,29 @@ def test_an_unconfigured_store_answers_503_and_the_sidecar_still_serves(monkeypa
     assert client.get("/healthz").json() == {"ok": True}
 
 
+def test_a_configured_but_unusable_store_is_a_503_with_the_reason(monkeypatch):
+    """The store is built per request, so a bad configuration would otherwise
+    reach the caller as a 500 and a traceback on every single upload."""
+    monkeypatch.setattr(settings, "transcript_store_backend", "s3")
+    monkeypatch.setattr(settings, "transcript_store_bucket", "")
+    resp = _client(monkeypatch).post(f"/transcripts/{KEY}", content=BODY)
+    assert resp.status_code == 503
+    assert "FUKO_TRANSCRIPT_STORE_BUCKET" in resp.json()["detail"]
+
+
+def test_a_bucket_backend_without_boto3_is_a_503_naming_the_extra(monkeypatch):
+    """`docker/Dockerfile.sidecar` installs `.[s3]`; a sidecar installed without
+    it must say so rather than raise ModuleNotFoundError per upload."""
+
+    def _no_boto3():
+        raise ImportError("No module named 'boto3'")
+
+    monkeypatch.setattr(main, "transcript_store", _no_boto3)
+    resp = _client(monkeypatch).post(f"/transcripts/{KEY}", content=BODY)
+    assert resp.status_code == 503
+    assert "boto3" in resp.json()["detail"]
+
+
 def test_the_upload_endpoint_needs_the_sidecar_token(monkeypatch, store_dir):
     monkeypatch.setattr(main.settings, "auth_token", _TOKEN)
     resp = TestClient(main.app).post(f"/transcripts/{KEY}", content=BODY)
@@ -123,7 +160,7 @@ def test_the_runner_streams_the_file_to_the_sidecar_under_its_token(tmp_path, mo
     seen = {}
 
     def fake_post(url, content=None, headers=None, timeout=None):
-        seen.update(url=url, body=content.read(), headers=headers, timeout=timeout)
+        seen.update(url=url, body=b"".join(content), headers=headers, timeout=timeout)
         return httpx.Response(200, request=httpx.Request("POST", url))
 
     monkeypatch.setenv("FUKO_URL", "http://sidecar:8000/")
@@ -138,8 +175,51 @@ def test_the_runner_streams_the_file_to_the_sidecar_under_its_token(tmp_path, mo
     assert seen["headers"]["Authorization"] == "Bearer runner-token"
     assert seen["headers"]["Content-Type"] == "application/x-ndjson"
     # An order of magnitude above `/metrics/run`'s 10s, which is the whole
-    # reason this is not that endpoint.
-    assert seen["timeout"] == transcript_client.UPLOAD_TIMEOUT_S > 10.0
+    # reason this is not that endpoint. Per-phase, because httpx has no request
+    # lifetime -- the absolute bound is `_deadlined`, asserted below.
+    assert seen["timeout"].read == transcript_client.UPLOAD_TIMEOUT_S > 10.0
+    assert seen["timeout"].write == transcript_client.UPLOAD_TIMEOUT_S
+    assert seen["timeout"].connect == transcript_client.CONNECT_TIMEOUT_S
+
+
+def test_an_upload_that_outlives_its_ceiling_is_abandoned_rather_than_prolonged(
+    tmp_path, monkeypatch
+):
+    """httpx's `timeout=` is per phase, so a peer that keeps accepting chunks
+    slowly resets it forever. The deadline rides on the body stream instead."""
+
+    def fake_post(url, content=None, headers=None, timeout=None):
+        b"".join(content)  # drain the generator, which is what raises
+        raise AssertionError("the upload should not have completed")
+
+    monkeypatch.setenv("FUKO_URL", "http://sidecar:8000")
+    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(transcript_client, "UPLOAD_TIMEOUT_S", -1.0)
+    path = tmp_path / "t.ndjson"
+    path.write_bytes(BODY)
+    with pytest.raises(TimeoutError, match="UPLOAD_TIMEOUT_S"):
+        transcript_client.ship(KEY, path)
+
+
+def test_the_body_is_chunked_by_size_rather_than_by_event(tmp_path, monkeypatch):
+    """Iterating the handle itself would yield one write per NDJSON line, on a
+    file whose whole point is that it has many."""
+    chunks = []
+
+    def fake_post(url, content=None, headers=None, timeout=None):
+        chunks.extend(content)
+        return httpx.Response(200, request=httpx.Request("POST", url))
+
+    monkeypatch.setenv("FUKO_URL", "http://sidecar:8000")
+    monkeypatch.setattr(transcript_client, "UPLOAD_CHUNK_BYTES", 16)
+    monkeypatch.setattr(httpx, "post", fake_post)
+    path = tmp_path / "t.ndjson"
+    path.write_bytes(BODY)
+    transcript_client.ship(KEY, path)
+
+    assert b"".join(chunks) == BODY
+    assert all(len(c) <= 16 for c in chunks)
+    assert len(chunks) == -(-len(BODY) // 16)
 
 
 @pytest.mark.parametrize(
@@ -171,7 +251,7 @@ def test_the_whole_path_end_to_end_from_ship_to_stored_blob(tmp_path, monkeypatc
     client = _client(monkeypatch)
 
     def fake_post(url, content=None, headers=None, timeout=None):
-        return client.post(urlsplit(url).path, content=content.read(), headers=headers)
+        return client.post(urlsplit(url).path, content=b"".join(content), headers=headers)
 
     monkeypatch.setenv("FUKO_URL", "http://sidecar:8000")
     monkeypatch.setenv("FUKO_TOKEN", _TOKEN)
