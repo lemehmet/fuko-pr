@@ -784,7 +784,15 @@ UI_READ_TIMEOUT_S = 5.0
 These reads do not go through :func:`sidecar.db.db_best_effort`, so they would
 otherwise inherit psycopg_pool's own 30s -- and the page whose whole point is to
 report an unreachable store would take half a minute to say so. Bounds
-ACQUISITION only, exactly as :data:`sidecar.db.BEST_EFFORT_TIMEOUT_S` does.
+ACQUISITION only, exactly as :data:`sidecar.db.BEST_EFFORT_TIMEOUT_S` does --
+which is why the reads that use it also pass ``embed_space=False``. That bound
+covers no work done *before* a connection is handed out, and the embedding-
+provenance pass is exactly such work: on a sidecar whose startup warm deferred
+(``main.lifespan`` catches a database that was not ready yet), the first caller
+to reach the pool runs it, and it can re-embed the whole store synchronously.
+These reads touch neither ``learnings`` nor a vector, so they have nothing to
+gain from waiting on it -- the same reason :func:`sidecar.db.db_best_effort`
+declares it for this module (#217).
 
 Higher than that 2s budget on purpose: nothing here is on a review's critical
 path, so waiting a little longer for a busy-but-live pool is cheaper than
@@ -1040,7 +1048,7 @@ def lanes(
     """
     from .db import db
 
-    with db(timeout=UI_READ_TIMEOUT_S) as conn:
+    with db(timeout=UI_READ_TIMEOUT_S, embed_space=False) as conn:
         rows = conn.execute(
             _LANE_INDEX_SQL,
             (
@@ -1118,7 +1126,7 @@ def pr_findings(
     """
     from .db import db
 
-    with db(timeout=UI_READ_TIMEOUT_S) as conn:
+    with db(timeout=UI_READ_TIMEOUT_S, embed_space=False) as conn:
         rows = conn.execute(
             _PR_FINDINGS_SQL,
             (repo, pr, seat, seat, min(max(1, limit), MAX_LEDGER_ROWS), max(0, offset)),
@@ -1183,7 +1191,7 @@ def pr_coverage(
     """
     from .db import db
 
-    with db(timeout=UI_READ_TIMEOUT_S) as conn:
+    with db(timeout=UI_READ_TIMEOUT_S, embed_space=False) as conn:
         rows = conn.execute(
             _PR_COVERAGE_SQL,
             (repo, pr, seat, seat, min(max(1, limit), MAX_LEDGER_ROWS), max(0, offset)),

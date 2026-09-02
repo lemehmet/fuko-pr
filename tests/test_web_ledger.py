@@ -321,6 +321,38 @@ def test_a_pr_without_a_repo_stays_on_the_index(monkeypatch):
     assert "Review state ledgers" in page
 
 
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"repo": "a/b", "pr": "", "seat": ""},  # the form's own default submission
+        {"repo": "", "pr": "", "seat": ""},
+        {"repo": "a/b", "pr": "", "seat": "henry"},
+    ],
+)
+def test_the_filter_form_submits_an_empty_pr_field_and_still_gets_a_page(monkeypatch, params):
+    """A browser submits every text input, so an untouched PR box arrives as ``pr=``.
+
+    An ``int | None`` parameter rejects that with a 422 -- ``Optional`` admits
+    an ABSENT parameter, not an empty one -- which would break the form on the
+    exact clicks it exists for: filtering by repository alone, or by seat alone.
+    """
+    seen, client = _wire(monkeypatch, lanes=[_lane()])
+    resp = client.get("/ui/ledger", params=params)
+    assert resp.status_code == 200
+    assert "Review state ledgers" in resp.text
+    assert seen["lanes"][1] is None
+
+
+@pytest.mark.parametrize("value", ["abc", "0", "-3", "1.5", "9" * 14])
+def test_an_unreadable_pr_filter_drops_itself_rather_than_the_page(monkeypatch, value):
+    """A typo in one filter must not become a 422 or an "unreachable store" notice."""
+    seen, client = _wire(monkeypatch, lanes=[_lane()])
+    resp = client.get("/ui/ledger", params={"repo": "a/b", "pr": value})
+    assert resp.status_code == 200
+    assert "Review state ledgers" in resp.text
+    assert seen["lanes"][1] is None
+
+
 @pytest.mark.parametrize("path", ["/ui/ledger", "/ui/ledger?repo=a%2Fb&pr=7"])
 def test_the_page_is_open_and_read_only(monkeypatch, path):
     _, client = _wire(monkeypatch, lanes=[_lane()], findings=[_finding()])

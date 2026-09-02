@@ -391,7 +391,7 @@ def render_detail(
 @router.get(PAGE.path, response_class=HTMLResponse)
 def view(
     repo: str | None = None,
-    pr: int | None = None,
+    pr: str | None = None,
     seat: str | None = None,
     show: str = "findings",
     offset: int = 0,
@@ -408,7 +408,14 @@ def view(
     The reads deliberately raise (they are not ``review_state._best_effort``
     wrapped), which is what makes "unreachable" reportable at all -- a swallowed
     exception would render the same empty table a healthy store does.
+
+    ``pr`` arrives as text and is parsed by :func:`sidecar.web.components.form_int`
+    because it is bound to a form field: the filter submits an untouched PR box
+    as ``pr=``, which an ``int | None`` parameter rejects with a 422 rather than
+    treating as absent. Declaring it text is what makes filtering by repository
+    alone -- the form's own default -- reach this function at all.
     """
+    number = c.form_int(pr)
     limit = min(max(1, limit), review_state.MAX_LEDGER_ROWS)
     offset = max(0, offset)
     seat = seat or None
@@ -417,22 +424,22 @@ def view(
     findings = review_state.FindingPage()
     coverage = review_state.CoveragePage()
     db_error = False
-    detail = bool(repo) and pr is not None
+    detail = bool(repo) and number is not None
     if db_enabled:
         try:
             if detail:
-                index = review_state.lanes(repo=repo, pr=pr, limit=review_state.MAX_LANES)
+                index = review_state.lanes(repo=repo, pr=number, limit=review_state.MAX_LANES)
                 if show == "coverage":
                     coverage = review_state.pr_coverage(
-                        repo, pr, seat=seat, limit=limit, offset=offset
+                        repo, number, seat=seat, limit=limit, offset=offset
                     )
                 else:
                     findings = review_state.pr_findings(
-                        repo, pr, seat=seat, limit=limit, offset=offset
+                        repo, number, seat=seat, limit=limit, offset=offset
                     )
             else:
                 index = review_state.lanes(
-                    repo=repo or None, pr=pr, seat=seat, limit=limit, offset=offset
+                    repo=repo or None, pr=number, seat=seat, limit=limit, offset=offset
                 )
         except Exception as e:
             print(f"fuko: ledger view degraded (database unreachable?): {e}", file=sys.stderr)
@@ -440,7 +447,7 @@ def view(
     if detail:
         return render_detail(
             repo=repo or "",
-            pr=int(pr or 0),
+            pr=int(number or 0),
             index=index,
             findings=findings,
             coverage=coverage,
@@ -454,7 +461,7 @@ def view(
     return render_index(
         index=index,
         repo=repo,
-        pr=pr,
+        pr=number,
         seat=seat,
         offset=offset,
         limit=limit,

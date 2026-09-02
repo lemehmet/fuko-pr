@@ -325,7 +325,15 @@ def test_iso_keeps_none_distinguishable_and_accepts_a_string():
     ],
 )
 def test_every_operator_read_bounds_its_acquisition(pg, call):
-    """An unreachable store must reach the page as a notice, not as a 30s hang."""
+    """An unreachable store must reach the page as a notice, not as a 30s hang.
+
+    ``embed_space=False`` is half of that bound rather than a separate concern:
+    the timeout covers waiting for a connection and nothing that happens before
+    one is handed out, and the embedding-provenance pass -- which these reads
+    have no stake in, touching neither ``learnings`` nor a vector -- runs there
+    and can re-embed the whole store. Pinned together so a read cannot keep the
+    number while quietly reacquiring the unbounded work in front of it.
+    """
     conn = pg([])
     call()
-    assert conn.opened_with == [{"timeout": review_state.UI_READ_TIMEOUT_S}]
+    assert conn.opened_with == [{"timeout": review_state.UI_READ_TIMEOUT_S, "embed_space": False}]
