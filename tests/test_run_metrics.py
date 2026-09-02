@@ -451,6 +451,64 @@ def test_review_records_metrics_with_failover(monkeypatch, tmp_path):
     }
 
 
+def test_review_records_the_last_throttled_attempts_transcript_when_the_pool_exhausts(
+    monkeypatch, tmp_path
+):
+    """The exhaustion branch is the ONLY path on which a throttled agentic
+    attempt's index reaches `record()` -- when the killed attempt is last in the
+    pool. Everywhere else it is discarded with the rest of that attempt's
+    metrics (#258), so this row is the recorded half of that residue and is
+    worth pinning: nothing else would catch the argument being dropped, or the
+    branch recording the wrong attempt's index."""
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text(
+        "[[review.models]]\n"
+        'provider = "zai-coding"\nname = "glm-5.2"\ntoken_env = "FUKO_GITHUB_TOKEN_DORIAN"\n'
+        "[[review.models]]\n"
+        'provider = "anthropic"\nname = "claude-sonnet-4-6"\nrole = "backup"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ZAI_KEY", "k")
+    monkeypatch.setenv("ANTHROPIC_KEY", "k")
+    monkeypatch.setattr(runner, "build_knowledge", lambda *a: "")
+    monkeypatch.setattr(runner, "_cb_cooldowns", lambda: set())
+    monkeypatch.setattr(runner, "_cb_trip", lambda *a: None)
+    monkeypatch.setattr(runner, "_estimate_required_context", lambda *a: None)
+
+    first = {"key": _INDEX["key"], "complete": False, "tool_calls": {"Read": 1}}
+    last = {"key": "0199bbbb-cccc-7ddd-8eee-ffffffffffff", "complete": False}
+    results = iter(
+        [
+            InvokeResult(returncode=124, detail="tool_timeout", throttled=True, transcript=first),
+            InvokeResult(returncode=124, detail="tool_timeout", throttled=True, transcript=last),
+        ]
+    )
+
+    class FakeBackend:
+        def build_env(self, preset, model, knowledge, tools):
+            return {}
+
+        def invoke(self, pr, env, tools):
+            return next(results)
+
+        def normalize_output(self, pr, model="", *, compare_label=None, **_kw):
+            return []
+
+    monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
+    recorded = []
+    monkeypatch.setattr(runner, "_record_run", lambda pr, model, **kw: recorded.append((model, kw)))
+
+    runner.review("https://github.com/o/r/pull/7", str(cfg))
+
+    assert len(recorded) == 1
+    model, kw = recorded[0]
+    assert kw["outcome"] == "throttled_out" and kw["attempts"] == 2
+    # The LAST attempt's, matching the model the row is attributed to -- the
+    # same rule the failover golden above states for costs.
+    assert model.provider == "anthropic"
+    assert kw["transcript"] == last
+
+
 def test_sequential_compare_records_per_branch_slots(monkeypatch, tmp_path):
     cfg = tmp_path / ".fuko.toml"
     cfg.write_text(
