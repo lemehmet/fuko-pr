@@ -840,10 +840,22 @@ class LaneStat:
     ``eligible``/``carried``/``settled`` are the arithmetic behind the two rates
     #159 needs, on one shared denominator: findings this seat recorded in a
     round STRICTLY BEFORE its latest one, which are the findings at least one
-    later round could have acted on. Of those, ``carried`` are still open (the
-    ledger re-showed them and nothing closed them) and ``settled`` are the ones
-    a verdict closed. ``stale`` rows count in neither -- fuko retired them
-    itself, no round decided anything -- so the two rates do not sum to one.
+    later round could have acted on. Of those, ``carried`` are the ones still
+    open and ``settled`` are the ones a verdict closed. ``stale`` rows count in
+    neither -- fuko retired them itself, no round decided anything -- so the two
+    rates do not sum to one.
+
+    That denominator is deliberately NOT windowed by :data:`RETENTION_DAYS`,
+    which is the one place it parts company with ``offerable``. An open row
+    whose ``updated_at`` ages past the window leaves :func:`open_findings` and
+    cannot return -- only a round re-asserting a row refreshes its timestamp,
+    and a round is only ever handed rows the window admits -- so it keeps
+    counting as ``eligible`` and ``carried`` while no round is being shown it
+    any more. That is the intended reading rather than an oversight: these rates
+    describe what this lane's HISTORY holds, and a claim that went open and then
+    forgotten is precisely what a carry-forward rate should be counting. The
+    windowed number is ``offerable``, windowed because it alone is a claim about
+    what :func:`open_findings` would hand a round.
     """
 
     repo: str

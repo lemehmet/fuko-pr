@@ -475,6 +475,12 @@ def test_operator_ledger_reads_on_a_live_server():
     assert a.carry_forward_rate == 1 / 3 and a.settle_rate == 2 / 3
     assert a.offerable == 1  # the 200-day-old open row is not offerable...
     assert a.counts["open"] == 2  # ...and is still counted and still shown
+    # ...and still counts in the rate denominator, which is windowed nowhere:
+    # `carried` is 1 and that 1 IS the aged row, because a claim that went open
+    # and then forgotten is what a carry-forward rate is for. Only `offerable`
+    # takes the retention window, being the only one of these that claims
+    # anything about what a round would be handed.
+    assert a.carried == 1 and a.offerable == 1
     assert a.never_offered == 0
     assert (a.coverage_total, a.coverage_live) == (2, 1)
     assert a.last_activity is not None
