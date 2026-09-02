@@ -64,7 +64,17 @@ def is_valid(value: str | None, now: float | None = None) -> bool:
     if len(parts) != 3 or parts[0] != "v1":
         return False
     _, expires, signature = parts
-    if not expires.isdigit() or int(expires) <= (now if now is not None else time.time()):
+    # The length test runs before ``int()``, for the reason
+    # :func:`sidecar.web.components.form_int` states: CPython refuses a
+    # conversion past ``sys.get_int_max_str_digits()`` with a ValueError, and
+    # nothing here would catch it. This value comes off a cookie, and
+    # :func:`nav_extra` reads the cookie on EVERY page render -- including the
+    # open ones -- so an unbounded conversion here is a 500 on the whole UI for
+    # anyone who can set a header. Twenty digits is far past any epoch second a
+    # signature of ours will ever carry.
+    if not expires.isdigit() or len(expires) > 20:
+        return False
+    if int(expires) <= (now if now is not None else time.time()):
         return False
     expected = _sign(expires)
     return bool(expected) and hmac.compare_digest(expected, signature)

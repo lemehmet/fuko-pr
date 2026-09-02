@@ -190,7 +190,12 @@ def read_session(data: bytes, *, offset: int, limit: int) -> SessionPage:
             continue
         try:
             decoded = json.loads(text)
-        except ValueError:
+        except (ValueError, RecursionError):
+            # RecursionError rather than only ValueError: `json.loads` hits the
+            # interpreter's recursion limit on a deeply nested line, and that is
+            # a RuntimeError. A line this page cannot parse is drawn as its raw
+            # bytes -- the contract is that the page always draws, and an
+            # uncaught RecursionError here would be a 500 instead.
             decoded = None
         lines.append(
             SessionLine(

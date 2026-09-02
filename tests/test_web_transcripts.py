@@ -383,6 +383,15 @@ def test_a_configured_but_broken_store_is_a_fault_not_a_bad_key(wire, client):
     assert "not a well-formed transcript key" not in text
 
 
+def test_a_deeply_nested_line_is_drawn_raw_not_a_500(wire, client):
+    """`json.loads` raises RecursionError, a RuntimeError, on a deeply nested line."""
+    wire(blob=_feed("[" * 100000 + "]" * 100000, _assistant("still here")))
+    _sign_in(client)
+    resp = client.get(f"{page.PAGE.path}?key=k")
+    assert resp.status_code == 200
+    assert "still here" in resp.text
+
+
 def test_a_session_response_forbids_shared_caching(wire, client):
     """A cache that kept this could serve stored repo content past `require`."""
     wire(blob=_feed(_assistant("hi")))

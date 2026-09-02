@@ -60,6 +60,19 @@ def test_forged_and_malformed_sessions_are_rejected(client):
     assert security.is_valid("") is False
 
 
+def test_an_absurdly_long_expiry_is_rejected_not_raised(client):
+    """`int()` refuses a digit string past CPython's limit, and nothing here catches it."""
+    value = security.issue()
+    signature = value.split(".")[2]
+    assert security.is_valid(f"v1.{'9' * 5000}.{signature}") is False
+
+
+def test_a_crafted_cookie_cannot_500_an_open_page(client):
+    """`nav_extra` reads the cookie on every render, so this reaches the open pages too."""
+    client.cookies.set(security.COOKIE, f"v1.{'9' * 5000}.x")
+    assert client.get(security.LOGIN_PATH).status_code == 200
+
+
 def test_a_session_signed_by_another_token_is_rejected(client, monkeypatch):
     value = security.issue()
     monkeypatch.setattr(main.settings, "auth_token", "a-different-token")
