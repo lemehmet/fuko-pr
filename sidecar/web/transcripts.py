@@ -213,8 +213,12 @@ def _fold(label: str, text: str, *, css: str = "muted") -> str:
 
     Short blocks stay open because the point of the page is to READ a session;
     long ones fold so a single vendored file cannot bury the turn after it.
-    ``label`` is this page's own chrome and is escaped as such; ``text`` is
-    stored bytes and goes through :func:`_esc`.
+
+    BOTH arguments go through :func:`_esc`. ``label`` reads like this page's own
+    chrome and is not always: a block's ``type`` and an event's ``type`` are
+    stored bytes that arrive here as the label, so escaping them without
+    sanitizing would leave exactly one seam where a lone surrogate still reaches
+    the response encoder.
     """
     body, clipped = _clip(text)
     rendered = _esc(body)
@@ -223,7 +227,7 @@ def _fold(label: str, text: str, *, css: str = "muted") -> str:
             f'\n<span class="bad">[clipped at {MAX_BLOCK_CHARS} characters — '
             "fetch the whole session with `fuko transcripts get`]</span>"
         )
-    head = f"<span{c.attrs(class_=css or None)}>{c.esc(label)}</span>"
+    head = f"<span{c.attrs(class_=css or None)}>{_esc(label)}</span>"
     if len(text) <= _PREVIEW_CHARS and "\n" not in text:
         return f"<p>{head}</p><pre>{rendered}</pre>"
     preview = _esc(text[:_PREVIEW_CHARS].replace("\n", " "))
@@ -270,7 +274,7 @@ def _block_html(block: object) -> str:
         # lone-surrogate string as its `\ud800` escape rather than as an
         # unencodable character, which is one fewer way for stored bytes to
         # reach the response encoder intact.
-        return _fold(_sanitized(label), json.dumps(block.get("input"), indent=2, default=str))
+        return _fold(label, json.dumps(block.get("input"), indent=2, default=str))
     if kind == "tool_result":
         label = "tool result · error" if block.get("is_error") else "tool result"
         return _fold(

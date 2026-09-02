@@ -551,3 +551,18 @@ def test_a_result_spelled_as_text_blocks_renders_its_text(wire, client):
     wire(blob=_feed(_tool_result([{"type": "text", "text": "line one"}])))
     _sign_in(client)
     assert "line one" in client.get(f"{page.PAGE.path}?key=k").text
+
+
+def test_a_lone_surrogate_in_a_block_type_does_not_fault_the_page(wire, client):
+    # The block's own `type` is stored bytes too, and it reaches the page as a
+    # LABEL rather than as body text — the one seam where a forgotten sanitize
+    # would still reach the response encoder.
+    wire(blob=b'{"type":"assistant","message":{"content":[{"type":"\\ud800"}]}}')
+    _sign_in(client)
+    assert client.get(f"{page.PAGE.path}?key=k").status_code == 200
+
+
+def test_a_lone_surrogate_in_an_event_type_does_not_fault_the_page(wire, client):
+    wire(blob=b'{"type":"\\ud800","detail":"x"}')
+    _sign_in(client)
+    assert client.get(f"{page.PAGE.path}?key=k").status_code == 200
