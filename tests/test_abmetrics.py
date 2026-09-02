@@ -8,6 +8,7 @@ is exactly the failure mode ad-hoc measurement scripts have.
 from sidecar.abmetrics import (
     Claim,
     arm_metrics,
+    candidate_pairs,
     chapman_pool_size,
     claim_title,
     backup_served_rounds,
@@ -84,6 +85,62 @@ def test_pair_metrics_are_none_when_the_arms_never_overlapped():
 
     assert p.rounds == 0 and p.union == 0
     assert p.agreement is None and p.pool_estimate is None and p.coverage is None
+
+
+def test_candidate_pairs_lists_the_paraphrase_the_exact_rule_rejected():
+    """The #159 shape: one defect, two wordings, scored 0% and adjudicated the same."""
+    claims = [
+        _c("a", "r1", "src/embed.py", "Prefix is added after the budget is allocated"),
+        _c("b", "r1", "src/embed.py", "Prefix is prepended after the budget was spent"),
+    ]
+
+    assert pair_metrics(claims, "a", "b").agreement == 0.0
+    pairs = candidate_pairs(claims, "a", "b")
+
+    assert len(pairs) == 1
+    assert (pairs[0].round_key, pairs[0].file) == ("r1", "src/embed.py")
+    assert pairs[0].a_titles == ("Prefix is added after the budget is allocated",)
+    assert pairs[0].b_titles == ("Prefix is prepended after the budget was spent",)
+
+
+def test_candidate_pairs_excludes_what_the_exact_rule_already_matched():
+    """An exact match is agreement, counted there; re-listing it invites a double count."""
+    claims = [
+        _c("a", "r1", "src/app.py", "Unchecked None"),
+        _c("b", "r1", "src/app.py", "unchecked none"),
+    ]
+
+    assert pair_metrics(claims, "a", "b").shared == 1
+    assert candidate_pairs(claims, "a", "b") == ()
+
+
+def test_candidate_pairs_need_the_same_round_and_the_same_file():
+    claims = [
+        # Same file, different rounds: the arms were asked twice, not in disagreement.
+        _c("a", "r1", "src/app.py", "leak"),
+        _c("b", "r2", "src/app.py", "leak, restated"),
+        # Same round, different files: nothing to adjudicate.
+        _c("a", "r3", "src/app.py", "race"),
+        _c("b", "r3", "src/util.py", "race, restated"),
+    ]
+
+    assert candidate_pairs(claims, "a", "b") == ()
+
+
+def test_candidate_pairs_are_drawn_from_the_rounds_the_receipts_name():
+    """Same membership rule as the agreement figure they qualify."""
+    claims = [
+        _c("a", "r1", "src/app.py", "leak"),
+        _c("b", "r1", "src/app.py", "leak, restated"),
+    ]
+    receipts = [("a", "r1"), ("b", "r2")]
+
+    # b left no receipt on r1, so r1 is not a round both arms reviewed.
+    assert candidate_pairs(claims, "a", "b", receipts) == ()
+    assert len(candidate_pairs(claims, "a", "b", [*receipts, ("b", "r1")])) == 1
+    # With no receipts at all the claim-derived fallback stands in, as it does
+    # for the agreement figure these pairs qualify.
+    assert len(candidate_pairs(claims, "a", "b")) == 1
 
 
 def test_claim_title_prefers_the_stored_title_and_unwraps_its_rendering():
