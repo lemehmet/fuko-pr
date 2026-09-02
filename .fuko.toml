@@ -139,25 +139,22 @@ coverage_ledger = true
 findings_ledger = true
 token_env = "FUKO_GITHUB_TOKEN_GRAY"
 
-# The only backup, and it is currently BROKEN — kept deliberately. z.ai answers
-# `1113` ("insufficient balance or no resource package") for every model on both
-# its surfaces, verified by hand 2026-08-31 against `/api/anthropic` AND
-# `/api/coding/paas/v4`, while the z.ai UI showed usage well below quota. That
-# rules out both a wrong model slug and a surface-entitlement problem; the
-# account state and the API disagree, so it reads as a z.ai-side incident or a
-# broken limiter. Do NOT re-diagnose this as a bad `glm-5.3` slug — the slug was
-# never reached. A failed failover costs ~3 min and leaves an honest
-# "pool exhausted" receipt, which beats declaring no backup at all; the next
-# qwen exhaustion is a free live test of whether z.ai has recovered.
+# NO BACKUP as of 2026-09-01, on purpose. The z.ai seat that sat here was
+# dropped so that account's capacity goes to mepro, which is in active
+# development and needs its reviewers more than this repo does.
 #
-# `backend = "agentic"` is REQUIRED, not decorative: `_compatible_backups`
-# filters a branch's pool to same-driver entries, so without it every seat above
-# has an EMPTY pool. Provider is `zai-anthropic`, not the OpenAI-shaped
-# `zai-coding` — the agentic driver speaks the Anthropic API.
-[[review.models]]
-provider = "zai-anthropic"
-name = "glm-5.3"
-max_context = 1000000
-auth = "api-key"
-backend = "agentic"
-role = "backup"
+# ACCEPTED COST, stated plainly: a qwen exhaustion now ends the round with an
+# honest "pool exhausted" receipt instead of spending ~3 min on a failover
+# attempt. On a dogfood repo that is a fair trade; on mepro it would not be.
+#
+# THREE THINGS TO CARRY BACK when a backup is re-added, none of them obvious
+# from the schema:
+# - `backend = "agentic"` is REQUIRED, not decorative. `_compatible_backups`
+#   filters a branch's pool to SAME-driver entries, so a backup without it
+#   leaves every agentic seat above with an empty pool.
+# - For z.ai specifically the provider is `zai-anthropic`, not the OpenAI-shaped
+#   `zai-coding` — the agentic driver speaks the Anthropic API.
+# - z.ai answering `1113` ("insufficient balance or no resource package") means
+#   THROTTLED, not unpaid: verified by hand 2026-08-31 against `/api/anthropic`
+#   AND `/api/coding/paas/v4` while the z.ai UI showed usage well below quota.
+#   Do NOT re-diagnose that as a bad `glm-5.3` slug — the slug was never reached.
