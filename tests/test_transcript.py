@@ -32,6 +32,11 @@ class _RecordingSink:
         self.lines = []
         self.closes = 0
         self._fail_at = fail_at
+        # Stands in for a sink WITH a destination: `Transcript.index` writes a
+        # row only for bytes a sink affirms it stored, so a double that stayed
+        # silent about it would suppress every index in this file for the wrong
+        # reason.
+        self.stored = True
 
     def write(self, line):
         if self._fail_at is not None and len(self.lines) + 1 == self._fail_at:
@@ -993,9 +998,21 @@ def test_a_read_without_a_usable_path_is_counted_but_not_tracked():
     assert index.tool_calls == {"Read": 2} and index.repeated_read_files == 0
 
 
-def test_run_review_indexes_the_feed_it_captured(tmp_path):
-    """End to end through the real harness: the figures come off the same feed
-    the tee stored, with nothing re-downloaded."""
+def test_a_capture_with_nowhere_to_ship_is_not_indexed(tmp_path):
+    """The `fuko review` laptop case: no `FUKO_URL`, no store backend, so the
+    transcript is a local file. The figures are real, but nothing else can fetch
+    what they describe, and a reference is a promise that it can."""
+    transcript = open_transcript([], directory=str(tmp_path / "transcripts"))
+    transcript.write(json.dumps(_tool_use("Read", file_path="a.py")) + "\n")
+    transcript.close()
+    assert transcript.index() is None
+
+
+def test_run_review_indexes_the_feed_it_captured(tmp_path, monkeypatch):
+    """End to end through the real harness and a real store: the figures come
+    off the same feed the tee stored, with nothing re-downloaded."""
+    monkeypatch.setattr(settings, "transcript_store_backend", "file")
+    monkeypatch.setattr(settings, "transcript_store_root", str(tmp_path / "blobs"))
     assert _feed_script(tmp_path, _INDEX_FEED).exists()
     transcript = open_transcript([], directory=str(tmp_path / "transcripts"))
     run_review(

@@ -119,7 +119,10 @@ def _tool_calls(value) -> dict:
     the rest of the row -- the same reason an unusable key costs only the
     reference (:func:`_index_transcript`) and an unstorable cost only itself
     (:func:`_storable_cost`). ``bool`` is excluded despite being an ``int``:
-    ``True`` as a call count is a shape error, not one call.
+    ``True`` as a call count is a shape error, not one call -- and the request
+    model refuses the same spelling on the HTTP hop (``StrictInt``, which lax
+    coercion would otherwise have turned into a stored ``1``), so the two
+    transports agree about it rather than one of them counting a flag.
     """
     if not isinstance(value, dict):
         return {}

@@ -635,10 +635,14 @@ column — `transcript_key` — pointing at it:
   first, in its own transaction; the reference is written only if it landed.
   There is no foreign key, deliberately: the invariant is held by write order,
   and a constraint would let a transcript-side failure reject the run row's
-  duration, outcome, attempts and token counts too. A failed capture or upload
-  simply records no reference — and so does the off state above: shipping to a
-  sidecar whose store is unconfigured is silent, but nothing was stored, so
-  there is nothing for a reference to name.
+  duration, outcome, attempts and token counts too.
+- **A reference is only ever written for a transcript that reached shared
+  storage**, because the key is what a reader fetches it by. A failed capture or
+  upload records none; so does the off state above, where shipping to a sidecar
+  whose store is unconfigured succeeds silently but stores nothing; and so does
+  a runner with no destination at all (a `fuko review` laptop), whose transcript
+  is a local file. Those runs still get their `review_runs` row — they get a
+  NULL `transcript_key`.
 
 The readers (#240, #241) are the rest of the epic; nothing reads the blobs yet.
 

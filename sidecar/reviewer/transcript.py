@@ -280,10 +280,13 @@ class ShippingTranscriptSink:
         self._ship = ship
         self._closed = False
         #: Whether shared storage ACCEPTED these bytes; ``None`` until
-        #: :meth:`close` has tried. Read by :meth:`Transcript.index` (#239),
-        #: because shipping can succeed silently without storing anything --
-        #: the sidecar's marked off state -- and a reference must not name a
-        #: blob that only ever existed on this runner's disk.
+        #: :meth:`close` has tried. This attribute EXISTING is itself half the
+        #: signal :meth:`Transcript.index` reads (#239): a sink that cannot
+        #: affirm storage is read as not having stored, so a bare
+        #: :class:`FileTranscriptSink` -- a capture with nowhere to ship --
+        #: never becomes a reference. The other half is this value, because
+        #: shipping can also succeed silently without storing anything (the
+        #: sidecar's marked off state).
         self.stored: bool | None = None
 
     def write(self, line: str) -> None:
@@ -567,19 +570,27 @@ class Transcript:
         delivers the bytes or fails; the figures themselves are complete from
         the last :meth:`write` on, and closing clears no state this reads.
 
-        ``None`` in three cases, all of which mean the reference on the
-        ``review_runs`` row stays NULL rather than naming a blob:
+        The rule is ONE thing, stated once: a row is written only for bytes that
+        reached SHARED storage, because the key it is written under is what a
+        reader fetches them by (``migrations/013``). So the sink has to AFFIRM
+        that it stored them -- anything that does not is read as "not stored",
+        which is why this is ``not getattr(...)`` and not a test against
+        ``False``. ``None`` therefore in four cases, all of which leave the
+        reference on the ``review_runs`` row NULL rather than naming a blob:
 
         * **Nothing landed.** A run that streamed no events leaves no file and
           ships nothing (:class:`ShippingTranscriptSink`), so an index row would
           point at a blob that does not exist.
+        * **There was nowhere to ship it.** With no destination configured
+          (:func:`sidecar.reviewer.transcript_client.upload_target`) the sink is
+          a bare :class:`FileTranscriptSink` and the transcript is a local file
+          on this runner -- the ``fuko review`` laptop case. The figures are
+          real, but nothing else can fetch what they describe.
         * **Storage declined the bytes.** Shipping to a sidecar whose blob store
           is unconfigured is a SILENT success -- deliberately, so staging
           capture ahead of storage does not print a line per run -- but nothing
           was stored, and that is the configuration the deployment docs
-          recommend passing through. Reported by the sink rather than inferred
-          here, which is why an ordinary file sink (no ``stored`` attribute) is
-          read as "nothing to decline" and indexes normally.
+          recommend passing through.
         * **The capture failed.** Conservative on purpose, and knowingly
           over-suppressing one case: a sink that failed at event 900 still has
           its clean prefix shipped by ``close``, and that prefix would be
@@ -597,7 +608,7 @@ class Transcript:
         """
         if self._failed or not self._stored:
             return None
-        if getattr(self._sink, "stored", None) is False:
+        if not getattr(self._sink, "stored", False):
             return None
         return TranscriptIndex(
             key=self.key,

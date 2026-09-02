@@ -9,7 +9,7 @@ from the rest of the package, so every layer can depend on it.
 
 from typing import Annotated, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 
 SOURCES: tuple[str, ...] = ("remember", "review_thread", "docs", "digest")
 """Where a learning came from.
@@ -290,12 +290,20 @@ class ReviewerHealthResponse(BaseModel):
     reviewers: list[ReviewerHealthRow] = Field(default_factory=list)
 
 
-NonNegativeCount = Annotated[int, Field(ge=0)]
-"""A count that cannot be negative.
+NonNegativeCount = Annotated[StrictInt, Field(ge=0)]
+"""A count: a non-negative integer, and an integer as SPELLED.
 
 The constraint has to live on the annotation rather than on the ``Field`` when
 the count is a dict *value*: ``ge`` given to the field constrains the mapping,
 not what is in it.
+
+``StrictInt`` rather than ``int`` because lax coercion turns JSON ``true`` into
+``1``, which would store a shape error as a real measurement -- and would make
+the two metrics transports disagree, since the direct path's own filter
+(:func:`sidecar.run_metrics._tool_calls`) drops a ``bool``. Every producer in
+this repo posts figures :class:`sidecar.reviewer.transcript.TranscriptIndex`
+derived, which are already ``int``; strictness costs them nothing and refuses
+only a caller that was never counting.
 """
 
 

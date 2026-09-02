@@ -2676,10 +2676,22 @@ _FEED = [
 ]
 
 
+def _capture_with_a_store(monkeypatch, tmp_path):
+    """Capture on AND somewhere to ship it.
+
+    Both are required for an index row: `Transcript.index` writes one only for
+    bytes a sink affirms it stored, so a runner with nowhere to ship captures a
+    local file and records no reference to it (#239).
+    """
+    monkeypatch.setattr(settings, "transcript_dir", str(tmp_path / "transcripts"))
+    monkeypatch.setattr(settings, "transcript_store_backend", "file")
+    monkeypatch.setattr(settings, "transcript_store_root", str(tmp_path / "blobs"))
+
+
 def test_invoke_attaches_the_transcript_index_to_its_result(monkeypatch, tmp_path):
     """The reference and its figures leave the driver on the branch result, which
     is what carries them to `/metrics/run` (#239)."""
-    monkeypatch.setattr(settings, "transcript_dir", str(tmp_path / "transcripts"))
+    _capture_with_a_store(monkeypatch, tmp_path)
     result, captured = _invoke(
         monkeypatch, AgenticBackend(), HarnessResult(0, REVIEW_JSON), feed=_FEED
     )
@@ -2693,7 +2705,7 @@ def test_invoke_attaches_the_transcript_index_to_its_result(monkeypatch, tmp_pat
 def test_invoke_attaches_the_index_to_a_failed_run_too(monkeypatch, tmp_path):
     """A run killed at `tool_timeout`, or one that emitted garbage, is exactly the
     run whose per-tool figures are worth having."""
-    monkeypatch.setattr(settings, "transcript_dir", str(tmp_path / "transcripts"))
+    _capture_with_a_store(monkeypatch, tmp_path)
     result, _ = _invoke(
         monkeypatch, AgenticBackend(), HarnessResult(1, "", stderr="boom"), feed=_FEED[:2]
     )

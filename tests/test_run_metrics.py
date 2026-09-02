@@ -644,6 +644,18 @@ def test_the_request_model_rejects_a_negative_call_count():
     assert TranscriptIndexRequest(**{**_INDEX, "tool_calls": {"Read": 0}}).tool_calls == {"Read": 0}
 
 
+def test_the_request_model_refuses_a_boolean_spelled_as_a_call_count():
+    """Lax coercion turns JSON `true` into 1, which would store a shape error as
+    a real measurement -- and would make the two transports disagree, since the
+    direct path's own filter drops a `bool`. `StrictInt` is what closes that."""
+    from pydantic import ValidationError
+
+    from sidecar.models import TranscriptIndexRequest
+
+    with pytest.raises(ValidationError):
+        TranscriptIndexRequest(**{**_INDEX, "tool_calls": {"Read": True}})
+
+
 def test_record_accepts_the_request_model_the_endpoint_hands_it(monkeypatch):
     """The endpoint passes its pydantic object straight through; the direct
     Postgres path passes a dict. Both must land the same row."""
