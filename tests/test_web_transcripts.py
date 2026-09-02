@@ -383,6 +383,22 @@ def test_a_configured_but_broken_store_is_a_fault_not_a_bad_key(wire, client):
     assert "not a well-formed transcript key" not in text
 
 
+def test_a_session_response_forbids_shared_caching(wire, client):
+    """A cache that kept this could serve stored repo content past `require`."""
+    wire(blob=_feed(_assistant("hi")))
+    _sign_in(client)
+    resp = client.get(f"{page.PAGE.path}?key=k")
+    assert resp.headers["cache-control"] == "no-store"
+    assert resp.headers["vary"] == "Cookie"
+
+
+def test_the_open_listing_stays_cacheable(wire, client):
+    """The listing publishes index-row figures and is open, so it is not no-store."""
+    wire(rows=[_run()])
+    resp = client.get(page.PAGE.path)
+    assert "cache-control" not in resp.headers
+
+
 def test_a_malformed_key_reports_nothing_about_the_index(wire, client):
     """Neither read ran, so the page has nothing it may say about the index."""
     wire()

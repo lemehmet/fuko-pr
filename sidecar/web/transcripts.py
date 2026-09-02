@@ -45,7 +45,7 @@ import json
 from dataclasses import dataclass
 from urllib.parse import quote
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from fastapi.responses import HTMLResponse
 
 from .. import transcripts as corpus
@@ -741,6 +741,7 @@ def _session_view(request: Request, *, key: str, offset: int, limit: int) -> str
 @router.get(PAGE.path, response_class=HTMLResponse)
 def view(
     request: Request,
+    response: Response,
     repo: str | None = None,
     pr: str | None = None,
     seat: str | None = None,
@@ -762,6 +763,15 @@ def view(
     parameter answers with a 422 rather than treating as absent.
     """
     if key:
+        # The session view is the only page here that renders stored repository
+        # content, and a 200 carrying no freshness information is heuristically
+        # cacheable by a shared cache (RFC 9111 §4.2.2). A LAN forward proxy in
+        # front of the sidecar could therefore hold this response and later hand
+        # it to a request with no session -- serving the very bytes
+        # `security.require` stands in front of. The listing is left cacheable:
+        # it publishes index-row figures and is open by design.
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Vary"] = "Cookie"
         return _session_view(request, key=key, offset=offset, limit=limit)
     number = c.form_int(pr)
     limit = min(max(1, limit or PAGE_SIZE), corpus.MAX_ROWS)
