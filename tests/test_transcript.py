@@ -977,6 +977,22 @@ def test_an_unhashable_or_non_string_tool_name_folds_into_the_placeholder(name):
     assert transcript.index().tool_calls == {"?": 1}
 
 
+def test_a_line_that_cannot_be_metered_costs_the_figures_and_not_the_review():
+    """`write()` calls the meter OUTSIDE the guard protecting the sink, so a
+    shape the meter cannot fold would fault the review path. An unpaired
+    surrogate escape is legal JSON that `json.loads` hands back as a lone
+    surrogate, which `.encode("utf-8")` refuses -- one of the two shapes that
+    got past enumeration, which is why the guard is blanket."""
+    transcript, sink = _transcript()
+    line = json.dumps(_tool_result("x")).replace('"x"', '"\\ud800"')
+    transcript.write(line + "\n")
+    transcript.write(json.dumps(_tool_use("Read", file_path="a.py")) + "\n")
+    transcript.close()
+    # The bytes still reached the sink; only the measurement of them is lost.
+    assert len(sink.lines) == 2
+    assert transcript.index() is None
+
+
 def test_a_non_text_tool_result_block_contributes_no_guessed_bytes():
     """This figure is what the run was fed IN TEXT; an image's size is not
     stated, and inventing one would put two definitions in one column."""

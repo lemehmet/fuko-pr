@@ -412,6 +412,21 @@ class _Meter:
     event -- and it means a schema the CLI grows costs a figure, never a
     review.
 
+    That promise is kept by a BLANKET guard rather than by enumerating what can
+    go wrong, because enumerating it has now failed twice: a ``tool_use`` name
+    spelled as a list is unhashable (``TypeError`` from the counter's own key),
+    and a tool result carrying an unpaired surrogate escape -- legal JSON, which
+    ``json.loads`` hands back as a lone-surrogate ``str`` -- raises
+    ``UnicodeEncodeError`` from :func:`_text_bytes`. Neither is a shape this
+    module can see coming, and :meth:`Transcript.write` calls :meth:`feed`
+    OUTSIDE the guard protecting the sink, so either would have faulted the
+    review. A meter is observability; the review is the product.
+
+    A line that raises sets :attr:`broken`, which suppresses the index
+    (:meth:`Transcript.index`) rather than publishing figures that silently
+    under-count: the row's whole claim is that it describes the stored bytes,
+    and one skipped line makes that false.
+
     Memory is a counter per tool plus a counter per distinct file READ, which
     is bounded by the repository rather than by the run: the whole point of the
     streaming capture is that no run holds its feed at once, and this holds
@@ -423,6 +438,8 @@ class _Meter:
         self.tool_calls: dict[str, int] = {}
         self.tool_result_bytes = 0
         self.complete = False
+        #: Whether a line failed to meter, making the figures an under-count.
+        self.broken = False
         self._reads: dict[str, int] = {}
 
     @property
@@ -436,6 +453,15 @@ class _Meter:
         return sum(1 for count in self._reads.values() if count > 1)
 
     def feed(self, line: str) -> None:
+        """Fold one stored line into the running figures; never raise."""
+        try:
+            self._feed(line)
+        except Exception as e:
+            if not self.broken:
+                self.broken = True
+                print(f"fuko: transcript metering stopped: {e}", file=sys.stderr)
+
+    def _feed(self, line: str) -> None:
         """Fold one stored line into the running figures."""
         try:
             event = json.loads(line)
@@ -575,7 +601,7 @@ class Transcript:
         reader fetches them by (``migrations/013``). So the sink has to AFFIRM
         that it stored them -- anything that does not is read as "not stored",
         which is why this is ``not getattr(...)`` and not a test against
-        ``False``. ``None`` therefore in four cases, all of which leave the
+        ``False``. ``None`` therefore in five cases, all of which leave the
         reference on the ``review_runs`` row NULL rather than naming a blob:
 
         * **Nothing landed.** A run that streamed no events leaves no file and
@@ -591,6 +617,10 @@ class Transcript:
           capture ahead of storage does not print a line per run -- but nothing
           was stored, and that is the configuration the deployment docs
           recommend passing through.
+        * **A line failed to meter.** The figures would then under-count, and
+          the row's whole claim is that they describe the stored bytes -- so
+          there is nothing honest left to write. The transcript itself is
+          unaffected and still ships; only the measurement of it is lost.
         * **The capture failed.** Conservative on purpose, and knowingly
           over-suppressing one case: a sink that failed at event 900 still has
           its clean prefix shipped by ``close``, and that prefix would be
@@ -606,7 +636,7 @@ class Transcript:
         measurement of a real run, and dropping it would bias the corpus towards
         runs that finished.
         """
-        if self._failed or not self._stored:
+        if self._failed or self._meter.broken or not self._stored:
             return None
         if not getattr(self._sink, "stored", False):
             return None
