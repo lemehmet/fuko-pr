@@ -50,6 +50,7 @@ from fastapi.responses import HTMLResponse
 
 from .. import transcripts as corpus
 from ..config import settings
+from ..objectstore import validate_blob_key
 from . import components as c
 from . import security
 from .layout import document, page
@@ -410,7 +411,18 @@ def _index_notices(*, db_enabled: bool, db_error: bool, filter_error: str) -> st
             )
         )
     if filter_error:
-        parts.append(c.notice(f"Filter ignored: {filter_error}", kind="warn"))
+        # NOT "filter ignored": the bad bound is rejected before the query is
+        # opened, so the listing did not run with the remaining filters -- it
+        # did not run at all. Saying "ignored" over an empty table reads as a
+        # corpus with nothing in it, which is the same typo-as-outage
+        # confusion, one level down.
+        parts.append(
+            c.notice(
+                f"Filter not understood: {filter_error} — the listing was not run, "
+                "so the table below is empty for that reason and not because the corpus is.",
+                kind="warn",
+            )
+        )
     return "".join(parts)
 
 
@@ -472,7 +484,9 @@ def render_index(
             c.table(
                 _COLUMNS,
                 [_row(run) for run in page_rows.rows],
-                "no transcripts captured yet",
+                "nothing listed — the filter above was not understood"
+                if filter_error
+                else "no transcripts captured yet",
             ),
         ),
         c.pager(
@@ -651,10 +665,34 @@ def _session_view(request: Request, *, key: str, offset: int, limit: int) -> str
     Gated on a browser session (:func:`sidecar.web.security.require`) while the
     listing is open. See the module docstring: the listing publishes counts, and
     this publishes a contributor-controlled repository's file contents.
+
+    The key is validated first, so "that key is a typo" and "this deployment's
+    store cannot be built" stay two answers rather than one.
     """
     security.require(request)
     limit = min(max(1, limit or EVENTS_PER_PAGE), MAX_EVENTS)
     offset = max(0, offset)
+    # The key is judged BEFORE either read, the way `GET /transcripts/{key}`
+    # judges it: `corpus.fetch` builds the store before it ever looks at the
+    # key, and `make_blob_store` raises ValueError for every
+    # configured-but-broken deployment (no ROOT, no BUCKET, an unknown
+    # backend). Catching ValueError off the fetch instead would report those as
+    # "your key is malformed" for EVERY key -- the fault-as-typo confusion this
+    # page exists to prevent, running backwards.
+    try:
+        validate_blob_key(key)
+    except ValueError:
+        return render_session(
+            key=key,
+            run=None,
+            session=SessionPage(),
+            offset=offset,
+            limit=limit,
+            store_state="invalid",
+            db_enabled=bool(settings.database_url),
+            db_error=False,
+            extra_nav=security.nav_extra(request),
+        )
     db_enabled = bool(settings.database_url)
     run = None
     db_error = False
@@ -671,10 +709,6 @@ def _session_view(request: Request, *, key: str, offset: int, limit: int) -> str
         data = corpus.fetch(key)
     except corpus.StoreUnconfigured:
         store_state = "unconfigured"
-    except ValueError:
-        # A malformed key, which is a typo and not an outage -- caught before
-        # the blanket arm below so it can never be reported as one.
-        store_state = "invalid"
     except Exception as e:
         corpus.log_read_failure(f"fetch of {key}", e)
         store_state = "unreachable"

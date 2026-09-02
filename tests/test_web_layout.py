@@ -147,6 +147,7 @@ def test_form_value_keeps_falsy_non_none_values():
         ("٧", None),  # a non-ASCII digit int() WOULD accept, and we still do not
         (str(2**31), None),  # past a Postgres integer, so not a lookup we can run
         (str(2**31 - 1), 2**31 - 1),
+        ("9" * 5000, None),  # past CPython's int-conversion limit: int() would raise
     ],
 )
 def test_form_int_reads_a_submitted_number_or_gives_up_quietly(raw, expected):

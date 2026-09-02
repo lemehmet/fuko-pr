@@ -165,7 +165,13 @@ def form_int(value: object) -> int | None:
     response.
     """
     text = form_value(value).strip()
-    if not (text.isascii() and text.isdigit()):
+    # The length test runs BEFORE ``int()``: CPython refuses a conversion past
+    # ``sys.get_int_max_str_digits()`` (4300 by default) with a ValueError of
+    # its own, which would escape a helper whose whole contract is that
+    # unusable input answers like an empty field -- reaching the page as a 500
+    # instead. Ten digits is the widest a Postgres ``integer`` can hold, so
+    # nothing the range check would have accepted is lost.
+    if not (text.isascii() and text.isdigit()) or len(text) > 10:
         return None
     number = int(text)
     return number if 0 < number <= 2**31 - 1 else None

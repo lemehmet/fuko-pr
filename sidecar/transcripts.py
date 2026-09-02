@@ -358,7 +358,11 @@ def fetch(key: str) -> bytes | None:
             hold a transcript. Kept distinct from ``None`` for the reason the
             whole sub-issue turns on -- "could not look" must not read as
             "nothing found".
-        ValueError: ``key`` is not a well-formed blob key.
+        ValueError: ``key`` is not a well-formed blob key, OR the configured
+            store cannot be built (no ROOT, no BUCKET, an unknown backend).
+            The store is constructed before the key is looked at, so a caller
+            that needs the two apart must validate the key itself first --
+            :func:`sidecar.objectstore.validate_blob_key`, as both readers do.
     """
     store = transcript_store()
     if store is None:

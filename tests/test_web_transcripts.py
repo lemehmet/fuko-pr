@@ -15,7 +15,7 @@ _TOKEN = "s3cret-token"
 
 def _run(**overrides) -> corpus.TranscriptRun:
     base = dict(
-        key="2026-09-01/abc123def456",
+        key="20260901T100000Z-abc123def456",
         created_at="2026-09-01T10:00:00+00:00",
         complete=True,
         tool_calls={"Read": 12, "Grep": 4, "Bash": 2, "Edit": 1, "Glob": 1},
@@ -122,7 +122,7 @@ def test_listing_is_open_and_lists_runs(wire, client):
     wire(rows=[_run()])
     resp = client.get(page.PAGE.path)
     assert resp.status_code == 200
-    assert "2026-09-01/abc123def456" in resp.text
+    assert "20260901T100000Z-abc123def456" in resp.text
     assert "lemehmet/mepro" in resp.text
     assert "Read=12" in resp.text
     assert "1.5 KiB" in resp.text
@@ -160,8 +160,17 @@ def test_unreachable_index_is_not_an_empty_corpus(wire, client):
 def test_bad_date_filter_is_a_typo_not_an_outage(wire, client):
     wire(rows=[], index_error=ValueError("Invalid isoformat string: 'yesterday'"))
     text = client.get(f"{page.PAGE.path}?since=yesterday").text
-    assert "Filter ignored" in text
+    assert "Filter not understood" in text
     assert "unreachable" not in text
+
+
+def test_a_rejected_filter_does_not_claim_an_empty_corpus(wire, client):
+    """The bound is rejected before the query opens, so nothing was listed at all."""
+    wire(rows=[], index_error=ValueError("Invalid isoformat string: 'yesterday'"))
+    text = client.get(f"{page.PAGE.path}?since=yesterday").text
+    assert "the listing was not run" in text
+    assert "the filter above was not understood" in text
+    assert "no transcripts captured yet" not in text
 
 
 def test_filters_narrow_individually_and_combined(wire, client):
@@ -245,7 +254,7 @@ def test_session_renders_turns_in_order(wire, client):
         )
     )
     _sign_in(client)
-    text = client.get(f"{page.PAGE.path}?key=2026-09-01/abc123def456").text
+    text = client.get(f"{page.PAGE.path}?key=20260901T100000Z-abc123def456").text
     assert "looking at the diff" in text
     assert "tool call · Read" in text
     assert "src/app.py" in text
@@ -343,11 +352,35 @@ def test_unreachable_blob_store_is_a_fault(wire, client):
 
 
 def test_a_malformed_key_is_a_typo_not_an_outage(wire, client):
-    wire(blob_error=ValueError("invalid blob key '../etc/passwd'"))
+    wire()
     _sign_in(client)
     text = client.get(f"{page.PAGE.path}?key=..%2Fetc%2Fpasswd").text
     assert "not a well-formed transcript key" in text
     assert "unreachable" not in text
+
+
+def test_a_malformed_key_is_judged_before_either_read(wire, client):
+    """A key nothing could match must not reach the index or the store."""
+    configure = wire()
+    _sign_in(client)
+    client.get(f"{page.PAGE.path}?key=..%2Fetc%2Fpasswd")
+    assert "describe" not in configure.seen
+    assert "fetch" not in configure.seen
+
+
+def test_a_configured_but_broken_store_is_a_fault_not_a_bad_key(wire, client):
+    """`fetch` builds the store before it reads the key, so its ValueError is ambiguous.
+
+    `make_blob_store` raises for a deployment that meant to store something and
+    cannot -- no ROOT, no BUCKET, an unknown backend. Reported off the fetch
+    that would tell every operator, holding a perfectly good key, that they had
+    mistyped it.
+    """
+    wire(blob_error=ValueError("the 'file' transcript store needs FUKO_TRANSCRIPT_STORE_ROOT"))
+    _sign_in(client)
+    text = client.get(f"{page.PAGE.path}?key=k").text
+    assert "Transcript store unreachable" in text
+    assert "not a well-formed transcript key" not in text
 
 
 def test_a_key_that_holds_nothing_says_so(wire, client):
@@ -405,10 +438,14 @@ def test_the_session_pager_walks_the_feed(wire, client):
 
 
 def test_session_limit_is_clamped(wire, client):
-    wire(blob=_feed(*[_assistant(f"turn {n}") for n in range(5)]))
+    """Asserted on the rendered window, not the status code: a 200 proves nothing here."""
+    wire(blob=_feed(*[_assistant(f"turn {n}") for n in range(page.MAX_EVENTS + 50)]))
     _sign_in(client)
     resp = client.get(f"{page.PAGE.path}?key=k&limit=100000")
     assert resp.status_code == 200
+    assert f"turn {page.MAX_EVENTS - 1}" in resp.text
+    assert f"turn {page.MAX_EVENTS}" not in resp.text
+    assert f"1&ndash;{page.MAX_EVENTS} of {page.MAX_EVENTS + 50}" in resp.text
 
 
 def test_one_enormous_block_is_clipped_with_a_pointer_to_the_cli(wire, client):
@@ -482,7 +519,7 @@ def test_render_index_on_empty_input_is_page_chrome():
 
 def test_render_session_draws_chrome_with_no_body_at_all():
     html = page.render_session(
-        key="2026-09-01/abc",
+        key="20260901T100000Z-abc",
         run=None,
         session=page.SessionPage(),
         offset=0,
@@ -490,7 +527,7 @@ def test_render_session_draws_chrome_with_no_body_at_all():
         store_state="unreachable",
         db_enabled=True,
     )
-    assert "2026-09-01/abc" in html
+    assert "20260901T100000Z-abc" in html
     assert "Transcript store unreachable" in html
     assert "no events to show" in html
 
