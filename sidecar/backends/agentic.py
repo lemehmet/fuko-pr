@@ -906,9 +906,14 @@ class AgenticBackend:
         # `_permission_settings` cannot see is a directory it cannot deny. Set
         # whenever a destination is CONFIGURED rather than when this run
         # captures -- what a reader wants is the archive earlier rounds left.
+        # A destination this rejects (the root, an unexpandable `~`) must leave
+        # BOTH sides off: no deny path here, and `open_transcript` refusing the
+        # same value through the same function later. The one state worth ruling
+        # out is a capture that opened against a path no rule covers.
         try:
             deny_dir = transcript_dir()
-        except Exception:  # pragma: no cover - a bad path degrades in open_transcript
+        except Exception as e:
+            print(f"fuko: transcript capture unavailable: {e}", file=sys.stderr)
             deny_dir = None
         if deny_dir is not None:
             harness_env[_ENV_TRANSCRIPT_DENY_DIR] = str(deny_dir)

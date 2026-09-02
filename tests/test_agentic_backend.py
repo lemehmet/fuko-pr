@@ -581,6 +581,14 @@ def test_invoke_strips_the_whole_fuko_namespace_from_the_harness_env(monkeypatch
     }
     for k, v in secrets.items():
         monkeypatch.setenv(k, v)
+    # `settings` is built from the process environment at IMPORT time, so a
+    # runner that exports FUKO_TRANSCRIPT_DIR -- which is exactly what this
+    # feature's docs tell a deployment to do -- would otherwise put the
+    # legitimate `FUKO_TRANSCRIPT_DENY_DIR` hand-off in this assertion's way and
+    # fail the suite on the fleet it documents. Pin it rather than exempt the
+    # name: the assertion is over the NAMESPACE on purpose (see the docstring),
+    # and an exemption list is how that reopens one variable at a time.
+    monkeypatch.setattr(settings, "transcript_dir", "", raising=False)
     backend = AgenticBackend()
     _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
 
@@ -2109,6 +2117,10 @@ def test_the_transcript_destination_reaches_the_harness_for_the_deny_rule(monkey
     cannot cover the corpus (`_permission_settings` builds its rules from this
     environment)."""
     corpus = (tmp_path / "corpus").resolve()
+    # A sibling seat's provider key: ambient, stripped from the harness env, and
+    # distinct from the checkout token so the assertion names one source only.
+    ambient_key = "sk-other-seats-provider-key"
+    monkeypatch.setenv("ZAI_KEY", ambient_key)
     monkeypatch.setattr(settings, "transcript_dir", str(corpus), raising=False)
     backend = AgenticBackend(ReviewConfig(tool_timeout=5))
     _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
@@ -2119,6 +2131,14 @@ def test_the_transcript_destination_reaches_the_harness_for_the_deny_rule(monkey
     # capture would silently be off on every deployment.
     assert isinstance(captured["transcript"], Transcript)
     assert captured["transcript"].key
+    # The scrubber's CONTENTS, not just the object: a regression to
+    # `open_transcript([], ...)` or to the wrong environment would persist
+    # unscrubbed credentials on every deployment with the suite still green,
+    # and scrubbing-at-capture is this PR's whole security property.
+    assert (
+        captured["transcript"]._scrubber.scrub(f"key={ambient_key} here")
+        == "key=[REDACTED:ZAI_KEY] here"
+    )
 
 
 def test_no_transcript_destination_hands_over_no_deny_dir(monkeypatch):
@@ -2129,6 +2149,19 @@ def test_no_transcript_destination_hands_over_no_deny_dir(monkeypatch):
     _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
     assert "FUKO_TRANSCRIPT_DENY_DIR" not in captured["env"]
     assert captured["transcript"] is None
+
+
+def test_a_refused_destination_leaves_no_deny_var_and_no_capture(monkeypatch, capsys):
+    """A destination `transcript_dir()` rejects must take BOTH sides down. The
+    root is the case that matters: `_permission_settings` rstrips it to the
+    empty string and drops the candidate silently, so a capture that opened
+    against it would be written where no rule reaches."""
+    monkeypatch.setattr(settings, "transcript_dir", "/", raising=False)
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert "FUKO_TRANSCRIPT_DENY_DIR" not in captured["env"]
+    assert captured["transcript"] is None
+    assert "transcript capture unavailable" in capsys.readouterr().err
 
 
 def test_failure_prints_full_stderr_and_leads_the_detail_with_the_verdict(monkeypatch, capsys):

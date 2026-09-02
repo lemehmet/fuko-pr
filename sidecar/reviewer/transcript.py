@@ -257,9 +257,26 @@ def transcript_dir(directory: str | None = None) -> Path | None:
 
     ``resolve()`` is non-strict, so a destination that does not exist yet still
     comes back absolute rather than raising -- the first capture creates it.
+
+    The filesystem ROOT is rejected outright, and that is a third spelling of
+    the same failure rather than a tidiness rule: ``_permission_settings``
+    normalizes a candidate with ``rstrip("/")``, which turns ``"/"`` into the
+    empty string, and an empty candidate is dropped WITHOUT reaching the
+    non-POSIX announcement -- so a root destination would write transcripts that
+    no rule covers and nothing reports. Refusing it here keeps the two sides
+    consistent: the driver gets no deny path and the capture does not open, so
+    the "written but undenied" state cannot be reached at all.
     """
     destination = settings.transcript_dir if directory is None else directory
-    return Path(destination).expanduser().resolve() if destination else None
+    if not destination:
+        return None
+    resolved = Path(destination).expanduser().resolve()
+    if resolved.parent == resolved:
+        raise ValueError(
+            f"transcript_dir {resolved} is the filesystem root; "
+            "set FUKO_TRANSCRIPT_DIR to a dedicated directory"
+        )
+    return resolved
 
 
 def open_transcript(

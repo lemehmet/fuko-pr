@@ -360,6 +360,24 @@ def test_a_symlinked_destination_resolves_to_its_target(tmp_path):
     assert transcript_mod.transcript_dir(str(alias)) == target.resolve()
 
 
+@pytest.mark.parametrize("root", ["/", "//", "/.."])
+def test_the_filesystem_root_is_refused_as_a_destination(root):
+    """`_permission_settings` normalizes a candidate with `rstrip("/")`, which
+    turns "/" into "" -- dropped without even reaching the non-POSIX
+    announcement. A root destination would therefore write transcripts that no
+    deny rule covers and nothing reports."""
+    with pytest.raises(ValueError, match="filesystem root"):
+        transcript_mod.transcript_dir(root)
+
+
+def test_a_root_destination_leaves_both_capture_and_deny_off(capsys):
+    """Refusing has to degrade like every other misconfiguration, on BOTH
+    sides: the one state worth ruling out is a capture that opened against a
+    path no rule covers."""
+    assert open_transcript([], directory="/") is None
+    assert "transcript capture unavailable" in capsys.readouterr().err
+
+
 def test_no_destination_is_not_a_path(monkeypatch):
     """Capture off returns None rather than the current directory."""
     monkeypatch.setattr(settings, "transcript_dir", "", raising=False)
