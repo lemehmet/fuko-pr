@@ -56,6 +56,7 @@ from ..reviewer.harness import (
     DEFAULT_MAX_TURNS,
     HarnessNotAvailableError,
     HarnessResult,
+    _ENV_TRANSCRIPT_DENY_DIR,
     check_auth,
     is_auth_failure,
     run_review,
@@ -69,7 +70,7 @@ from ..reviewer.prompt import (
     build_prompt,
     parse_review,
 )
-from ..reviewer.transcript import Transcript, open_transcript
+from ..reviewer.transcript import Transcript, open_transcript, transcript_dir
 from ..signals import ReviewSignal, make_id, with_marker, with_visible_label
 from ..throttle import TIMEOUT_RETURNCODE, is_throttle
 from .base import ENV_SEAT, InvokeResult, PRRef
@@ -350,10 +351,13 @@ _GITHUB_CRED_VARS = (
 # ledger and knowledge call happens in THIS process around ``run_review``, and
 # the knowledge the agent sees arrives as PROMPT TEXT rather than as a fetch it
 # performs. What the harness legitimately needs is handed to it EXPLICITLY after
-# this comprehension -- today only ``FUKO_AMBIENT_CLAUDE_CONFIG_DIR``, which
-# `_permission_settings` needs to deny the runner's real config dir -- so a
-# future variable the agent must see has to be named at that point, and one
-# nobody remembered to name is absent rather than inherited.
+# this comprehension -- ``FUKO_AMBIENT_CLAUDE_CONFIG_DIR`` and
+# ``FUKO_TRANSCRIPT_DENY_DIR``, both of which `_permission_settings` needs in
+# order to DENY the path they name -- so a future variable the agent must see
+# has to be named at that point, and one nobody remembered to name is absent
+# rather than inherited. Note both existing hand-offs exist to shrink the
+# agent's read surface, not to widen it; a hand-off that grants something is a
+# different decision and deserves its own justification.
 _FUKO_ENV_PREFIX = "FUKO_"
 
 
@@ -896,6 +900,18 @@ class AgenticBackend:
         # whose entry says otherwise.
         if "CLAUDE_CODE_MAX_CONTEXT_TOKENS" in env:
             harness_env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"]
+        # The transcript destination is handed over under its OWN name, for the
+        # read denylist and nothing else: `FUKO_TRANSCRIPT_DIR` was stripped
+        # with the rest of the namespace two statements up, and a directory
+        # `_permission_settings` cannot see is a directory it cannot deny. Set
+        # whenever a destination is CONFIGURED rather than when this run
+        # captures -- what a reader wants is the archive earlier rounds left.
+        try:
+            deny_dir = transcript_dir()
+        except Exception:  # pragma: no cover - a bad path degrades in open_transcript
+            deny_dir = None
+        if deny_dir is not None:
+            harness_env[_ENV_TRANSCRIPT_DENY_DIR] = str(deny_dir)
         # DELIVERY-side receipt (mepro#2012 r2, both gating seats converged):
         # a workflow validator can only prove the CONFIG carries a window;
         # this line is the one place that knows what the spawned harness

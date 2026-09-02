@@ -495,6 +495,17 @@ Properties worth knowing before turning it on:
 - **Streamed, never buffered.** One line at a time, line-buffered, so peak
   memory does not track transcript size and a run killed at `tool_timeout`
   keeps everything that arrived before the cut.
+- **Denied to the reviewing agent.** The destination is added to the harness
+  read denylist (`Read(//<dir>/**)`) whenever it is configured — including on
+  runs that do not capture, since the archive earlier rounds left behind is the
+  part worth reading. This is not covered by the file mode: the agent is spawned
+  as the same uid, so `0600` stops other *users*, not this reader. Without the
+  rule a transcript is a durable, cross-repo record of everything past runs
+  read, sitting where `Glob` can find it, reachable by an agent whose findings
+  are published verbatim to an untrusted PR author. `FUKO_TRANSCRIPT_DIR` is
+  stripped with the rest of the `FUKO_` namespace before the spawn, so the path
+  is handed over under its own name (`FUKO_TRANSCRIPT_DENY_DIR`) purely to be
+  denied.
 - **Owner-only on disk.** The directory is created `0700` and each file `0600`,
   set as the file is created rather than chmod'ed after. What survives the
   scrub is the reviewed repository as the agent read it — the same content the

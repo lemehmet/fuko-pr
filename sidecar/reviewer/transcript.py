@@ -235,6 +235,21 @@ def mint_key() -> str:
     return f"{stamp}-{uuid.uuid4().hex[:12]}"
 
 
+def transcript_dir(directory: str | None = None) -> Path | None:
+    """The configured transcript destination, resolved, or ``None`` when unset.
+
+    Shared with the driver so the READ-DENY rule the harness is given covers the
+    path this module actually writes: the corpus is a durable, cross-repo
+    archive of everything past runs read, and the reviewing agent keeps
+    ``Read``/``Grep``/``Glob`` over the whole runner, so an unmatched deny rule
+    would leave it readable by an agent whose findings are published verbatim to
+    an untrusted PR author. Two spellings of the same path would be exactly that
+    (see :func:`sidecar.reviewer.harness._permission_settings`).
+    """
+    destination = settings.transcript_dir if directory is None else directory
+    return Path(destination).expanduser() if destination else None
+
+
 def open_transcript(
     secrets: Sequence[tuple[str, str]],
     *,
@@ -253,12 +268,12 @@ def open_transcript(
     rule they follow. ``label`` names the seat on the announcement line, which
     is what makes a transcript findable (a workflow uploads it as an artifact).
     """
-    destination = settings.transcript_dir if directory is None else directory
-    if not destination:
-        return None
     try:
+        destination = transcript_dir(directory)
+        if destination is None:
+            return None
         key = mint_key()
-        path = Path(destination).expanduser() / f"{key}.ndjson"
+        path = destination / f"{key}.ndjson"
         transcript = Transcript(key, FileTranscriptSink(path), Scrubber.for_secrets(secrets))
     except Exception as e:
         # Misconfiguration must degrade like every other capture failure: the

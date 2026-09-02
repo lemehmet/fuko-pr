@@ -16,6 +16,7 @@ from sidecar.backends.agentic import AgenticBackend
 from sidecar.backends.base import PRRef
 from sidecar.fukoconfig import ModelConfig, ReviewConfig
 from sidecar.presets import PRESETS, ProviderPreset, get_preset
+from sidecar.config import settings
 from sidecar.reviewer.checkout import PRContext
 from sidecar.reviewer.harness import HarnessResult
 from sidecar.signals import extract_markers
@@ -2099,6 +2100,27 @@ def test_api_key_branch_still_denies_the_ambient_claude_config_dir(monkeypatch):
     _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON), env=env)
     assert captured["env"]["CLAUDE_CONFIG_DIR"] != "/runner/ambient-claude"
     assert captured["env"]["FUKO_AMBIENT_CLAUDE_CONFIG_DIR"] == "/runner/ambient-claude"
+
+
+def test_the_transcript_destination_reaches_the_harness_for_the_deny_rule(monkeypatch, tmp_path):
+    """`FUKO_TRANSCRIPT_DIR` is stripped with the rest of the namespace, so the
+    destination has to be handed over under its own name or the read denylist
+    cannot cover the corpus (`_permission_settings` builds its rules from this
+    environment)."""
+    monkeypatch.setattr(settings, "transcript_dir", str(tmp_path / "corpus"), raising=False)
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert "FUKO_TRANSCRIPT_DIR" not in captured["env"]
+    assert captured["env"]["FUKO_TRANSCRIPT_DENY_DIR"] == str(tmp_path / "corpus")
+
+
+def test_no_transcript_destination_hands_over_no_deny_dir(monkeypatch):
+    """Capture off must not put an empty value in the environment: an empty
+    deny path would render a rule matching nothing, or everything."""
+    monkeypatch.setattr(settings, "transcript_dir", "", raising=False)
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert "FUKO_TRANSCRIPT_DENY_DIR" not in captured["env"]
 
 
 def test_failure_prints_full_stderr_and_leads_the_detail_with_the_verdict(monkeypatch, capsys):

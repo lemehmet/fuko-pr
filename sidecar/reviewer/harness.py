@@ -96,6 +96,16 @@ DENIED_TOOLS = (
 #: Claude Code does not know the name.
 _ENV_AMBIENT_CONFIG_DIR = "FUKO_AMBIENT_CLAUDE_CONFIG_DIR"
 
+#: Set by a caller that captures session transcripts, carrying the destination
+#: purely so the read denylist can cover it. Consumed only by
+#: :func:`_permission_settings`; nothing here writes through it.
+#:
+#: It has its own name rather than riding ``FUKO_TRANSCRIPT_DIR`` because that
+#: one is stripped with the rest of the ``FUKO_`` namespace before the spawn, so
+#: by the time the settings payload is built the destination is invisible --
+#: which is how the directory came to be undenied in the first place.
+_ENV_TRANSCRIPT_DENY_DIR = "FUKO_TRANSCRIPT_DENY_DIR"
+
 #: Directories the agent must never read, relative to the runner's home.
 #:
 #: ``--add-dir`` ADDS a readable root; it does NOT confine reads to it. Verified
@@ -177,7 +187,8 @@ SENSITIVE_HOME_FILES = (
 #: gave ``FUKO_TOKEN`` ledger-write authority, the entire ``FUKO_`` namespace is
 #: stripped before the spawn (:data:`sidecar.backends.agentic._FUKO_ENV_PREFIX`),
 #: and what the harness legitimately needs -- ``FUKO_AMBIENT_CLAUDE_CONFIG_DIR``
-#: below among them -- is set explicitly afterwards rather than inherited. The
+#: and ``FUKO_TRANSCRIPT_DENY_DIR`` above among them -- is set explicitly
+#: afterwards rather than inherited. The
 #: model credential CANNOT be removed the same way, because the harness needs it
 #: to run at all, which is exactly why the two are handled differently and why
 #: this denial still matters.
@@ -229,6 +240,22 @@ def _permission_settings(env: dict[str, str]) -> str:
         config_dir = (env.get(key) or "").replace("\\", "/").rstrip("/")
         if config_dir:
             candidates.append((config_dir, True))
+    # The session-transcript corpus (#237). Same reasoning as the config dirs
+    # one line up, and a higher-value target than either: a transcript holds
+    # every `user` tool-result event of a past run -- the full contents of every
+    # file that run's agent read -- plus the prompt, the injected knowledge base
+    # and the carried prior findings, it is kept rather than deleted, and it
+    # accumulates across every repository the runner serves. `0600` does not
+    # cover this: the agent is spawned as the same uid, so the mode stops other
+    # USERS and not this reader. `Glob` is in :data:`ALLOWED_TOOLS`, so a
+    # directory nobody names is still found by `**/*.ndjson`.
+    #
+    # Denied whenever a destination is configured, not only when THIS run
+    # captures: the files an earlier round left behind are the ones worth
+    # reading, and they outlive the run that wrote them.
+    transcript_deny = (env.get(_ENV_TRANSCRIPT_DENY_DIR) or "").replace("\\", "/").rstrip("/")
+    if transcript_deny:
+        candidates.append((transcript_deny, True))
     # Unconditional: these do not depend on HOME, and on a runner without one
     # they are the only rules that remain.
     candidates += [(d, True) for d in SENSITIVE_SYSTEM_DIRS]
