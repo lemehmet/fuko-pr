@@ -29,6 +29,12 @@ settled rather than a preference:
   disk that fills mid-stream, a sink that raises -- each degrades to one stderr
   line and an inert transcript, never to a fault in the review path.
 
+The capture also METERS itself as it goes (:class:`_Meter`, #239): the figures
+that say what a run spent its turns on -- per-tool call counts, tool-result
+bytes, re-read files -- are folded out of the same lines on their way to the
+sink, so nothing is re-downloaded and nothing is held. They ride to the metrics
+row as a :class:`TranscriptIndex`.
+
 **What gets scrubbed, stated as a rule:** the EXACT credential values the driver
 holds, and nothing inferred. :meth:`Scrubber.for_secrets` is handed
 ``(name, value)`` pairs by :mod:`sidecar.backends.agentic`, which is the one
@@ -305,6 +311,165 @@ class ShippingTranscriptSink:
             self._ship(self._key, self.path)
 
 
+#: The tool whose calls the repeated-read figure is derived from.
+#:
+#: One tool, named exactly, rather than "anything that could read a file". A
+#: ``Grep`` with a path, or a ``Bash`` running ``cat``, also puts file content
+#: in the context, but neither states WHICH file in a field that survives a
+#: schema change, and counting them would make the number a heuristic rather
+#: than a count. #159 asks whether a run re-reads what it already read; ``Read``
+#: is where that is answerable exactly.
+READ_TOOL = "Read"
+
+
+@dataclass(frozen=True)
+class TranscriptIndex:
+    """What one captured transcript is indexed by (#239).
+
+    The figures a run's own feed can state about itself: which tools it called
+    and how often, how many bytes of tool results it was fed, how many files it
+    read more than once, and whether the feed reached its end. They exist to
+    answer what a run spent its turns ON -- ``review_runs`` already answers how
+    much it spent.
+    """
+
+    key: str
+    complete: bool
+    tool_calls: dict[str, int]
+    tool_result_bytes: int
+    repeated_read_files: int
+
+    def as_dict(self) -> dict:
+        """This index as the plain mapping the metrics transport carries.
+
+        A mapping rather than the dataclass itself, for the same reason the
+        token/cost figures travel as one (:func:`sidecar.runner._costs_of`):
+        both metrics transports -- the HTTP body and the direct Postgres call --
+        then carry it identically, and neither has to know this class.
+        """
+        return {
+            "key": self.key,
+            "complete": self.complete,
+            "tool_calls": dict(self.tool_calls),
+            "tool_result_bytes": self.tool_result_bytes,
+            "repeated_read_files": self.repeated_read_files,
+        }
+
+
+def _blocks(event: dict) -> list:
+    """The content blocks of one feed event, or an empty list."""
+    message = event.get("message")
+    if not isinstance(message, dict):
+        return []
+    content = message.get("content")
+    return content if isinstance(content, list) else []
+
+
+def _text_bytes(content) -> int:
+    """UTF-8 bytes of a ``tool_result``'s content, whatever shape it arrived in.
+
+    The CLI spells one result either as a bare string or as a list of typed
+    blocks, and both are common in a single feed. Non-text blocks (an image, a
+    shape the schema grows later) contribute nothing rather than a guess: this
+    figure is what the run was FED IN TEXT, and inventing a byte count for
+    something whose size is not stated would put two definitions in one column.
+    """
+    if isinstance(content, str):
+        return len(content.encode("utf-8"))
+    total = 0
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and isinstance(block.get("text"), str):
+                total += len(block["text"].encode("utf-8"))
+    return total
+
+
+class _Meter:
+    """Folds a stored feed into the per-run figures :class:`TranscriptIndex` holds.
+
+    Fed the SCRUBBED line, after the sink accepted it, so the figures describe
+    exactly the bytes that were stored: a reader recomputing them from the blob
+    (#240's option) gets the same numbers, and a capture that went inert
+    part-way measures the prefix that survived rather than the run that did not.
+
+    Tolerant in the same direction as
+    :func:`sidecar.reviewer.harness._consume_stream`: a blank, non-JSON or
+    unrecognised line is skipped. That covers the one line
+    :meth:`Scrubber.scrub_partial` can leave un-parseable -- a truncated final
+    event -- and it means a schema the CLI grows costs a figure, never a
+    review.
+
+    Memory is a counter per tool plus a counter per distinct file READ, which
+    is bounded by the repository rather than by the run: the whole point of the
+    streaming capture is that no run holds its feed at once, and this holds
+    less than the run's file list.
+    """
+
+    def __init__(self) -> None:
+        """Start every figure at nothing measured yet."""
+        self.tool_calls: dict[str, int] = {}
+        self.tool_result_bytes = 0
+        self.complete = False
+        self._reads: dict[str, int] = {}
+
+    @property
+    def repeated_read_files(self) -> int:
+        """How many distinct files were read more than once.
+
+        FILES, not reads: a file read three times is one repeated file, which
+        is the quantity #159 asks about -- whether a stateless run re-derives
+        what it already had.
+        """
+        return sum(1 for count in self._reads.values() if count > 1)
+
+    def feed(self, line: str) -> None:
+        """Fold one stored line into the running figures."""
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return
+        if not isinstance(event, dict):
+            return
+        kind = event.get("type")
+        if kind == "assistant":
+            self._assistant(event)
+        elif kind == "user":
+            self._tool_results(event)
+        elif kind == "result":
+            # The terminal event, and the only evidence the feed is whole. A
+            # transcript without it was cut short -- by the `tool_timeout` kill,
+            # a sidecar death, or a disk that filled -- and the index row says
+            # so rather than letting a partial run read as a finished one.
+            self.complete = True
+
+    def _assistant(self, event: dict) -> None:
+        for block in _blocks(event):
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            # `"?"` matches the progress fold's own placeholder for a nameless
+            # tool_use block, so one vocabulary describes both.
+            name = block.get("name") or "?"
+            self.tool_calls[name] = self.tool_calls.get(name, 0) + 1
+            if name == READ_TOOL:
+                self._read(block.get("input"))
+
+    def _read(self, tool_input) -> None:
+        path = tool_input.get("file_path") if isinstance(tool_input, dict) else None
+        if isinstance(path, str) and path:
+            # The path AS THE AGENT WROTE IT, unnormalized. Two spellings of one
+            # file would undercount, but normalizing here would invent a
+            # filesystem the sidecar cannot see (the checkout is long gone by
+            # the time this row is read), and a re-read at a different offset
+            # counts as a re-read -- it is a second trip through the same file,
+            # which is the cost being measured.
+            self._reads[path] = self._reads.get(path, 0) + 1
+
+    def _tool_results(self, event: dict) -> None:
+        for block in _blocks(event):
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                self.tool_result_bytes += _text_bytes(block.get("content"))
+
+
 class Transcript:
     """One run's capture: an identity, a scrubber, and a sink.
 
@@ -326,6 +491,12 @@ class Transcript:
         self._scrubber = scrubber
         self._failed = False
         self._closed = False
+        self._meter = _Meter()
+        #: Lines the sink ACCEPTED. Counted here rather than read off the sink,
+        #: because :class:`ShippingTranscriptSink` wraps the file sink and
+        #: ``TranscriptSink`` promises nothing about what landed -- and because
+        #: this has to survive `close()`, which clears the file handle.
+        self._stored = 0
 
     def write(self, line: str) -> None:
         """Scrub one raw feed line and hand it to the sink.
@@ -345,10 +516,17 @@ class Transcript:
         if self._failed or self._closed or not line.strip():
             return
         scrub = self._scrubber.scrub if line.endswith("\n") else self._scrubber.scrub_partial
+        scrubbed = scrub(line)
         try:
-            self._sink.write(scrub(line))
+            self._sink.write(scrubbed)
         except Exception as e:
             self._fail(e)
+            return
+        # METERED AFTER the sink accepted it (#239), so the figures describe
+        # what was stored rather than what was offered: a line lost to a full
+        # disk is not one the index row claims.
+        self._stored += 1
+        self._meter.feed(scrubbed)
 
     def close(self) -> None:
         """Close the sink; idempotent, and never raises into the review path.
@@ -365,6 +543,44 @@ class Transcript:
             self._sink.close()
         except Exception as e:  # pragma: no cover - defensive, same guard as write
             self._fail(e)
+
+    def index(self) -> TranscriptIndex | None:
+        """This capture's index row (#239), or ``None`` when there is nothing to index.
+
+        Call it AFTER :meth:`close`, which is where a shipping sink either
+        delivers the bytes or fails; the figures themselves are complete from
+        the last :meth:`write` on, and closing clears no state this reads.
+
+        ``None`` in two cases, both of which mean the reference on the
+        ``review_runs`` row stays NULL rather than naming a blob:
+
+        * **Nothing landed.** A run that streamed no events leaves no file and
+          ships nothing (:class:`ShippingTranscriptSink`), so an index row would
+          point at a blob that does not exist.
+        * **The capture failed.** Conservative on purpose, and knowingly
+          over-suppressing one case: a sink that failed at event 900 still has
+          its clean prefix shipped by ``close``, and that prefix would be
+          indexable. But the same ``None`` covers a failure IN ``close`` -- an
+          upload that never landed -- and from here the two are one flag. A
+          missing index row costs an observability row; a reference to a blob
+          that was never stored costs a reader that cannot tell a lost
+          transcript from an unstored one, which is the distinction #236 built
+          the nullable reference to preserve.
+
+        A transcript whose feed was CUT SHORT is not one of those cases: it is
+        indexed, with ``complete`` false. What streamed before the cut is a real
+        measurement of a real run, and dropping it would bias the corpus towards
+        runs that finished.
+        """
+        if self._failed or not self._stored:
+            return None
+        return TranscriptIndex(
+            key=self.key,
+            complete=self._meter.complete,
+            tool_calls=dict(self._meter.tool_calls),
+            tool_result_bytes=self._meter.tool_result_bytes,
+            repeated_read_files=self._meter.repeated_read_files,
+        )
 
     def _fail(self, error: Exception) -> None:
         """Report one stderr line and go inert for the rest of the run."""

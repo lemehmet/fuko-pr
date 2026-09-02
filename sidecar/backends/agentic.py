@@ -126,6 +126,7 @@ def _failure_result(
     *,
     throttled: bool = False,
     costs: dict | None = None,
+    transcript: dict | None = None,
 ) -> InvokeResult:
     """Build EVERY failure return, so the receipt invariants cannot drift apart.
 
@@ -152,6 +153,11 @@ def _failure_result(
     its whole turn budget and then emitted unparseable output, is among the most
     expensive shapes this fleet produces -- so the accounting rides the failure
     returns too, whenever the harness got far enough to report it.
+
+    ``transcript`` (#239) rides them for the same reason and one more: a run
+    killed at ``tool_timeout``, or one that read the repository twice and then
+    emitted garbage, is exactly the run whose per-tool figures are worth having,
+    and its transcript is the only place they exist.
     """
     body = _flatten_for_log(message)[:DETAIL_CAP]
     return InvokeResult(
@@ -159,6 +165,7 @@ def _failure_result(
         detail=f"{verdict}: {body}" if body else verdict,
         throttled=throttled,
         channels={_CHANNEL: verdict},
+        transcript=transcript,
         **(costs or {}),
     )
 
@@ -1083,6 +1090,13 @@ class AgenticBackend:
         # including the ones that never reach the harness.
         workdir: Path | None = None
         transcript: Transcript | None = None
+        # Lifted off the transcript in the `finally` below, because every return
+        # path past that point needs it and the object it comes from is closed
+        # there. The two returns INSIDE the try (no harness on PATH, a sandbox
+        # that could not be prepared) do not carry one, and cannot: both happen
+        # before a single event has streamed, so `index()` would answer `None`
+        # anyway.
+        transcript_index: dict | None = None
         try:
             workdir = Path(mkdtemp(prefix="fuko-agentic-cwd-"))
             # PER-BRANCH CLAUDE STATE DIRECTORY.
@@ -1192,6 +1206,11 @@ class AgenticBackend:
         finally:
             if transcript is not None:
                 transcript.close()
+                # AFTER `close()`: with a shipping sink that is where the bytes
+                # either reach shared storage or do not, and a capture that
+                # failed there indexes nothing (#239).
+                index = transcript.index()
+                transcript_index = None if index is None else index.as_dict()
             rmtree(checkout, ignore_errors=True)
             if workdir is not None:
                 rmtree(workdir, ignore_errors=True)
@@ -1222,6 +1241,7 @@ class AgenticBackend:
                     f"agent could not authenticate in {auth} mode"
                     + (f": {auth_tail}" if auth_tail else ""),
                     costs=_run_costs(result),
+                    transcript=transcript_index,
                 )
             # FLATTENED, for the same reason the runner flattens progress
             # arguments (27011698) and the dump prefixes its lines: this text
@@ -1241,7 +1261,11 @@ class AgenticBackend:
             else:
                 verdict = f"failed:exit {result.returncode}"
             return _failure_result(
-                verdict, stderr_tail, throttled=throttled, costs=_run_costs(result)
+                verdict,
+                stderr_tail,
+                throttled=throttled,
+                costs=_run_costs(result),
+                transcript=transcript_index,
             )
         try:
             review = parse_review(result.text)
@@ -1278,7 +1302,12 @@ class AgenticBackend:
             # (CodeRabbit, #147) — and the whole point of that contract is
             # that a reader can tell a crash from a timeout from a throttle
             # without parsing prose.
-            return _failure_result("failed:exit 1", str(e), costs=_run_costs(result))
+            return _failure_result(
+                "failed:exit 1",
+                str(e),
+                costs=_run_costs(result),
+                transcript=transcript_index,
+            )
 
         # Case/whitespace-normalized: `confidence` is deliberately a free-form
         # str so an off-vocabulary value degrades to filtering rather than
@@ -1390,6 +1419,7 @@ class AgenticBackend:
             returncode=0,
             detail=f"{len(kept)} findings",
             channels={_CHANNEL: "done"},
+            transcript=transcript_index,
             **_run_costs(result),
         )
 

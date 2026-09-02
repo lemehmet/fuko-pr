@@ -191,6 +191,13 @@ store that was *meant* to work and does not (unknown backend, missing bucket,
 absent `boto3`) is a different `503`: the sidecar logs it and the runner reports
 it, once, on stderr. Neither ever faults the review.
 
+With `FUKO_DATABASE_URL` also configured, each captured transcript adds a row to
+`review_transcripts` — per-tool call counts, tool-result bytes, and how many
+files the run read more than once — and the run's `review_runs` row references
+it by key (#239). No extra configuration: the figures ride the metrics post the
+runner already makes, and a deployment without Postgres stores the blob and
+skips the row.
+
 ## Ollama in Docker
 
 PR-Agent runs in a container; for a host Ollama, set the review model's

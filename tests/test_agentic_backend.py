@@ -70,7 +70,7 @@ def _ctx() -> PRContext:
     )
 
 
-def _invoke(monkeypatch, backend: AgenticBackend, harness_result: HarnessResult, env=None):
+def _invoke(monkeypatch, backend: AgenticBackend, harness_result: HarnessResult, env=None, feed=()):
     monkeypatch.setattr(agentic_mod, "fetch_pr_context", lambda *a, **k: _ctx())
     monkeypatch.setattr(agentic_mod, "checkout_pr_head", lambda *a, **k: "/tmp/nowhere")
     monkeypatch.setattr(agentic_mod, "rmtree", lambda *a, **k: None)
@@ -89,6 +89,8 @@ def _invoke(monkeypatch, backend: AgenticBackend, harness_result: HarnessResult,
             max_turns=max_turns,
             transcript=transcript,
         )
+        for line in feed:
+            transcript.write(line)
         return harness_result
 
     monkeypatch.setattr(agentic_mod, "run_review", fake_run_review)
@@ -2653,3 +2655,59 @@ def test_build_env_says_nothing_unless_the_findings_ledger_is_switched_off(monke
         ]
         == "0"
     )
+
+
+# --- The session-transcript index the metrics row references (#239).
+
+
+_FEED = [
+    json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "tool_use", "name": "Read", "input": {"file_path": "a.py"}}]
+            },
+        }
+    )
+    + "\n",
+    json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "content": "xy"}]}})
+    + "\n",
+    json.dumps({"type": "result", "subtype": "success", "result": REVIEW_JSON}) + "\n",
+]
+
+
+def test_invoke_attaches_the_transcript_index_to_its_result(monkeypatch, tmp_path):
+    """The reference and its figures leave the driver on the branch result, which
+    is what carries them to `/metrics/run` (#239)."""
+    monkeypatch.setattr(settings, "transcript_dir", str(tmp_path / "transcripts"))
+    result, captured = _invoke(
+        monkeypatch, AgenticBackend(), HarnessResult(0, REVIEW_JSON), feed=_FEED
+    )
+    assert result.returncode == 0
+    assert result.transcript["key"] == captured["transcript"].key
+    assert result.transcript["tool_calls"] == {"Read": 1}
+    assert result.transcript["tool_result_bytes"] == 2
+    assert result.transcript["complete"] is True
+
+
+def test_invoke_attaches_the_index_to_a_failed_run_too(monkeypatch, tmp_path):
+    """A run killed at `tool_timeout`, or one that emitted garbage, is exactly the
+    run whose per-tool figures are worth having."""
+    monkeypatch.setattr(settings, "transcript_dir", str(tmp_path / "transcripts"))
+    result, _ = _invoke(
+        monkeypatch, AgenticBackend(), HarnessResult(1, "", stderr="boom"), feed=_FEED[:2]
+    )
+    assert result.returncode == 1
+    assert result.transcript["tool_calls"] == {"Read": 1}
+    # No terminal `result` event reached the tee: the row says so rather than
+    # letting a cut-short run read as a finished one.
+    assert result.transcript["complete"] is False
+
+
+def test_invoke_records_no_reference_when_capture_is_off(monkeypatch):
+    """Capture off is the fleet default, and it must record no reference rather
+    than a key naming a blob that was never stored."""
+    monkeypatch.setattr(settings, "transcript_dir", "")
+    result, captured = _invoke(monkeypatch, AgenticBackend(), HarnessResult(0, REVIEW_JSON))
+    assert captured["transcript"] is None
+    assert result.transcript is None

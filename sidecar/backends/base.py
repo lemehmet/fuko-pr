@@ -86,6 +86,14 @@ class InvokeResult:
     cache_write_tokens: int | None = None
     cost_usd: float | None = None
     turns: int | None = None
+    #: This run's session-transcript index row, as
+    #: :meth:`sidecar.reviewer.transcript.TranscriptIndex.as_dict` produces it
+    #: (#239): the key that locates the stored blob plus the per-tool figures
+    #: derived from the feed while it streamed. ``None`` -- never an empty
+    #: mapping -- for a backend that captures no transcript, and for an agentic
+    #: run whose capture is off or failed, so a run with no transcript records
+    #: no reference rather than one that would read as a blob gone missing.
+    transcript: dict | None = None
 
 
 @runtime_checkable

@@ -411,6 +411,18 @@ def _costs_of(result: InvokeResult) -> dict:
     return {field: getattr(result, field, None) for field in _COST_FIELDS}
 
 
+def _transcript_of(result: InvokeResult) -> dict | None:
+    """Lift this branch's session-transcript index off its result (#239).
+
+    Read through ``getattr`` for the same reason :func:`_costs_of` is: a backend
+    returning an older :class:`InvokeResult` shape -- every pr-agent run, and any
+    third-party driver -- records no reference rather than crashing the metrics
+    write. An empty mapping is normalized to ``None`` so "no transcript" has one
+    spelling on the wire.
+    """
+    return getattr(result, "transcript", None) or None
+
+
 def _record_run(
     pr: PRRef,
     model: ModelConfig,
@@ -424,6 +436,7 @@ def _record_run(
     backend: str = "pr-agent",
     endpoint: str = "",
     costs: dict | None = None,
+    transcript: dict | None = None,
 ) -> None:
     """Persist one review-run metrics row (best-effort, never raises).
 
@@ -440,6 +453,13 @@ def _record_run(
     usage feed. It travels as a mapping rather than six more keyword arguments
     because it is written and read as one unit, and because both transports here
     (HTTP body and direct call) then carry it identically.
+
+    ``transcript`` is :func:`_transcript_of` applied to the same result -- the
+    key that locates this run's stored session transcript plus the per-tool
+    figures derived from its feed (#239) -- and ``None`` for a backend that
+    captures none. It travels the same way and for the same reasons; what the
+    sidecar does with it (its own row, and only then the reference on this one)
+    is :func:`sidecar.run_metrics.record`'s business.
     """
     try:
         fuko_url, fuko_token = _cb_endpoint()
@@ -459,6 +479,7 @@ def _record_run(
             # auth-aware for backends that route themselves) -- NOT re-derived
             # here, so the DB row and the receipt can never disagree.
             "endpoint": endpoint,
+            "transcript": transcript,
             **(costs or {}),
         }
         if fuko_url:
@@ -485,6 +506,7 @@ def _record_run(
                 detail=payload["detail"],
                 backend=backend,
                 endpoint=endpoint,
+                transcript=transcript,
                 **(costs or {}),
             )
     except Exception as e:
@@ -1009,6 +1031,7 @@ def _run_pool(
                 backend=getattr(model, "backend", None) or review.backend,
                 endpoint=result.endpoint or "",
                 costs=_costs_of(result),
+                transcript=_transcript_of(result),
             )
             return result
 
@@ -1035,6 +1058,7 @@ def _run_pool(
             # writes one row, so this under-reports a failover chain rather than
             # inventing a total the row's provider+model did not incur.
             costs=_costs_of(result),
+            transcript=_transcript_of(result),
         )
     return result
 
