@@ -19,6 +19,7 @@ from sidecar.presets import PRESETS, ProviderPreset, get_preset
 from sidecar.config import settings
 from sidecar.reviewer.checkout import PRContext
 from sidecar.reviewer.harness import HarnessResult
+from sidecar.reviewer.transcript import Transcript
 from sidecar.signals import extract_markers
 
 PR = PRRef(repo="o/r", number=9, url="https://github.com/o/r/pull/9")
@@ -2107,11 +2108,17 @@ def test_the_transcript_destination_reaches_the_harness_for_the_deny_rule(monkey
     destination has to be handed over under its own name or the read denylist
     cannot cover the corpus (`_permission_settings` builds its rules from this
     environment)."""
-    monkeypatch.setattr(settings, "transcript_dir", str(tmp_path / "corpus"), raising=False)
+    corpus = (tmp_path / "corpus").resolve()
+    monkeypatch.setattr(settings, "transcript_dir", str(corpus), raising=False)
     backend = AgenticBackend(ReviewConfig(tool_timeout=5))
     _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
     assert "FUKO_TRANSCRIPT_DIR" not in captured["env"]
-    assert captured["env"]["FUKO_TRANSCRIPT_DENY_DIR"] == str(tmp_path / "corpus")
+    assert captured["env"]["FUKO_TRANSCRIPT_DENY_DIR"] == str(corpus)
+    # The hand-off and the capture are separate wirings; asserting only the
+    # environment would stay green with the `transcript=` kwarg dropped, and
+    # capture would silently be off on every deployment.
+    assert isinstance(captured["transcript"], Transcript)
+    assert captured["transcript"].key
 
 
 def test_no_transcript_destination_hands_over_no_deny_dir(monkeypatch):
@@ -2121,6 +2128,7 @@ def test_no_transcript_destination_hands_over_no_deny_dir(monkeypatch):
     backend = AgenticBackend(ReviewConfig(tool_timeout=5))
     _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
     assert "FUKO_TRANSCRIPT_DENY_DIR" not in captured["env"]
+    assert captured["transcript"] is None
 
 
 def test_failure_prints_full_stderr_and_leads_the_detail_with_the_verdict(monkeypatch, capsys):

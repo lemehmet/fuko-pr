@@ -245,9 +245,21 @@ def transcript_dir(directory: str | None = None) -> Path | None:
     would leave it readable by an agent whose findings are published verbatim to
     an untrusted PR author. Two spellings of the same path would be exactly that
     (see :func:`sidecar.reviewer.harness._permission_settings`).
+
+    CANONICAL, not merely expanded, because that function drops any path which
+    is not POSIX-absolute and matches literally otherwise -- so the two ways a
+    destination can be written and not denied are both silent:
+
+    * a RELATIVE destination renders no rule at all (the non-absolute branch
+      announces it, but the sink still writes there), and
+    * a SYMLINKED one renders a rule for the alias while the sink writes through
+      to the target, which the agent can then read under its real name.
+
+    ``resolve()`` is non-strict, so a destination that does not exist yet still
+    comes back absolute rather than raising -- the first capture creates it.
     """
     destination = settings.transcript_dir if directory is None else directory
-    return Path(destination).expanduser() if destination else None
+    return Path(destination).expanduser().resolve() if destination else None
 
 
 def open_transcript(

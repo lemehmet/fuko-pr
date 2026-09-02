@@ -496,9 +496,13 @@ Properties worth knowing before turning it on:
   memory does not track transcript size and a run killed at `tool_timeout`
   keeps everything that arrived before the cut.
 - **Denied to the reviewing agent.** The destination is added to the harness
-  read denylist (`Read(//<dir>/**)`) whenever it is configured — including on
-  runs that do not capture, since the archive earlier rounds left behind is the
-  part worth reading. This is not covered by the file mode: the agent is spawned
+  read denylist whenever it is configured — including on runs that do not
+  capture, since the archive earlier rounds left behind is the part worth
+  reading. The path is canonicalized first (`expanduser().resolve()`), so a
+  relative or symlinked destination cannot render a rule that misses what is
+  actually written; `/var/lib/fuko/transcripts` becomes the rule
+  `Read(//var/lib/fuko/transcripts/**)` in the absolute-rule spelling described
+  above. This is not covered by the file mode: the agent is spawned
   as the same uid, so `0600` stops other *users*, not this reader. Without the
   rule a transcript is a durable, cross-repo record of everything past runs
   read, sitting where `Glob` can find it, reachable by an agent whose findings

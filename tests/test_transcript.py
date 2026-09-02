@@ -343,6 +343,29 @@ def test_the_transcript_mints_its_own_key():
     assert re.fullmatch(r"\d{8}T\d{6}Z-[0-9a-f]{12}", first)
 
 
+def test_a_relative_destination_is_made_absolute(tmp_path, monkeypatch):
+    """`_permission_settings` drops any path that is not POSIX-absolute, so a
+    relative destination would render NO deny rule while the sink still wrote
+    there."""
+    monkeypatch.chdir(tmp_path)
+    assert transcript_mod.transcript_dir("corpus") == (tmp_path / "corpus").resolve()
+
+
+def test_a_symlinked_destination_resolves_to_its_target(tmp_path):
+    """A rule for the alias leaves the archive readable under its real name."""
+    target = tmp_path / "real"
+    target.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(target)
+    assert transcript_mod.transcript_dir(str(alias)) == target.resolve()
+
+
+def test_no_destination_is_not_a_path(monkeypatch):
+    """Capture off returns None rather than the current directory."""
+    monkeypatch.setattr(settings, "transcript_dir", "", raising=False)
+    assert transcript_mod.transcript_dir() is None
+
+
 def test_a_misconfigured_destination_degrades_to_no_capture(monkeypatch, capsys):
     monkeypatch.setattr(transcript_mod, "mint_key", lambda: 1 / 0)
     assert open_transcript([], directory="/tmp/whatever") is None
