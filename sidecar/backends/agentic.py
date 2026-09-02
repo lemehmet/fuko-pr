@@ -907,14 +907,20 @@ class AgenticBackend:
         # whenever a destination is CONFIGURED rather than when this run
         # captures -- what a reader wants is the archive earlier rounds left.
         # A destination this rejects (the root, an unexpandable `~`) must leave
-        # BOTH sides off: no deny path here, and `open_transcript` refusing the
-        # same value through the same function later. The one state worth ruling
-        # out is a capture that opened against a path no rule covers.
+        # BOTH sides off: no deny path here, and no capture below. The one state
+        # worth ruling out is a capture that opened against a path no rule
+        # covers.
+        #
+        # The refusal is REMEMBERED rather than rediscovered: `open_transcript`
+        # would resolve the same setting and reject it a second time, and one
+        # capture failure reporting twice is the log-flood shape
+        # `Transcript._fail` exists to avoid, one level up.
+        refused = False
         try:
             deny_dir = transcript_dir()
         except Exception as e:
             print(f"fuko: transcript capture unavailable: {e}", file=sys.stderr)
-            deny_dir = None
+            deny_dir, refused = None, True
         if deny_dir is not None:
             harness_env[_ENV_TRANSCRIPT_DENY_DIR] = str(deny_dir)
         # DELIVERY-side receipt (mepro#2012 r2, both gating seats converged):
@@ -1071,7 +1077,11 @@ class AgenticBackend:
             # Minted at run START (#236): `run_metrics.record()` inserts the
             # `review_runs` row after the run and never returns its id, so a
             # transcript cannot be keyed on it and carries its own identity.
-            transcript = open_transcript(_transcript_secrets(harness_env, token), label=model_name)
+            transcript = (
+                None
+                if refused
+                else open_transcript(_transcript_secrets(harness_env, token), label=model_name)
+            )
             result = run_review(
                 prompt,
                 Path(checkout),

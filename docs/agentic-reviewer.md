@@ -510,6 +510,16 @@ Properties worth knowing before turning it on:
   stripped with the rest of the `FUKO_` namespace before the spawn, so the path
   is handed over under its own name (`FUKO_TRANSCRIPT_DENY_DIR`) purely to be
   denied.
+
+  **The rule follows the setting, not the files.** It is emitted for whatever
+  `FUKO_TRANSCRIPT_DIR` names *right now*, so **unsetting the variable or
+  pointing it at a new directory un-denies the corpus already on disk** — the
+  files stay where they are, and from the next run on nothing stops the agent
+  reading them. Turning capture off for privacy, or moving the destination to a
+  bigger disk, is therefore not a retreat: **delete the old directory**, or keep
+  its path denied by other means. There is deliberately no memory of previously
+  configured destinations — a deny list that accumulated paths nobody could see
+  or clear would be its own hazard — so this one is on the operator.
 - **Owner-only on disk.** The directory is created `0700` and each file `0600`,
   set as the file is created rather than chmod'ed after. What survives the
   scrub is the reviewed repository as the agent read it — the same content the

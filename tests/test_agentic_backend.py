@@ -2161,7 +2161,11 @@ def test_a_refused_destination_leaves_no_deny_var_and_no_capture(monkeypatch, ca
     _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
     assert "FUKO_TRANSCRIPT_DENY_DIR" not in captured["env"]
     assert captured["transcript"] is None
-    assert "transcript capture unavailable" in capsys.readouterr().err
+    # ONE diagnostic, not two: `open_transcript` would resolve the same setting
+    # and reject it again, and one capture failure reporting twice is the
+    # log-flood shape `Transcript._fail` avoids one level down.
+    err = capsys.readouterr().err
+    assert err.count("transcript capture unavailable") == 1
 
 
 def test_failure_prints_full_stderr_and_leads_the_detail_with_the_verdict(monkeypatch, capsys):
