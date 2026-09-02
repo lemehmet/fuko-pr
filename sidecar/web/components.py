@@ -131,6 +131,34 @@ def form_value(value: object) -> str:
     return "" if value is None else str(value)
 
 
+def form_int(value: object) -> int | None:
+    """Read a number a form submitted, treating anything unusable as "no filter".
+
+    The inverse of :func:`form_value`, and it exists for the same round-trip:
+    a browser submits every text input in the form, so an untouched numeric
+    field arrives as ``name=`` rather than not arriving at all. Declaring such a
+    parameter ``int | None`` does NOT cover that -- ``Optional`` admits an
+    ABSENT parameter, not an empty one -- so the operator who clicks "filter"
+    having typed only a repository gets FastAPI's 422 instead of a page. A route
+    whose integer is bound to a form field therefore takes it as text and parses
+    it here.
+
+    ASCII digits only, positive, and inside a Postgres ``integer``: these are
+    identifiers (a pull request number), so there is no reading of ``-1`` or
+    ``1.5`` worth guessing at, ``²`` is a digit to :meth:`str.isdigit` that
+    :func:`int` then refuses, and a number too large for the column would reach
+    the page as "store unreachable" -- a fault report for a typo. Every one of
+    those is answered the way an empty field is, with the unfiltered page,
+    because a filter nobody can read should drop itself rather than the
+    response.
+    """
+    text = form_value(value).strip()
+    if not (text.isascii() and text.isdigit()):
+        return None
+    number = int(text)
+    return number if 0 < number <= 2**31 - 1 else None
+
+
 def field(label: str, name: str, value: object = "", **kwargs: object) -> str:
     """Render a labelled ``<input>``."""
     tag = attrs(name=name, value=form_value(value), **kwargs)

@@ -39,6 +39,7 @@ PREFIX = "/ui"
 PAGES: tuple[Page, ...] = (
     Page(slug="metrics", title="Metrics", path=f"{PREFIX}/metrics", order=10),
     Page(slug="kb", title="Knowledge base", path=f"{PREFIX}/kb", order=20),
+    Page(slug="ledger", title="Ledger", path=f"{PREFIX}/ledger", order=30),
 )
 
 

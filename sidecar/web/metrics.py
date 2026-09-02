@@ -66,7 +66,10 @@ _RECENT_COLUMNS: list[c.Column] = [
     ("s", True),
     ("tries", True),
     ("findings", True),
+    ("ledger", False),
 ]
+
+_LEDGER = page("ledger")
 
 _HEALTH_COLUMNS: list[c.Column] = [
     ("repo", False),
@@ -88,6 +91,21 @@ def _pr_cell(repo: str, pr: object) -> str:
     return c.raw_cell(
         c.link(f"https://github.com/{repo}/pull/{int(pr)}", f"#{int(pr)}"), numeric=True
     )
+
+
+def _ledger_cell(repo: str, pr: object) -> str:
+    """Render the cross-link into this run's review-state lanes, keyed on ``(repo, pr)``.
+
+    Keyed on the pull request and NOT on the seat, deliberately. A run row's
+    ``slot`` and a ledger lane's ``seat`` look like the same thing and are not:
+    ``runner._branch_seats`` prefers the slot but falls back to
+    ``provider/name``, then ``provider/name#idx``, then the default seat, so a
+    join on that column would silently miss every solo config. The pull request
+    is the key both sides always agree on.
+    """
+    if pr is None:
+        return c.cell(None)
+    return c.raw_cell(c.link(f"{_LEDGER.path}{c.query_string({'repo': repo, 'pr': int(pr)})}", "↦"))
 
 
 def _tokens(value: object) -> str:
@@ -159,6 +177,7 @@ def _recent_rows(recent: list[dict]) -> list[str]:
         + c.cell(round(r["duration_s"]), numeric=True)
         + c.cell(r["attempts"], numeric=True)
         + c.cell(r["findings"], numeric=True)
+        + _ledger_cell(r["repo"], r["pr"])
         + "</tr>"
         for r in recent
     ]

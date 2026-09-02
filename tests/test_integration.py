@@ -390,6 +390,142 @@ def test_review_state_ledgers_roundtrip_on_a_live_server():
     assert R.next_round(TEST_REPO, 1, "henry") == 6
 
 
+def test_operator_ledger_reads_on_a_live_server():
+    """Run the three operator statements against real SQL, for the reasons above.
+
+    ``lanes``/``pr_findings``/``pr_coverage`` (#235) are the most complex SQL in
+    the module -- a ``UNION ALL`` over both ledgers feeding three CTEs, four
+    ``count(...) FILTER`` tallies, ``make_interval(days => %s)``, the
+    ``%s::text IS NULL OR col = %s::text`` optional-filter pattern, and
+    ``count(*) OVER ()`` -- and a recording connection can demonstrate none of
+    it: it replays whatever the fake decided, so a wrong FILTER predicate or an
+    unbound cast reads as a pass. The consequence is specific to these reads.
+    They raise instead of degrading, and the page turns any exception into
+    "store unreachable", so a broken statement would report a HEALTHY store as
+    an outage on every load while the whole unit suite stayed green.
+
+    Three lanes, because the shapes that can vanish are the ones only a server
+    can show: a lane with coverage and no findings must still appear (the round
+    happened), a lane with findings and no coverage must report ``0/0`` rather
+    than dropping out of the join, and a row older than the retention window
+    must be SHOWN while being excluded from ``offerable`` -- retention bounds
+    what a round would be OFFERED, never what an operator may read.
+    """
+    from sidecar import review_state as R
+    from sidecar.db import db
+    from sidecar.reviewer.prompt import AgenticFinding, ExaminedRegion
+
+    head = "2" * 40
+
+    def _finding(title: str) -> AgenticFinding:
+        return AgenticFinding(
+            file="src/app.py",
+            line=7,
+            severity="high",
+            category="bug",
+            title=title,
+            body="body text",
+            evidence="src/app.py:5-9",
+        )
+
+    def _region(file: str) -> ExaminedRegion:
+        return ExaminedRegion(
+            file=file,
+            region="L1-L20",
+            checked="the null path",
+            conclusion="guarded",
+            evidence=f"{file}:1-20",
+        )
+
+    # Lane A: two rounds of findings plus coverage -- the lane every rate is
+    # measured on. Round 0 files three claims; two are settled; round 1 adds one
+    # more, which makes round 1 the "latest" the rates measure BEFORE.
+    assert R.record_findings(TEST_REPO, 10, "henry", 0, head, [_finding(t) for t in "abc"]) == 3
+    first = {s.prior.title: s.id for s in R.open_findings(TEST_REPO, 10, "henry").rows}
+    assert R.transition(TEST_REPO, 10, "henry", first["a"], "fixed", "patched")
+    assert R.transition(TEST_REPO, 10, "henry", first["b"], "rejected", "premise is wrong")
+    assert R.record_findings(TEST_REPO, 10, "henry", 1, head, [_finding("d")]) == 1
+    assert R.record_coverage(TEST_REPO, 10, "henry", 1, head, [_region("a.py"), _region("b.py")])
+    assert R.expire_coverage(TEST_REPO, 10, "henry", ["b.py"]) == 1
+    # Age one still-open row past the retention window. It is the assertion the
+    # whole "not a sweep" contract rests on: the row stays visible and keeps
+    # counting as open, and only `offerable` drops it.
+    with db() as conn:
+        conn.execute(
+            "UPDATE review_findings SET updated_at = now() - make_interval(days => 200) "
+            "WHERE id = %s",
+            (first["c"],),
+        )
+
+    # Lane B: coverage and no findings at all. `next_round` counts both ledgers,
+    # so this is a real round and the lane must not vanish.
+    assert R.record_coverage(TEST_REPO, 11, "gray", 0, head, [_region("c.py")]) == 1
+    # Lane C: findings and no coverage, the mirror case.
+    assert R.record_findings(TEST_REPO, 12, "sybil", 0, head, [_finding("e")]) == 1
+
+    index = R.lanes(repo=TEST_REPO)
+    assert index.total == 3
+    by_lane = {(lane.pr, lane.seat): lane for lane in index.lanes}
+    assert set(by_lane) == {(10, "henry"), (11, "gray"), (12, "sybil")}
+
+    a = by_lane[(10, "henry")]
+    assert a.latest_round == 1
+    assert a.counts == {"open": 2, "fixed": 1, "rejected": 1, "stale": 0}
+    assert (a.eligible, a.carried, a.settled) == (3, 1, 2)
+    assert a.carry_forward_rate == 1 / 3 and a.settle_rate == 2 / 3
+    assert a.offerable == 1  # the 200-day-old open row is not offerable...
+    assert a.counts["open"] == 2  # ...and is still counted and still shown
+    # ...and still counts in the rate denominator, which is windowed nowhere:
+    # `carried` is 1 and that 1 IS the aged row, because a claim that went open
+    # and then forgotten is what a carry-forward rate is for. Only `offerable`
+    # takes the retention window, being the only one of these that claims
+    # anything about what a round would be handed.
+    assert a.carried == 1 and a.offerable == 1
+    assert a.never_offered == 0
+    assert (a.coverage_total, a.coverage_live) == (2, 1)
+    assert a.last_activity is not None
+
+    b = by_lane[(11, "gray")]
+    assert b.counts == dict.fromkeys(R.STATUS_ORDER, 0)
+    assert (b.coverage_total, b.coverage_live) == (1, 1)
+    # One round, so nothing a later round could have acted on: a rate here would
+    # be a seat that settles nothing rather than a seat with nothing to settle.
+    assert b.carry_forward_rate is None and b.settle_rate is None
+
+    assert by_lane[(12, "sybil")].coverage_total == 0
+
+    # The optional filters are evaluated by the server, one cast per parameter.
+    assert R.lanes(repo=TEST_REPO, pr=10).total == 1
+    assert R.lanes(repo=TEST_REPO, seat="gray").total == 1
+    assert R.lanes(repo=TEST_REPO, pr=10, seat="gray").total == 0
+    # `count(*) OVER ()` is computed after WHERE and before LIMIT, which is what
+    # lets one page report how many lanes it is a page OF.
+    page = R.lanes(repo=TEST_REPO, limit=1)
+    assert len(page.lanes) == 1 and page.total == 3
+
+    history = R.pr_findings(TEST_REPO, 10)
+    assert history.total == 4
+    assert history.rows[0].round == 1  # newest round first
+    assert {row.status for row in history.rows} == {"open", "fixed", "rejected"}
+    assert {row.status_reason for row in history.rows} >= {"patched", "premise is wrong"}
+    assert R.pr_findings(TEST_REPO, 10, seat="gray").total == 0
+    cut = R.pr_findings(TEST_REPO, 10, limit=1)
+    assert len(cut.rows) == 1 and cut.total == 4
+
+    examined = R.pr_coverage(TEST_REPO, 10)
+    assert examined.total == 2
+    # The expired row is projected rather than filtered out -- the opposite of
+    # `live_coverage`, which must never hand a round a dead assurance.
+    assert sorted(row.live for row in examined.rows) == [False, True]
+    assert [row.expired_at for row in examined.rows if not row.live] != [None]
+    assert R.pr_coverage(TEST_REPO, 10, seat="gray").total == 0
+
+    # An offset past the end is an empty page with no count to read, not a
+    # count with no rows.
+    beyond = R.pr_findings(TEST_REPO, 10, offset=99)
+    assert beyond.rows == () and beyond.total == 0
+
+
 def test_digest_source_is_accepted_and_gated(monkeypatch):
     """The CHECK constraint admits 'digest' and retrieval hides it while dark (#158)."""
     from sidecar import ingest as I

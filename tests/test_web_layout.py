@@ -131,6 +131,29 @@ def test_form_value_keeps_falsy_non_none_values():
     assert c.form_value("") == ""
 
 
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("7", 7),
+        (" 7 ", 7),
+        (7, 7),
+        ("", None),  # the untouched field a form still submits
+        (None, None),
+        ("abc", None),
+        ("1.5", None),
+        ("-3", None),
+        ("0", None),  # positive identifiers only
+        ("²", None),  # str.isdigit() says yes, int() says no
+        ("٧", None),  # a non-ASCII digit int() WOULD accept, and we still do not
+        (str(2**31), None),  # past a Postgres integer, so not a lookup we can run
+        (str(2**31 - 1), 2**31 - 1),
+    ],
+)
+def test_form_int_reads_a_submitted_number_or_gives_up_quietly(raw, expected):
+    """Anything unusable answers like an empty field: no filter, never an error."""
+    assert c.form_int(raw) == expected
+
+
 def test_form_helpers_round_trip_a_zero():
     assert '<input name="n" value="0">' in c.field("N", "n", 0)
     assert '<textarea name="n">0</textarea>' in c.textarea("N", "n", 0)
