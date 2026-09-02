@@ -436,6 +436,34 @@ def test_get_names_an_out_path_it_cannot_open(monkeypatch, tmp_path):
     assert "cannot write" in str(e.value)
 
 
+def test_a_transfer_failure_survives_a_close_that_also_fails(monkeypatch, tmp_path):
+    # Both can happen at once: the download dies with bytes still buffered, and
+    # the close then fails too (a delayed-error filesystem surfaces writeback
+    # errors exactly there). The FIRST fault is the one that explains the rest,
+    # so the close must not relabel a dropped download as a local disk problem.
+    class _FailingClose:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            raise OSError(5, "Input/output error")
+
+        def write(self, data):
+            return len(data)
+
+    monkeypatch.setattr(
+        transcriptscli.urllib.request,
+        "urlopen",
+        lambda req, timeout=None: _DyingResponse(b'{"type":"assistant"}\n', chunks=1),
+    )
+    monkeypatch.setattr("builtins.open", lambda *a, **kw: _FailingClose())
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._get(argparse.Namespace(key="abc123", out=str(tmp_path / "s.ndjson")))
+    message = str(e.value)
+    assert "failed mid-body" in message
+    assert "cannot write" not in message
+
+
 def test_a_closed_stdout_pipe_exits_zero_and_leaves_nothing_buffered(monkeypatch):
     # `fuko transcripts get KEY | head` is the documented use, so it must exit
     # 0 -- and must not hand a populated buffer to the interpreter's final

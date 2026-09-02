@@ -376,7 +376,17 @@ def _get(args) -> None:
                 # The buffered flush `with handle:` performs on the way out --
                 # a local write like any other, and the one place ENOSPC most
                 # often actually surfaces.
-                failure = ("write", e)
+                #
+                # Only when nothing failed earlier. A transfer that died
+                # mid-body leaves the loop with bytes still buffered, so the
+                # close can fail too (delayed-error filesystems surface a
+                # writeback error exactly there) -- and letting it overwrite the
+                # recorded failure would report a local disk fault for what was
+                # a dropped download, the mirror image of the misattribution
+                # this split exists to prevent. The FIRST fault is the one that
+                # explains the rest.
+                if failure is None:
+                    failure = ("write", e)
             if failure is not None:
                 _partial_gone(args.out)
                 kind, error = failure
