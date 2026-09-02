@@ -114,6 +114,33 @@ def test_candidate_pairs_excludes_what_the_exact_rule_already_matched():
     assert candidate_pairs(claims, "a", "b") == ()
 
 
+def test_candidate_pairs_ignore_a_one_sided_surplus():
+    """One arm finding what the other did not is not a paraphrase to adjudicate."""
+    claims = [
+        _c("a", "r1", "src/app.py", "Unchecked None"),
+        _c("a", "r1", "src/app.py", "Unbounded retry"),
+        _c("b", "r1", "src/app.py", "unchecked none"),
+    ]
+
+    p = pair_metrics(claims, "a", "b")
+
+    assert (p.shared, p.union) == (1, 2)
+    assert candidate_pairs(claims, "a", "b") == ()
+
+
+def test_candidate_pairs_bucket_files_the_way_the_exact_rule_does():
+    """A path differing only by padding is one file to the rule these pairs qualify."""
+    claims = [
+        _c("a", "r1", "src/embed.py", "Prefix is added after the budget is allocated"),
+        _c("b", "r1", " src/embed.py ", "Prefix is prepended after the budget was spent"),
+    ]
+
+    pairs = candidate_pairs(claims, "a", "b")
+
+    assert len(pairs) == 1
+    assert pairs[0].file == "src/embed.py"
+
+
 def test_candidate_pairs_need_the_same_round_and_the_same_file():
     claims = [
         # Same file, different rounds: the arms were asked twice, not in disagreement.

@@ -224,10 +224,17 @@ def _report_candidates(claims: list[Claim], a: str, b: str, receipts: set[tuple[
     (#243). Nothing here is counted, averaged, or fed back into a metric -- the
     adjudication is a human's, and a tool that pre-empted it would be the
     fitted-to-its-answer matcher #159 rules out.
+
+    The empty line says only that no such PAIR exists, which is the one claim
+    that holds however the list came out empty: the arms shared no round at all,
+    every same-file claim matched exactly, or one arm carried an unmatched
+    surplus the other had nothing to weigh against. Widening it to "nothing sits
+    outside the exact-title match" would assert the second of those three in all
+    three cases.
     """
     pairs = candidate_pairs(claims, a, b, sorted(receipts))
     if not pairs:
-        print("\nno same-round same-file claims outside the exact-title match")
+        print("\nno same-round same-file pair with unmatched claims on both arms")
         return
     print(
         f"\n{len(pairs)} same-round same-file pair(s) the exact-title rule scored as "

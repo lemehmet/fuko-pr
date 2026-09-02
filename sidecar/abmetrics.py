@@ -410,7 +410,10 @@ def candidate_pairs(
 
     Returns pairs ordered by round then file, each carrying every unmatched title
     each arm published on that file in that round. A file where one arm's claims
-    all matched the other's exactly yields no pair.
+    all matched the other's exactly yields no pair, and neither does a one-sided
+    surplus: an unmatched claim with nothing on the other arm to weigh it against
+    is not a paraphrase awaiting adjudication, it is one arm finding what the
+    other did not, which the pooled shared/union counts already carry.
     """
     left = [c for c in claims if c.arm == a]
     right = [c for c in claims if c.arm == b]
@@ -432,11 +435,17 @@ def candidate_pairs(
 
 
 def _by_round_file(claims: Iterable[Claim], rounds: set[str]) -> dict[tuple[str, str], list[Claim]]:
-    """Group claims in ``rounds`` by their ``(round_key, file)``."""
+    """Group claims in ``rounds`` by their round and their ANCHORED file.
+
+    The file comes from :attr:`Claim.anchor`, not from ``Claim.file``: these
+    buckets have to draw the same "same file" line the exact-title rule draws, or
+    two paths differing only in surrounding whitespace land in disjoint buckets
+    and the pair that rule scored as disagreeing is silently never listed.
+    """
     out: dict[tuple[str, str], list[Claim]] = {}
     for claim in claims:
         if claim.round_key in rounds:
-            out.setdefault((claim.round_key, claim.file), []).append(claim)
+            out.setdefault((claim.round_key, claim.anchor[0]), []).append(claim)
     return out
 
 
