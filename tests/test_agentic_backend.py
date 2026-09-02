@@ -2682,7 +2682,12 @@ def _capture_with_a_store(monkeypatch, tmp_path):
     Both are required for an index row: `Transcript.index` writes one only for
     bytes a sink affirms it stored, so a runner with nowhere to ship captures a
     local file and records no reference to it (#239).
+
+    `FUKO_URL` is dropped because `upload_target()` gives it priority over the
+    configured store, so an ambient one would ship over HTTP and leave the store
+    this configures unexercised.
     """
+    monkeypatch.delenv("FUKO_URL", raising=False)
     monkeypatch.setattr(settings, "transcript_dir", str(tmp_path / "transcripts"))
     monkeypatch.setattr(settings, "transcript_store_backend", "file")
     monkeypatch.setattr(settings, "transcript_store_root", str(tmp_path / "blobs"))

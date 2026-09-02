@@ -644,6 +644,30 @@ def test_the_request_model_rejects_a_negative_call_count():
     assert TranscriptIndexRequest(**{**_INDEX, "tool_calls": {"Read": 0}}).tool_calls == {"Read": 0}
 
 
+@pytest.mark.parametrize("field", ["tool_result_bytes", "repeated_read_files"])
+def test_record_skips_an_index_whose_totals_are_not_counts(monkeypatch, capsys, field):
+    """Unlike one tool's count, these are the whole row's measurement: there is
+    no partial version of them that would be true, so the index is skipped the
+    way an unusable key is -- NULL reference, run row intact. The columns carry
+    no CHECK, so a bare `int()` here would simply store a negative."""
+    conn, _ = _pg(monkeypatch)
+    run_metrics.record("o/r", 7, "p", "m", findings=3, transcript={**_INDEX, field: -1})
+    assert len(conn.statements) == 1
+    assert conn.statements[0][0].startswith("INSERT INTO review_runs")
+    assert conn.statements[0][1][-1] is None
+    assert "unusable totals" in capsys.readouterr().err
+
+
+def test_record_reads_an_absent_total_as_a_real_zero(monkeypatch):
+    """This object only exists for a transcript that WAS captured, so "no bytes"
+    is a measurement -- unlike `review_runs`' token columns, where a zero would
+    claim an unmeasured run was free."""
+    conn, _ = _pg(monkeypatch)
+    run_metrics.record("o/r", 7, "p", "m", transcript={"key": _INDEX["key"], "complete": True})
+    assert conn.statements[0][1][3] == 0 and conn.statements[0][1][4] == 0
+    assert conn.statements[1][1][-1] == _INDEX["key"]
+
+
 def test_the_request_model_refuses_a_boolean_spelled_as_a_call_count():
     """Lax coercion turns JSON `true` into 1, which would store a shape error as
     a real measurement -- and would make the two transports disagree, since the

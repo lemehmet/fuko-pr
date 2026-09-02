@@ -105,6 +105,24 @@ def _costs(row) -> dict:
     }
 
 
+def _count(value) -> int | None:
+    """``value`` as a transcript count, or ``None`` when it is not one (#239).
+
+    Absent reads as ``0`` -- these figures exist only for a transcript that was
+    captured, so "no bytes" is a real measurement rather than an unmeasured run.
+    Anything else that is not a non-negative ``int`` is refused instead of
+    coerced: the request model states the same contract for the HTTP hop, and
+    the columns behind them carry no CHECK, so a bare ``int(...)`` here would
+    store a negative byte count that nothing downstream could tell from a real
+    one. ``bool`` is excluded for the reason :func:`_tool_calls` gives.
+    """
+    if value is None:
+        return 0
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
 def _tool_calls(value) -> dict:
     """The call-count mapping this column will accept, entry by entry (#239).
 
@@ -184,6 +202,16 @@ def _index_transcript(transcript) -> str | None:
         print(f"fuko: transcript index skipped, invalid key {key!r}", file=sys.stderr)
         return None
     tool_calls = _tool_calls(transcript.get("tool_calls"))
+    totals = [_count(transcript.get(f)) for f in ("tool_result_bytes", "repeated_read_files")]
+    if None in totals:
+        # These two are the whole row's measurement rather than one entry in a
+        # mapping, so an unusable one is not droppable the way a single tool's
+        # count is -- there is nothing left to store that would be true. The
+        # reference goes NULL and the run row lands beside it, exactly as for an
+        # unusable key. The columns are BIGINT/INTEGER with no CHECK, so without
+        # this a negative would simply be stored.
+        print(f"fuko: transcript index skipped, unusable totals in {key}", file=sys.stderr)
+        return None
     try:
         with db_best_effort() as conn:
             conn.execute(
@@ -198,8 +226,7 @@ def _index_transcript(transcript) -> str | None:
                     # keeps this module free of a psycopg import it otherwise
                     # has no use for.
                     json.dumps(tool_calls),
-                    int(transcript.get("tool_result_bytes") or 0),
-                    int(transcript.get("repeated_read_files") or 0),
+                    *totals,
                 ),
             )
     except Exception as e:

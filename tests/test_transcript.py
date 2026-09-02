@@ -998,10 +998,15 @@ def test_a_read_without_a_usable_path_is_counted_but_not_tracked():
     assert index.tool_calls == {"Read": 2} and index.repeated_read_files == 0
 
 
-def test_a_capture_with_nowhere_to_ship_is_not_indexed(tmp_path):
+def test_a_capture_with_nowhere_to_ship_is_not_indexed(tmp_path, monkeypatch):
     """The `fuko review` laptop case: no `FUKO_URL`, no store backend, so the
     transcript is a local file. The figures are real, but nothing else can fetch
     what they describe, and a reference is a promise that it can."""
+    # Both, and in this order: `upload_target()` answers "sidecar" on `FUKO_URL`
+    # alone, so an ambient one would give this run a destination and the
+    # assertion would be testing the environment rather than the code.
+    monkeypatch.delenv("FUKO_URL", raising=False)
+    monkeypatch.setattr(settings, "transcript_store_backend", "")
     transcript = open_transcript([], directory=str(tmp_path / "transcripts"))
     transcript.write(json.dumps(_tool_use("Read", file_path="a.py")) + "\n")
     transcript.close()
@@ -1011,6 +1016,9 @@ def test_a_capture_with_nowhere_to_ship_is_not_indexed(tmp_path):
 def test_run_review_indexes_the_feed_it_captured(tmp_path, monkeypatch):
     """End to end through the real harness and a real store: the figures come
     off the same feed the tee stored, with nothing re-downloaded."""
+    # `FUKO_URL` outranks the configured store in `upload_target()`, so an
+    # ambient one would ship this over HTTP and leave the file store unexercised.
+    monkeypatch.delenv("FUKO_URL", raising=False)
     monkeypatch.setattr(settings, "transcript_store_backend", "file")
     monkeypatch.setattr(settings, "transcript_store_root", str(tmp_path / "blobs"))
     assert _feed_script(tmp_path, _INDEX_FEED).exists()
