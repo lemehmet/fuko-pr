@@ -1,6 +1,7 @@
 """Tests for ``fuko transcripts`` (the network call is faked), #240."""
 
 import argparse
+import http.client
 import io
 import json
 import urllib.error
@@ -51,6 +52,46 @@ class _FakeResponse(io.BytesIO):
     def __exit__(self, *exc):
         self.close()
         return False
+
+
+class _DyingResponse(_FakeResponse):
+    """A response that opens fine and then dies partway through its body.
+
+    The failure urllib does NOT wrap: everything after the headers is a plain
+    socket read, so a stall or a reset arrives as ``TimeoutError`` /
+    ``ConnectionResetError`` / ``IncompleteRead`` rather than as the
+    ``URLError`` the open-time handler knows.
+    """
+
+    def __init__(self, data=b"", error=None, chunks=0):
+        super().__init__(data)
+        self._error = error or TimeoutError("timed out")
+        self._left = chunks
+
+    def read(self, size=-1):
+        if self._left <= 0:
+            raise self._error
+        self._left -= 1
+        return super().read(size)
+
+
+class _ClosedPipe:
+    """A stdout whose reader has gone away, the way ``| head`` leaves it."""
+
+    def write(self, data):
+        raise BrokenPipeError(32, "Broken pipe")
+
+    def flush(self):  # pragma: no cover - the write raises first
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+class _PipedStdout:
+    buffer = _ClosedPipe()
+
+    def fileno(self):
+        # What a captured stream does, and the branch that keeps the redirect
+        # from being the thing that fails.
+        raise io.UnsupportedOperation("fileno")
 
 
 @pytest.fixture(autouse=True)
@@ -262,6 +303,128 @@ def test_get_of_an_absent_key_exits_non_zero(monkeypatch):
     with pytest.raises(SystemExit) as e:
         transcriptscli._get(argparse.Namespace(key="x", out=None))
     assert "404" in str(e.value)
+
+
+# --- failures that happen AFTER the response opened.
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        TimeoutError("timed out"),
+        ConnectionResetError(104, "Connection reset by peer"),
+        http.client.IncompleteRead(b"half"),
+    ],
+)
+def test_a_body_that_dies_mid_read_is_named_not_a_traceback(monkeypatch, error):
+    monkeypatch.setattr(
+        transcriptscli.urllib.request,
+        "urlopen",
+        lambda req, timeout=None: _DyingResponse(b"{}", error=error),
+    )
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._call("/transcripts")
+    assert "failed mid-body" in str(e.value)
+
+
+def test_get_names_a_transfer_that_dies_mid_body(monkeypatch, capsysbinary):
+    monkeypatch.setattr(
+        transcriptscli.urllib.request,
+        "urlopen",
+        lambda req, timeout=None: _DyingResponse(b'{"type":"assistant"}\n', chunks=1),
+    )
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._get(argparse.Namespace(key="abc123", out=None))
+    assert "failed mid-body" in str(e.value)
+
+
+def test_get_removes_the_partial_file_when_the_transfer_dies(monkeypatch, tmp_path):
+    # The one failure here that outlives the command: a short file that reads
+    # as a whole session next time somebody greps it.
+    monkeypatch.setattr(
+        transcriptscli.urllib.request,
+        "urlopen",
+        lambda req, timeout=None: _DyingResponse(b'{"type":"assistant"}\n', chunks=1),
+    )
+    out = tmp_path / "session.ndjson"
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._get(argparse.Namespace(key="abc123", out=str(out)))
+    assert "failed mid-body" in str(e.value)
+    assert not out.exists()
+
+
+def test_a_partial_file_that_cannot_be_removed_still_reports_the_transfer(monkeypatch, tmp_path):
+    # The cleanup is best-effort: whatever stops the unlink, the fault the
+    # operator needs to see is the one that killed the download.
+    def dying(req, timeout=None):
+        return _DyingResponse(b'{"type":"assistant"}\n', chunks=1)
+
+    monkeypatch.setattr(transcriptscli.urllib.request, "urlopen", dying)
+    monkeypatch.setattr(
+        transcriptscli.os, "unlink", lambda p: (_ for _ in ()).throw(OSError("read-only"))
+    )
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._get(argparse.Namespace(key="abc123", out=str(tmp_path / "s.ndjson")))
+    assert "failed mid-body" in str(e.value)
+
+
+def test_get_names_an_out_path_it_cannot_open(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        transcriptscli.urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(b"{}")
+    )
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._get(argparse.Namespace(key="abc123", out=str(tmp_path / "no" / "such")))
+    assert "cannot write" in str(e.value)
+
+
+def test_a_closed_stdout_pipe_exits_zero_and_leaves_nothing_buffered(monkeypatch):
+    # `fuko transcripts get KEY | head` is the documented use, so it must exit
+    # 0 -- and must not hand a populated buffer to the interpreter's final
+    # flush, which would retry the dead pipe and report it after the fact.
+    monkeypatch.setattr(
+        transcriptscli.urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(b"body")
+    )
+    monkeypatch.setattr(transcriptscli.sys, "stdout", _PipedStdout())
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._get(argparse.Namespace(key="abc123", out=None))
+    assert e.value.code == 0
+
+
+def test_a_closed_stdout_pipe_redirects_the_fd_before_leaving(monkeypatch, tmp_path):
+    # The redirect is the whole fix: without it the buffered tail is flushed at
+    # shutdown against the closed pipe. Assert the dup2 actually happened.
+    seen = {}
+    monkeypatch.setattr(
+        transcriptscli.urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(b"body")
+    )
+
+    class _RealFd(_PipedStdout):
+        def fileno(self):
+            return 4321
+
+    monkeypatch.setattr(transcriptscli.sys, "stdout", _RealFd())
+    monkeypatch.setattr(transcriptscli.os, "dup2", lambda a, b: seen.update(target=b))
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._get(argparse.Namespace(key="abc123", out=None))
+    assert e.value.code == 0
+    assert seen["target"] == 4321
+
+
+@pytest.mark.parametrize("body", [b"null", b"[1, 2]", b'"a string"', b"42"])
+def test_a_json_error_body_that_is_not_an_object_is_still_named(monkeypatch, body):
+    # A proxy between the operator and the sidecar can answer with valid JSON
+    # that is not the sidecar's {"detail": ...} object. Decoding it must not be
+    # the thing that crashes the one path whose job is to name the fault.
+    def boom(req, timeout=None):
+        raise urllib.error.HTTPError(
+            "http://sidecar:8000/transcripts", 502, "Bad Gateway", {}, io.BytesIO(body)
+        )
+
+    monkeypatch.setattr(transcriptscli.urllib.request, "urlopen", boom)
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._call("/transcripts")
+    message = str(e.value)
+    assert "502" in message and body.decode() in message
 
 
 # --- registration.

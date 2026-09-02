@@ -17,6 +17,7 @@ sub-issue rather than a nicety: a store that is unconfigured or unreachable must
 never print the empty listing a healthy, empty corpus prints.
 """
 
+import http.client
 import json
 import os
 import sys
@@ -77,15 +78,65 @@ def _open(url: str, base: str):
         return urllib.request.urlopen(req, timeout=_TIMEOUT_S)
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:500]
+        # The body is decoded ONLY when it is the object the sidecar's own
+        # HTTPException produces. Valid JSON that is not a mapping -- `null`, a
+        # list, a bare string, all of which an intermediary proxy may return --
+        # decodes without raising, so a bare `.get` would be an AttributeError
+        # escaping as a traceback out of the one path whose whole job is to name
+        # the fault. The undecoded text is a fine message; a crash is not.
         try:
-            detail = json.loads(detail).get("detail", detail)
+            parsed = json.loads(detail)
         except ValueError:
-            pass
+            parsed = None
+        if isinstance(parsed, dict):
+            detail = parsed.get("detail", detail)
         sys.exit(f"fuko transcripts: {e.code} {e.reason} — {detail}")
     except urllib.error.URLError as e:
         sys.exit(f"fuko transcripts: cannot reach {base} ({e.reason})")
     except ValueError as e:
         sys.exit(f"fuko transcripts: invalid URL {url!r} ({e})")
+
+
+#: What a transfer that died AFTER the response opened raises. urllib maps only
+#: connect- and header-time faults into :class:`urllib.error.URLError`, so a
+#: socket that stalls or is reset once the body is streaming surfaces as a bare
+#: ``TimeoutError``/``ConnectionResetError`` (both ``OSError`` since 3.10) or an
+#: ``http.client.IncompleteRead`` -- none of them caught by :func:`_open`.
+_BODY_FAILURES = (OSError, http.client.HTTPException)
+
+
+def _body_failed(base: str, error: Exception) -> None:
+    """Exit fatally on a transfer that died mid-body, naming the fault.
+
+    The module promises that every failure exits non-zero with a message naming
+    it, and a transcript is exactly the payload long enough for the connection
+    to die halfway through it. Without this the operator gets a traceback from
+    the middle of a read loop, which names Python's frames rather than the
+    outage.
+    """
+    sys.exit(f"fuko transcripts: transfer from {base} failed mid-body ({error})")
+
+
+def _exit_closed_pipe() -> None:
+    """Exit 0 after stdout's reader went away, with no second error on the way out.
+
+    ``fuko transcripts get KEY | head`` closes the pipe early, which is the
+    intended use. But the ``EPIPE`` surfaces from a flush with the tail still in
+    ``sys.stdout``'s buffer, so leaving on ``sys.exit`` alone hands that same
+    buffer to the interpreter's final flush, which retries the dead pipe and
+    prints ``Exception ignored ... BrokenPipeError`` while exiting non-zero.
+    Pointing the fd at ``/dev/null`` first -- CPython's own prescription -- lets
+    that last flush succeed silently, so the quiet exit the pipe case deserves
+    is the one it gets.
+    """
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+    except OSError:
+        # No real stdout fd to redirect (a captured or already-closed stream).
+        # Nothing is buffered against a pipe in that case either.
+        pass
+    sys.exit(0)
 
 
 def _call(path: str, params: dict | None = None) -> dict:
@@ -96,6 +147,8 @@ def _call(path: str, params: dict | None = None) -> dict:
             return json.load(resp)
         except ValueError as e:
             sys.exit(f"fuko transcripts: non-JSON response from {base} ({e})")
+        except _BODY_FAILURES as e:
+            _body_failed(base, e)
 
 
 def _human_bytes(count: int) -> str:
@@ -201,13 +254,28 @@ def _get(args) -> None:
     with _open(url, base) as resp:
         if args.out:
             written = 0
-            with open(args.out, "wb") as handle:
-                # Copied in chunks rather than read whole: a long session is
-                # megabytes, and this command exists to make one greppable on a
-                # box that may have far less memory than the sidecar does.
-                while chunk := resp.read(1 << 20):
-                    handle.write(chunk)
-                    written += len(chunk)
+            try:
+                handle = open(args.out, "wb")
+            except OSError as e:
+                sys.exit(f"fuko transcripts: cannot write {args.out} ({e})")
+            try:
+                with handle:
+                    # Copied in chunks rather than read whole: a long session is
+                    # megabytes, and this command exists to make one greppable
+                    # on a box that may have far less memory than the sidecar.
+                    while chunk := resp.read(1 << 20):
+                        handle.write(chunk)
+                        written += len(chunk)
+            except _BODY_FAILURES as e:
+                # The partial file goes, rather than staying as a shorter
+                # session that reads as a whole one. A truncated transcript is
+                # the one failure here that survives the command: the operator
+                # greps it later and concludes the run did less than it did.
+                try:
+                    os.unlink(args.out)
+                except OSError:
+                    pass
+                _body_failed(base, e)
             print(f"wrote {written} bytes to {args.out}", file=sys.stderr)
             return
         out = sys.stdout.buffer
@@ -216,10 +284,12 @@ def _get(args) -> None:
                 out.write(chunk)
             out.flush()
         except BrokenPipeError:
-            # `fuko transcripts get KEY | head` closes the pipe early, which is
-            # the intended use, not a failure. Left to Python's own exit path
-            # rather than reported.
-            sys.exit(0)
+            # Caught BEFORE the transfer failures below: `BrokenPipeError` is an
+            # `OSError`, and a reader that walked away is the one case here that
+            # is not a fault at all.
+            _exit_closed_pipe()
+        except _BODY_FAILURES as e:
+            _body_failed(base, e)
 
 
 def add_parser(sub) -> None:

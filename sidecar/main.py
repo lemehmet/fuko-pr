@@ -510,8 +510,22 @@ def transcripts_list_endpoint(
             "this is not an empty corpus",
         )
     try:
+        # `repo or None` / `seat or None` for the reason
+        # :func:`sidecar.transcripts._instant` maps "" to `None`: an HTML form
+        # submits an unfilled box as the empty string, and a filter that is
+        # present-but-empty would narrow the listing to nothing rather than not
+        # narrow it at all. Normalizing HERE, at the form-facing boundary, is
+        # `sidecar.web.ledger`'s precedent (`seat = seat or None`) -- it keeps
+        # the shared reader strict, so a caller that really means "match the
+        # empty string" still can.
         page = transcripts.list_transcripts(
-            repo=repo, pr=pr, seat=seat, since=since, until=until, limit=limit, offset=offset
+            repo=repo or None,
+            pr=pr,
+            seat=seat or None,
+            since=since,
+            until=until,
+            limit=limit,
+            offset=offset,
         )
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e

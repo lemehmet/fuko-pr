@@ -485,5 +485,10 @@ class TranscriptListResponse(BaseModel):
 
     transcripts: list[TranscriptRunRow] = Field(default_factory=list)
     count: int = Field(
-        default=0, description="Transcripts matching the filters, not just those on this page."
+        default=0,
+        description=(
+            "Transcripts matching the filters across every page, carried by the rows "
+            "on this one -- so it is 0 for any empty page, including an offset past "
+            "the end of the window."
+        ),
     )

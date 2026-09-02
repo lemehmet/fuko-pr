@@ -314,6 +314,19 @@ def test_list_endpoint_passes_every_filter_through(monkeypatch, pg):
     assert params[-2:] == (5, 10)
 
 
+def test_list_endpoint_treats_an_empty_filter_box_as_no_filter(monkeypatch, pg):
+    # An HTML form submits an unfilled box as "", and the date filters already
+    # read that as "not filtering". repo/seat must agree, or the same blank form
+    # narrows the listing to nothing on one half of its fields and not the other.
+    monkeypatch.setattr(main.settings, "database_url", "postgresql://x/y")
+    conn = pg([])
+    _client(monkeypatch).get(
+        "/transcripts", params={"repo": "", "seat": "", "since": "", "until": ""}
+    )
+    _, params = conn.statements[0]
+    assert params[0] is None and params[4] is None
+
+
 def test_list_endpoint_without_a_database_is_503_not_an_empty_list(monkeypatch):
     monkeypatch.setattr(main.settings, "database_url", "")
     resp = _client(monkeypatch).get("/transcripts")
