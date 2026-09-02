@@ -1,5 +1,6 @@
 """Tests for review-run metrics: module, endpoints, and runner recording."""
 
+import pytest
 from fastapi.testclient import TestClient
 
 from sidecar import main, run_metrics, runner
@@ -294,8 +295,11 @@ def test_record_writes_an_unstorable_cost_as_unmeasured(monkeypatch):
 
     monkeypatch.setattr(sidecar.db, "db", _fake_db)
     run_metrics.record("o/r", 7, "p", "m", input_tokens=5, cost_usd=1e9)
-    assert captured["params"][-2] is None
-    assert captured["params"][-6] == 5
+    params = captured["params"]
+    # ..., input_tokens, output_tokens, cache_read, cache_write, cost_usd,
+    # turns, transcript_key
+    assert params[-3] is None
+    assert params[-7] == 5
 
 
 def test_cost_aggregates_are_not_coalesced():
@@ -447,6 +451,64 @@ def test_review_records_metrics_with_failover(monkeypatch, tmp_path):
     }
 
 
+def test_review_records_the_last_throttled_attempts_transcript_when_the_pool_exhausts(
+    monkeypatch, tmp_path
+):
+    """The exhaustion branch is the ONLY path on which a throttled agentic
+    attempt's index reaches `record()` -- when the killed attempt is last in the
+    pool. Everywhere else it is discarded with the rest of that attempt's
+    metrics (#258), so this row is the recorded half of that residue and is
+    worth pinning: nothing else would catch the argument being dropped, or the
+    branch recording the wrong attempt's index."""
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text(
+        "[[review.models]]\n"
+        'provider = "zai-coding"\nname = "glm-5.2"\ntoken_env = "FUKO_GITHUB_TOKEN_DORIAN"\n'
+        "[[review.models]]\n"
+        'provider = "anthropic"\nname = "claude-sonnet-4-6"\nrole = "backup"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ZAI_KEY", "k")
+    monkeypatch.setenv("ANTHROPIC_KEY", "k")
+    monkeypatch.setattr(runner, "build_knowledge", lambda *a: "")
+    monkeypatch.setattr(runner, "_cb_cooldowns", lambda: set())
+    monkeypatch.setattr(runner, "_cb_trip", lambda *a: None)
+    monkeypatch.setattr(runner, "_estimate_required_context", lambda *a: None)
+
+    first = {"key": _INDEX["key"], "complete": False, "tool_calls": {"Read": 1}}
+    last = {"key": "0199bbbb-cccc-7ddd-8eee-ffffffffffff", "complete": False}
+    results = iter(
+        [
+            InvokeResult(returncode=124, detail="tool_timeout", throttled=True, transcript=first),
+            InvokeResult(returncode=124, detail="tool_timeout", throttled=True, transcript=last),
+        ]
+    )
+
+    class FakeBackend:
+        def build_env(self, preset, model, knowledge, tools):
+            return {}
+
+        def invoke(self, pr, env, tools):
+            return next(results)
+
+        def normalize_output(self, pr, model="", *, compare_label=None, **_kw):
+            return []
+
+    monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
+    recorded = []
+    monkeypatch.setattr(runner, "_record_run", lambda pr, model, **kw: recorded.append((model, kw)))
+
+    runner.review("https://github.com/o/r/pull/7", str(cfg))
+
+    assert len(recorded) == 1
+    model, kw = recorded[0]
+    assert kw["outcome"] == "throttled_out" and kw["attempts"] == 2
+    # The LAST attempt's, matching the model the row is attributed to -- the
+    # same rule the failover golden above states for costs.
+    assert model.provider == "anthropic"
+    assert kw["transcript"] == last
+
+
 def test_sequential_compare_records_per_branch_slots(monkeypatch, tmp_path):
     cfg = tmp_path / ".fuko.toml"
     cfg.write_text(
@@ -480,3 +542,332 @@ def test_sequential_compare_records_per_branch_slots(monkeypatch, tmp_path):
 
     assert runner.review("https://github.com/o/r/pull/7", str(cfg)).returncode == 0
     assert recorded == ["basil", "sybil"]
+
+
+# --- The per-run transcript index row and its reference (#239).
+
+
+_INDEX = {
+    "key": "20260901T120000Z-0123456789ab",
+    "complete": True,
+    "tool_calls": {"Read": 182, "Grep": 9},
+    "tool_result_bytes": 4_200_000,
+    "repeated_read_files": 31,
+}
+
+
+class _RecordingConn:
+    """Records every statement; optionally fails the one naming a table."""
+
+    def __init__(self, fail_on="", error=RuntimeError):
+        self.statements = []
+        self._fail_on = fail_on
+        self._error = error
+
+    def execute(self, sql, params=()):
+        flat = " ".join(sql.split())
+        self.statements.append((flat, tuple(params)))
+        if self._fail_on and self._fail_on in flat:
+            raise self._error("relation does not exist")
+
+
+def _pg(monkeypatch, fail_on="", error=RuntimeError):
+    """Enable persistence and hand every ``db_best_effort`` block one recorder."""
+    import contextlib
+
+    import sidecar.db
+
+    monkeypatch.setattr(run_metrics.settings, "database_url", "postgres://x")
+    conn = _RecordingConn(fail_on, error)
+    blocks = []
+
+    @contextlib.contextmanager
+    def fake_db(*_a, **_k):
+        blocks.append(conn)
+        yield conn
+
+    monkeypatch.setattr(sidecar.db, "db", fake_db)
+    return conn, blocks
+
+
+def test_migration_013_adds_the_index_table_and_a_nullable_reference():
+    """#239: the figures live in their own table and `review_runs` gains exactly
+    one column -- nullable, undefaulted, and deliberately NOT backfilled, since a
+    0 here would read as "this run used no tools" (008's argument, applied to
+    tools)."""
+    from pathlib import Path
+
+    sql = (
+        Path(__file__).resolve().parent.parent / "migrations" / "013_transcript_index.sql"
+    ).read_text(encoding="utf-8")
+    stripped = "\n".join(ln for ln in sql.splitlines() if not ln.lstrip().startswith("--"))
+    stmts = [" ".join(s.split()) for s in stripped.split(";") if s.strip()]
+    assert len(stmts) == 4
+    assert stmts[0].startswith("CREATE TABLE IF NOT EXISTS review_transcripts")
+    assert "key TEXT PRIMARY KEY" in stmts[0]
+    # The row's existence IS the measurement, so its own columns are NOT NULL.
+    for column in ("complete BOOLEAN NOT NULL", "tool_calls JSONB NOT NULL"):
+        assert column in stmts[0]
+    assert "tool_result_bytes BIGINT NOT NULL" in stmts[0]
+    assert "repeated_read_files INTEGER NOT NULL" in stmts[0]
+    # No foreign key: the invariant is held by write order, and a constraint
+    # would let a transcript-side failure reject the metrics row.
+    assert "REFERENCES" not in stripped.upper()
+    assert stmts[2] == "ALTER TABLE review_runs ADD COLUMN IF NOT EXISTS transcript_key TEXT"
+    assert "NOT NULL" not in stmts[2] and "DEFAULT" not in stmts[2]
+    # Explicitly named indexes, because migrations replay on each pool creation.
+    assert stmts[1].startswith("CREATE INDEX IF NOT EXISTS review_transcripts_created_at_idx")
+    assert stmts[3].startswith("CREATE INDEX IF NOT EXISTS review_runs_transcript_key_idx")
+
+
+def test_record_writes_the_index_row_first_and_then_the_reference(monkeypatch):
+    """Index row, own transaction, then the run row naming it -- the order the
+    "a reference always has a row" invariant is held by."""
+    import json
+
+    conn, blocks = _pg(monkeypatch)
+    run_metrics.record("o/r", 7, "p", "m", backend="agentic", transcript=dict(_INDEX))
+    index_sql, index_params = conn.statements[0]
+    assert index_sql.startswith("INSERT INTO review_transcripts")
+    assert "ON CONFLICT (key) DO NOTHING" in index_sql
+    assert index_params[0] == _INDEX["key"] and index_params[1] is True
+    assert json.loads(index_params[2]) == {"Read": 182, "Grep": 9}
+    assert index_params[3] == 4_200_000 and index_params[4] == 31
+    run_sql, run_params = conn.statements[1]
+    assert run_sql.startswith("INSERT INTO review_runs") and "transcript_key" in run_sql
+    assert run_params[-1] == _INDEX["key"]
+    # TWO blocks, not one: a single db_best_effort block is a single
+    # transaction, and a failing index insert would roll the run row back.
+    assert len(blocks) == 2
+
+
+def test_a_failing_index_write_leaves_the_review_runs_row_intact(monkeypatch, capsys):
+    """The acceptance criterion: an observability write must never cost the
+    duration, outcome, attempts and token counts beside it."""
+    conn, _ = _pg(monkeypatch, fail_on="review_transcripts")
+    run_metrics.record("o/r", 7, "p", "m", findings=3, transcript=dict(_INDEX))
+    run_sql, run_params = conn.statements[1]
+    assert run_sql.startswith("INSERT INTO review_runs")
+    assert run_params[-1] is None
+    assert "transcript index write failed" in capsys.readouterr().err
+
+
+def test_a_connection_level_index_failure_is_not_costed_by_write_order(monkeypatch, capsys):
+    """The write-ordering guarantee is scoped to failures the STATEMENT earned.
+
+    A connection-level one latches `db_best_effort` for the whole process, so
+    the run row's own block cannot open either — which is the same nothing-lands
+    a run with no transcript would have had, and is why the docstrings say
+    "statement earned" rather than "any". Pinned here because the sibling test
+    above uses `RuntimeError`, a class `db_best_effort` never latches on, so on
+    its own it would let the narrower claim read as the broader one (#260).
+    """
+    from psycopg import OperationalError
+
+    import sidecar.db
+
+    # Restored on teardown, which also clears the latch this test closes.
+    monkeypatch.setattr(sidecar.db, "_unreachable_until", 0.0)
+    conn, _ = _pg(monkeypatch, fail_on="review_transcripts", error=OperationalError)
+    with pytest.raises(sidecar.db.StoreUnavailable):
+        run_metrics.record("o/r", 7, "p", "m", transcript=dict(_INDEX))
+    # The row block never even ran, so the loss is loud rather than silent.
+    assert len(conn.statements) == 1
+    assert conn.statements[0][0].startswith("INSERT INTO review_transcripts")
+    assert "postgres unreachable" in capsys.readouterr().err
+
+
+def test_a_run_without_a_transcript_writes_no_index_row_and_a_null_reference(monkeypatch):
+    """Every pr-agent run, and every agentic run whose capture is off: NULL, not
+    a placeholder that would read as a blob gone missing."""
+    conn, blocks = _pg(monkeypatch)
+    run_metrics.record("o/r", 7, "p", "m")
+    assert len(conn.statements) == 1 and len(blocks) == 1
+    assert conn.statements[0][1][-1] is None
+
+
+def test_record_drops_a_key_the_blob_store_could_never_have_held(monkeypatch, capsys):
+    """Rejected here rather than by the request model: a 422 would take the
+    whole metrics row with it."""
+    conn, _ = _pg(monkeypatch)
+    run_metrics.record("o/r", 7, "p", "m", transcript={**_INDEX, "key": "../../etc/passwd"})
+    assert len(conn.statements) == 1
+    assert conn.statements[0][0].startswith("INSERT INTO review_runs")
+    assert conn.statements[0][1][-1] is None
+    assert "invalid key" in capsys.readouterr().err
+
+
+def test_record_drops_call_counts_the_column_is_not_documented_to_hold(monkeypatch):
+    """The direct path takes a plain mapping no request model ever saw, so the
+    contract `TranscriptIndexRequest` states for the HTTP hop is restated in
+    `record()`. One unusable entry costs itself, never the rest of the row."""
+    import json
+
+    conn, _ = _pg(monkeypatch)
+    run_metrics.record(
+        "o/r",
+        7,
+        "p",
+        "m",
+        transcript={**_INDEX, "tool_calls": {"Read": 3, "Grep": -1, "Bash": True, 9: 2, "Ok": 0}},
+    )
+    assert json.loads(conn.statements[0][1][2]) == {"Read": 3, "Ok": 0}
+    # The row itself still lands, and the reference with it.
+    assert conn.statements[1][1][-1] == _INDEX["key"]
+
+
+def test_the_request_model_rejects_a_negative_call_count():
+    """`ge=0` has to sit on the dict's VALUE annotation: given to the field it
+    would constrain the mapping, not the counts in it."""
+    from pydantic import ValidationError
+
+    from sidecar.models import TranscriptIndexRequest
+
+    with pytest.raises(ValidationError):
+        TranscriptIndexRequest(**{**_INDEX, "tool_calls": {"Read": -1}})
+    assert TranscriptIndexRequest(**{**_INDEX, "tool_calls": {"Read": 0}}).tool_calls == {"Read": 0}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("tool_result_bytes", -1),
+        ("repeated_read_files", -1),
+        # `bool("false")` is True, so a bare `bool()` would mark a feed that
+        # said it was cut short as whole -- inverting the field a reader uses to
+        # decide whether the figures describe a finished run.
+        ("complete", "false"),
+        ("complete", None),
+    ],
+)
+def test_record_skips_an_index_whose_figures_are_not_measurements(
+    monkeypatch, capsys, field, value
+):
+    """Unlike one tool's count, these are the whole row's measurement: there is
+    no partial version of them that would be true, so the index is skipped the
+    way an unusable key is -- NULL reference, run row intact. Neither column
+    carries a CHECK, so coercing instead of refusing would simply store it."""
+    conn, _ = _pg(monkeypatch)
+    run_metrics.record("o/r", 7, "p", "m", findings=3, transcript={**_INDEX, field: value})
+    assert len(conn.statements) == 1
+    assert conn.statements[0][0].startswith("INSERT INTO review_runs")
+    assert conn.statements[0][1][-1] is None
+    assert "unusable figures" in capsys.readouterr().err
+
+
+def test_record_reads_an_absent_total_as_a_real_zero(monkeypatch):
+    """This object only exists for a transcript that WAS captured, so "no bytes"
+    is a measurement -- unlike `review_runs`' token columns, where a zero would
+    claim an unmeasured run was free."""
+    conn, _ = _pg(monkeypatch)
+    run_metrics.record("o/r", 7, "p", "m", transcript={"key": _INDEX["key"], "complete": True})
+    assert conn.statements[0][1][3] == 0 and conn.statements[0][1][4] == 0
+    assert conn.statements[1][1][-1] == _INDEX["key"]
+
+
+def test_the_request_model_refuses_a_boolean_spelled_as_a_call_count():
+    """Lax coercion turns JSON `true` into 1, which would store a shape error as
+    a real measurement -- and would make the two transports disagree, since the
+    direct path's own filter drops a `bool`. `StrictInt` is what closes that."""
+    from pydantic import ValidationError
+
+    from sidecar.models import TranscriptIndexRequest
+
+    with pytest.raises(ValidationError):
+        TranscriptIndexRequest(**{**_INDEX, "tool_calls": {"Read": True}})
+    # The scalars beside it, for the same reason: one spelling strict and the
+    # field next to it lax is the divergence `NonNegativeCount` exists to close.
+    for field in ("tool_result_bytes", "repeated_read_files"):
+        for value in (True, "5", 5.0):
+            with pytest.raises(ValidationError):
+                TranscriptIndexRequest(**{**_INDEX, field: value})
+    # And `complete`, the last field of the four: lax bool reads "false" as
+    # False and 1 as True, neither of which the direct path accepts at all.
+    for value in ("false", "true", 1, 0):
+        with pytest.raises(ValidationError):
+            TranscriptIndexRequest(**{**_INDEX, "complete": value})
+
+
+def test_record_accepts_the_request_model_the_endpoint_hands_it(monkeypatch):
+    """The endpoint passes its pydantic object straight through; the direct
+    Postgres path passes a dict. Both must land the same row."""
+    from sidecar.models import TranscriptIndexRequest
+
+    conn, _ = _pg(monkeypatch)
+    run_metrics.record("o/r", 7, "p", "m", transcript=TranscriptIndexRequest(**_INDEX))
+    assert conn.statements[0][1][0] == _INDEX["key"]
+    assert conn.statements[1][1][-1] == _INDEX["key"]
+
+
+def test_metrics_run_endpoint_carries_the_transcript(monkeypatch):
+    """#239: the index rides the same body the runner already posts."""
+    monkeypatch.setattr(main.settings, "database_url", "")
+    seen = {}
+    monkeypatch.setattr(
+        run_metrics, "record", lambda repo, pr, provider, model, **kw: seen.update(kw)
+    )
+    resp = _client(monkeypatch).post(
+        "/metrics/run",
+        json={"repo": "o/r", "pr": 7, "provider": "p", "model": "m", "transcript": _INDEX},
+    )
+    assert resp.status_code == 200
+    assert seen["transcript"].key == _INDEX["key"]
+    assert seen["transcript"].tool_calls == {"Read": 182, "Grep": 9}
+    assert seen["transcript"].repeated_read_files == 31
+
+
+def test_metrics_run_endpoint_defaults_the_transcript_to_absent(monkeypatch):
+    """A runner that predates #239, or a backend that captures nothing, posts a
+    valid body that records no reference."""
+    monkeypatch.setattr(main.settings, "database_url", "")
+    seen = {}
+    monkeypatch.setattr(
+        run_metrics, "record", lambda repo, pr, provider, model, **kw: seen.update(kw)
+    )
+    resp = _client(monkeypatch).post(
+        "/metrics/run", json={"repo": "o/r", "pr": 7, "provider": "p", "model": "m"}
+    )
+    assert resp.status_code == 200
+    assert seen["transcript"] is None
+
+
+def test_record_run_posts_the_transcript_it_was_given(monkeypatch):
+    """The runner's HTTP transport must carry the reference over the hop."""
+    from sidecar.backends.base import PRRef
+
+    monkeypatch.setenv("FUKO_URL", "http://fuko.internal:8000")
+    posted = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(
+        runner.httpx, "post", lambda url, **kw: (posted.update(kw["json"]), _Resp())[1]
+    )
+    _REAL_RECORD_RUN(
+        PRRef("o/r", 7, "u"),
+        ModelConfig(provider="anthropic", name="claude-sonnet-5"),
+        slot="dorian",
+        duration_s=10.0,
+        attempts=1,
+        outcome="ok",
+        findings=2,
+        detail="",
+        transcript=dict(_INDEX),
+    )
+    assert posted["transcript"] == _INDEX
+
+
+def test_transcript_of_reads_an_agentic_result_and_tolerates_every_other(monkeypatch):
+    """Populated for an agentic run, absent for a pr-agent one -- and an older
+    result shape records nothing rather than crashing the metrics write."""
+
+    class OldResult:
+        returncode = 0
+
+    assert runner._transcript_of(InvokeResult(returncode=0, transcript=dict(_INDEX))) == _INDEX
+    assert runner._transcript_of(InvokeResult(returncode=0)) is None
+    # An empty mapping is normalized, so "no transcript" has one spelling.
+    assert runner._transcript_of(InvokeResult(returncode=0, transcript={})) is None
+    assert runner._transcript_of(OldResult()) is None

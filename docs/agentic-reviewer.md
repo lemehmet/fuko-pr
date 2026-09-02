@@ -607,8 +607,47 @@ for trying the path out before there is a bucket.
   the same `FUKO_TRANSCRIPT_STORE_BACKEND` / `_ROOT` to the runner too, or the
   corpus is written where no deny rule reaches it.
 
-The derived per-tool metrics (#239) and the readers (#240, #241) are the rest of
-the epic; nothing reads the blobs yet.
+### What a run spent its turns on (`review_transcripts`)
+
+Every captured transcript also gets a row in `review_transcripts`
+(`migrations/013`, #239), and the run's `review_runs` row gains one nullable
+column — `transcript_key` — pointing at it:
+
+| column | what it holds |
+| --- | --- |
+| `key` | the transcript's own key; names the blob in the store |
+| `complete` | whether the feed reached its terminal `result` event |
+| `tool_calls` | call counts by tool name, e.g. `{"Read": 182, "Grep": 9}` |
+| `tool_result_bytes` | total UTF-8 bytes of tool-result content the run was fed |
+| `repeated_read_files` | distinct files read more than once — one file read three times counts **once** |
+
+- **Derived at capture, not from the blob.** The figures are folded out of the
+  same lines the tee is already writing, so nothing is re-downloaded and nothing
+  is held: peak memory stays one event plus a counter per tool and per distinct
+  file read. They are metered off the **scrubbed** text, so a reader that
+  recomputes them from the stored object gets the same numbers.
+- **A cut-short feed is still indexed**, with `complete = false`. Dropping it
+  would bias the corpus towards runs that finished.
+- **Nothing is backfilled.** A pr-agent run, and every run predating this, has
+  no row and a NULL reference — `migrations/008`'s reasoning about cost applied
+  to tools, where a 0 would read as "this run used no tools".
+- **The transcript can never cost the metrics row.** The index row is written
+  first, in its own transaction; the reference is written only if it landed.
+  There is no foreign key, deliberately: the invariant is held by write order,
+  and a constraint would let a transcript-side failure reject the run row's
+  duration, outcome, attempts and token counts too. Scoped to a failure the
+  statement earned: a connection-level one latches `db_best_effort` for the
+  whole process, after which the run row's block cannot open either — the same
+  nothing-lands a run with no transcript would have had.
+- **A reference is only ever written for a transcript that reached shared
+  storage**, because the key is what a reader fetches it by. A failed capture or
+  upload records none; so does the off state above, where shipping to a sidecar
+  whose store is unconfigured succeeds silently but stores nothing; and so does
+  a runner with no destination at all (a `fuko review` laptop), whose transcript
+  is a local file. Those runs still get their `review_runs` row — they get a
+  NULL `transcript_key`.
+
+The readers (#240, #241) are the rest of the epic; nothing reads the blobs yet.
 
 ## Configuration
 

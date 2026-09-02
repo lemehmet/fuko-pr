@@ -295,6 +295,7 @@ def metrics_run_endpoint(req: models.RunMetricRequest) -> dict:
         cache_write_tokens=req.cache_write_tokens,
         cost_usd=req.cost_usd,
         turns=req.turns,
+        transcript=req.transcript,
     )
     return {"recorded": True, "persisted": bool(settings.database_url)}
 

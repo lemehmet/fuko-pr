@@ -32,6 +32,11 @@ class _RecordingSink:
         self.lines = []
         self.closes = 0
         self._fail_at = fail_at
+        # Stands in for a sink WITH a destination: `Transcript.index` writes a
+        # row only for bytes a sink affirms it stored, so a double that stayed
+        # silent about it would suppress every index in this file for the wrong
+        # reason.
+        self.stored = True
 
     def write(self, line):
         if self._fail_at is not None and len(self.lines) + 1 == self._fail_at:
@@ -718,6 +723,32 @@ def test_a_close_after_a_failed_ship_does_not_retry_it(tmp_path):
     assert calls == ["k"]
 
 
+def test_a_store_that_declined_the_bytes_indexes_nothing(tmp_path):
+    """Shipping to a sidecar whose store is unconfigured is a SILENT success --
+    that silence is the point of the off state -- but nothing was stored, so a
+    reference would name a blob that only ever existed on this runner's disk."""
+    inner = FileTranscriptSink(tmp_path / "t.ndjson")
+    sink = ShippingTranscriptSink(inner, "k", lambda key, path: False)
+    transcript = Transcript("k", sink, Scrubber())
+    transcript.write(json.dumps(_tool_use("Read", file_path="a.py")) + "\n")
+    transcript.close()
+    assert sink.stored is False
+    assert transcript.index() is None
+
+
+def test_a_store_that_accepted_the_bytes_is_indexed(tmp_path):
+    """The other half of the same flag, and the shape a ship callable that
+    reports nothing still lands in: raising is how this interface reports a
+    failure, so a silent return means stored."""
+    inner = FileTranscriptSink(tmp_path / "t.ndjson")
+    sink = ShippingTranscriptSink(inner, "k", lambda key, path: None)
+    transcript = Transcript("k", sink, Scrubber())
+    transcript.write(json.dumps(_tool_use("Read", file_path="a.py")) + "\n")
+    transcript.close()
+    assert sink.stored is True
+    assert transcript.index().tool_calls == {"Read": 1}
+
+
 def test_a_first_write_that_fails_ships_nothing(tmp_path, monkeypatch):
     """`opened` has to mean a line LANDED, not that the file was created:
     otherwise a failure on the very first write ships an empty blob under a
@@ -783,3 +814,242 @@ def test_a_reachable_destination_wraps_the_sink_and_is_announced(tmp_path, monke
     transcript = open_transcript([], directory=str(tmp_path))
     assert isinstance(transcript._sink, ShippingTranscriptSink)
     assert "-> sidecar" in capsys.readouterr().err
+
+
+# --- The per-run index the capture derives as it stores (#239).
+
+
+def _tool_use(name, **tool_input):
+    return {
+        "type": "assistant",
+        "message": {"content": [{"type": "tool_use", "name": name, "input": tool_input}]},
+    }
+
+
+def _tool_result(content):
+    return {"type": "user", "message": {"content": [{"type": "tool_result", "content": content}]}}
+
+
+#: One file read three times, two others read once each, plus a non-read tool
+#: and two tool results in the two shapes the CLI spells them.
+_INDEX_FEED = [
+    {"type": "system", "subtype": "init"},
+    _tool_use("Read", file_path="src/app.py"),
+    _tool_result("x" * 40),
+    _tool_use("Read", file_path="src/app.py", offset=200),
+    _tool_result([{"type": "text", "text": "y" * 10}]),
+    _tool_use("Read", file_path="src/app.py"),
+    _tool_use("Read", file_path="src/other.py"),
+    _tool_use("Read", file_path="docs/readme.md"),
+    _tool_use("Grep", pattern="def "),
+    RESULT_EVENT,
+]
+
+
+def _indexed(events):
+    transcript, _ = _transcript()
+    for event in events:
+        transcript.write(json.dumps(event) + "\n")
+    transcript.close()
+    return transcript.index()
+
+
+def test_the_index_counts_calls_per_tool_result_bytes_and_repeated_reads():
+    """#239's fixture feed: five Read calls over three files, one Grep, and 50
+    bytes of tool-result text across both content shapes."""
+    index = _indexed(_INDEX_FEED)
+    assert index.key == "key-1"
+    assert index.tool_calls == {"Read": 5, "Grep": 1}
+    assert index.tool_result_bytes == 50
+    # ONE file, not three reads and not three files -- a re-read at a different
+    # offset is still a second trip through the same file.
+    assert index.repeated_read_files == 1
+    assert index.complete is True
+
+
+def test_the_index_travels_as_a_plain_mapping():
+    """Both metrics transports carry it identically, so neither has to know the
+    dataclass."""
+    assert _indexed(_INDEX_FEED).as_dict() == {
+        "key": "key-1",
+        "complete": True,
+        "tool_calls": {"Read": 5, "Grep": 1},
+        "tool_result_bytes": 50,
+        "repeated_read_files": 1,
+    }
+
+
+def test_a_feed_cut_short_is_indexed_as_incomplete():
+    """A run killed at `tool_timeout` never emits its terminal `result` event.
+    Its prefix is a real measurement of a real run, so it is indexed -- and
+    marked, rather than dropped or recorded as if it had finished."""
+    index = _indexed(_INDEX_FEED[:-1])
+    assert index.complete is False
+    assert index.tool_calls == {"Read": 5, "Grep": 1}
+
+
+def test_a_run_that_stored_nothing_has_no_index():
+    """No file, nothing shipped -- an index row would name a blob that does not
+    exist."""
+    transcript, _ = _transcript()
+    transcript.write("   \n")
+    transcript.close()
+    assert transcript.index() is None
+
+
+def test_a_capture_that_failed_has_no_index():
+    """Conservative on purpose: the same flag covers a failed upload, and a
+    reference to a blob that was never stored is worse than a missing row."""
+    transcript, _ = _transcript(sink=_RecordingSink(fail_at=2))
+    transcript.write(json.dumps(_tool_use("Read", file_path="a.py")) + "\n")
+    transcript.write(json.dumps(RESULT_EVENT) + "\n")
+    transcript.close()
+    assert transcript.index() is None
+
+
+def test_the_index_measures_only_the_lines_the_sink_accepted():
+    """A line lost to a full disk is not one the index row claims."""
+    transcript, sink = _transcript(sink=_RecordingSink(fail_at=3))
+    transcript.write(json.dumps(_tool_use("Read", file_path="a.py")) + "\n")
+    transcript.write(json.dumps(_tool_result("z" * 7)) + "\n")
+    transcript.write(json.dumps(_tool_use("Grep", pattern="x")) + "\n")
+    assert len(sink.lines) == 2
+    assert transcript._meter.tool_calls == {"Read": 1}
+    assert transcript._meter.tool_result_bytes == 7
+
+
+def test_the_index_is_derived_from_the_scrubbed_bytes():
+    """Metering the stored text is what makes a reader recomputing the figures
+    from the blob (#240) agree with the ones written at capture."""
+    transcript, sink = _transcript(secrets=[("TOKEN", SECRET)])
+    transcript.write(json.dumps(_tool_result(f"key={SECRET}")) + "\n")
+    transcript.close()
+    assert SECRET not in sink.lines[0]
+    assert transcript.index().tool_result_bytes == len("key=[REDACTED:TOKEN]".encode())
+
+
+def test_the_meter_skips_what_it_cannot_parse():
+    """Same tolerance the progress fold has: a blank, non-JSON or non-object
+    line -- including the truncated final event `scrub_partial` leaves -- costs
+    a figure, never a review."""
+    transcript, _ = _transcript()
+    transcript.write("not json at all\n")
+    transcript.write("[1, 2, 3]\n")
+    transcript.write('{"type": "assistant", "message": "not a dict"}\n')
+    transcript.write('{"type": "future_event_kind"}\n')
+    # An assistant turn of prose, and a content list holding something that is
+    # not a block at all: neither is a tool call.
+    transcript.write(
+        json.dumps(
+            {"type": "assistant", "message": {"content": ["nope", {"type": "text", "text": "hi"}]}}
+        )
+        + "\n"
+    )
+    transcript.write('{"type": "assistant", "message": {"content": [{"type": "tool_use"')
+    transcript.close()
+    index = transcript.index()
+    assert index.tool_calls == {} and index.tool_result_bytes == 0
+    assert index.repeated_read_files == 0 and index.complete is False
+
+
+def test_a_nameless_tool_use_counts_under_the_folds_own_placeholder():
+    transcript, _ = _transcript()
+    transcript.write(
+        json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use"}]}}) + "\n"
+    )
+    transcript.close()
+    assert transcript.index().tool_calls == {"?": 1}
+
+
+@pytest.mark.parametrize("name", [["Read"], {"tool": "Read"}, 7, ""])
+def test_an_unhashable_or_non_string_tool_name_folds_into_the_placeholder(name):
+    """The name is a dict KEY, so a feed spelling it as a list or an object
+    would raise `TypeError` out of `write()` -- past the sink's own guard, into
+    the review path this module promises never to fault."""
+    transcript, _ = _transcript()
+    transcript.write(
+        json.dumps(
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": name}]}}
+        )
+        + "\n"
+    )
+    transcript.close()
+    assert transcript.index().tool_calls == {"?": 1}
+
+
+def test_a_line_that_cannot_be_metered_costs_the_figures_and_not_the_review():
+    """`write()` calls the meter OUTSIDE the guard protecting the sink, so a
+    shape the meter cannot fold would fault the review path. An unpaired
+    surrogate escape is legal JSON that `json.loads` hands back as a lone
+    surrogate, which `.encode("utf-8")` refuses -- one of the two shapes that
+    got past enumeration, which is why the guard is blanket."""
+    transcript, sink = _transcript()
+    line = json.dumps(_tool_result("x")).replace('"x"', '"\\ud800"')
+    transcript.write(line + "\n")
+    transcript.write(json.dumps(_tool_use("Read", file_path="a.py")) + "\n")
+    transcript.close()
+    # The bytes still reached the sink; only the measurement of them is lost.
+    assert len(sink.lines) == 2
+    assert transcript.index() is None
+
+
+def test_a_non_text_tool_result_block_contributes_no_guessed_bytes():
+    """This figure is what the run was fed IN TEXT; an image's size is not
+    stated, and inventing one would put two definitions in one column."""
+    transcript, _ = _transcript()
+    transcript.write(
+        json.dumps(_tool_result([{"type": "image", "source": {"data": "..."}}])) + "\n"
+    )
+    transcript.write(json.dumps(_tool_result({"unexpected": "shape"})) + "\n")
+    transcript.close()
+    assert transcript.index().tool_result_bytes == 0
+
+
+def test_a_read_without_a_usable_path_is_counted_but_not_tracked():
+    transcript, _ = _transcript()
+    transcript.write(json.dumps(_tool_use("Read")) + "\n")
+    transcript.write(json.dumps(_tool_use("Read", file_path="")) + "\n")
+    transcript.close()
+    index = transcript.index()
+    assert index.tool_calls == {"Read": 2} and index.repeated_read_files == 0
+
+
+def test_a_capture_with_nowhere_to_ship_is_not_indexed(tmp_path, monkeypatch):
+    """The `fuko review` laptop case: no `FUKO_URL`, no store backend, so the
+    transcript is a local file. The figures are real, but nothing else can fetch
+    what they describe, and a reference is a promise that it can."""
+    # Both, and in this order: `upload_target()` answers "sidecar" on `FUKO_URL`
+    # alone, so an ambient one would give this run a destination and the
+    # assertion would be testing the environment rather than the code.
+    monkeypatch.delenv("FUKO_URL", raising=False)
+    monkeypatch.setattr(settings, "transcript_store_backend", "")
+    transcript = open_transcript([], directory=str(tmp_path / "transcripts"))
+    transcript.write(json.dumps(_tool_use("Read", file_path="a.py")) + "\n")
+    transcript.close()
+    assert transcript.index() is None
+
+
+def test_run_review_indexes_the_feed_it_captured(tmp_path, monkeypatch):
+    """End to end through the real harness and a real store: the figures come
+    off the same feed the tee stored, with nothing re-downloaded."""
+    # `FUKO_URL` outranks the configured store in `upload_target()`, so an
+    # ambient one would ship this over HTTP and leave the file store unexercised.
+    monkeypatch.delenv("FUKO_URL", raising=False)
+    monkeypatch.setattr(settings, "transcript_store_backend", "file")
+    monkeypatch.setattr(settings, "transcript_store_root", str(tmp_path / "blobs"))
+    assert _feed_script(tmp_path, _INDEX_FEED).exists()
+    transcript = open_transcript([], directory=str(tmp_path / "transcripts"))
+    run_review(
+        "p",
+        tmp_path,
+        cwd=tmp_path,
+        model="m",
+        env={**os.environ, "PATH": str(tmp_path)},
+        timeout=30,
+        transcript=transcript,
+    )
+    index = transcript.index()
+    assert index.key == transcript.key
+    assert index.tool_calls == {"Read": 5, "Grep": 1}
+    assert index.tool_result_bytes == 50 and index.repeated_read_files == 1
+    assert index.complete is True

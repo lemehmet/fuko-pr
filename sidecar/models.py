@@ -7,9 +7,9 @@ from "leave it alone", and :class:`DuplicateLearningError`. It imports nothing
 from the rest of the package, so every layer can depend on it.
 """
 
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool, StrictInt
 
 SOURCES: tuple[str, ...] = ("remember", "review_thread", "docs", "digest")
 """Where a learning came from.
@@ -290,6 +290,71 @@ class ReviewerHealthResponse(BaseModel):
     reviewers: list[ReviewerHealthRow] = Field(default_factory=list)
 
 
+NonNegativeCount = Annotated[StrictInt, Field(ge=0)]
+"""A count: a non-negative integer, and an integer as SPELLED.
+
+Used for every count on :class:`TranscriptIndexRequest`, not only the mapping's
+values, so one spelling cannot be strict while the field beside it is lax.
+
+The constraint has to live on the annotation rather than on the ``Field`` when
+the count is a dict *value*: ``ge`` given to the field constrains the mapping,
+not what is in it.
+
+``StrictInt`` rather than ``int`` because lax coercion turns JSON ``true`` into
+``1``, which would store a shape error as a real measurement -- and would make
+the two metrics transports disagree, since the direct path's own filter
+(:func:`sidecar.run_metrics._tool_calls`) drops a ``bool``. Every producer in
+this repo posts figures :class:`sidecar.reviewer.transcript.TranscriptIndex`
+derived, which are already ``int``; strictness costs them nothing and refuses
+only a caller that was never counting.
+"""
+
+
+class TranscriptIndexRequest(BaseModel):
+    """One run's session-transcript index row, riding ``POST /metrics/run`` (#239).
+
+    Derived by the runner AT CAPTURE, from the feed it was already streaming to
+    the transcript sink (:class:`sidecar.reviewer.transcript.TranscriptIndex`),
+    so nothing re-downloads a blob to count what was in it.
+
+    Nested rather than flattened onto :class:`RunMetricRequest` because these
+    figures describe the transcript and land in their own table -- ``review_runs``
+    gains exactly one column, the reference. Absent (``None``) is the normal case:
+    every pr-agent run, and every agentic run whose capture is off or failed.
+
+    Every field is REQUIRED except the counts, which default to the empty
+    measurement rather than to nothing-measured: this object only exists for a
+    transcript that was captured, so a run that genuinely called no tools is a
+    real zero -- unlike ``review_runs``' token columns, where a zero would claim
+    an unmeasured run was free.
+    """
+
+    key: str = Field(
+        description=(
+            "The transcript's own key, minted at run start and naming its blob in "
+            "the store. Not validated as a blob key here: a malformed one must cost "
+            "the reference, never the metrics row it rides with."
+        )
+    )
+    complete: StrictBool = Field(
+        description="Whether the feed reached its terminal `result` event."
+    )
+    tool_calls: dict[str, NonNegativeCount] = Field(
+        default_factory=dict,
+        description="Call counts keyed by tool name.",
+    )
+    tool_result_bytes: NonNegativeCount = Field(
+        default=0, description="Total UTF-8 bytes of tool-result content the run was fed."
+    )
+    repeated_read_files: NonNegativeCount = Field(
+        default=0,
+        description=(
+            "Distinct files read more than once in this run -- one file read three "
+            "times counts once."
+        ),
+    )
+
+
 class RunMetricRequest(BaseModel):
     """Body of ``POST /metrics/run``: one review-run row from the runner.
 
@@ -329,6 +394,16 @@ class RunMetricRequest(BaseModel):
     )
     cost_usd: float | None = Field(default=None, ge=0)
     turns: int | None = Field(default=None, ge=0)
+    transcript: TranscriptIndexRequest | None = Field(
+        default=None,
+        description=(
+            "This run's session transcript, if one was captured (#239). Defaults to "
+            "None so a runner older than this change -- or any backend with no "
+            "capture path -- posts a valid body that records no reference, which is "
+            "the truth for those runs rather than a key naming a blob that does not "
+            "exist."
+        ),
+    )
 
 
 class RunSummaryRow(BaseModel):

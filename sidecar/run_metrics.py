@@ -13,6 +13,12 @@ before #152 -- reports ``NULL``, not ``0``. The aggregates below preserve that
 distinction (a group with nothing measured sums to ``None``), because a zero
 here would read as "these reviews were free".
 
+What a run spent its turns ON is the sibling question, and it lives in
+``review_transcripts`` (``migrations/013``, #239) rather than in more columns
+here: per-tool call counts, tool-result bytes, and how many files a run read
+more than once, keyed by the transcript's own key. ``review_runs`` gains only
+the nullable reference to it, written after that row lands.
+
 Best-effort by design, mirroring :mod:`sidecar.circuit_breaker`: with no
 Postgres configured (``FUKO_DATABASE_URL`` unset) these functions degrade to
 no-ops -- metrics must never block or fail a review.
@@ -20,7 +26,9 @@ no-ops -- metrics must never block or fail a review.
 
 from __future__ import annotations
 
+import json
 import math
+import sys
 
 from .config import settings
 
@@ -97,6 +105,155 @@ def _costs(row) -> dict:
     }
 
 
+def _count(value) -> int | None:
+    """``value`` as a transcript count, or ``None`` when it is not one (#239).
+
+    Absent reads as ``0`` -- these figures exist only for a transcript that was
+    captured, so "no bytes" is a real measurement rather than an unmeasured run.
+    Anything else that is not a non-negative ``int`` is refused instead of
+    coerced: the request model states the same contract for the HTTP hop, and
+    the columns behind them carry no CHECK, so a bare ``int(...)`` here would
+    store a negative byte count that nothing downstream could tell from a real
+    one. ``bool`` is excluded for the reason :func:`_tool_calls` gives.
+    """
+    if value is None:
+        return 0
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _tool_calls(value) -> dict:
+    """The call-count mapping this column will accept, entry by entry (#239).
+
+    ``TranscriptIndexRequest`` states the same contract for the HTTP hop --
+    ``dict[str, NonNegativeCount]`` -- but :func:`record` is also called
+    DIRECTLY, with a plain mapping that no request model ever saw, so the two
+    transports would otherwise disagree about what reaches a column documented
+    as counts. Restated here so they cannot.
+
+    An entry that does not fit is dropped rather than clamped or rejected: a
+    count is not recoverable by guessing, and one unusable entry must not cost
+    the rest of the row -- the same reason an unusable key costs only the
+    reference (:func:`_index_transcript`) and an unstorable cost only itself
+    (:func:`_storable_cost`). ``bool`` is excluded despite being an ``int``:
+    ``True`` as a call count is a shape error, not one call -- and the request
+    model refuses the same spelling on the HTTP hop (``StrictInt``, which lax
+    coercion would otherwise have turned into a stored ``1``), so the two
+    transports agree about it rather than one of them counting a flag.
+    """
+    if not isinstance(value, dict):
+        return {}
+    return {
+        name: count
+        for name, count in value.items()
+        if isinstance(name, str)
+        and isinstance(count, int)
+        and not isinstance(count, bool)
+        and count >= 0
+    }
+
+
+def _index_transcript(transcript) -> str | None:
+    """Write this run's transcript index row and return the key to reference (#239).
+
+    ``None`` on every path that must leave ``review_runs.transcript_key`` NULL:
+    no transcript, a key the blob store could never have stored, or an index
+    write that did not land. A reference is only written for a row that exists,
+    which is the invariant ``migrations/013`` states and holds by WRITE ORDER
+    rather than by a foreign key -- so a transcript-side failure costs the
+    reference and never the metrics row beside it.
+
+    SCOPED to a failure the statement earned -- a column that is not there, a
+    constraint, a value the column cannot hold. A CONNECTION-level failure is
+    not costed this way and cannot be: :func:`sidecar.db.db_best_effort` latches
+    the process for a minute on ``OperationalError``/``PoolTimeout``, so the run
+    row's own block then refuses to open too. That is the same nothing-lands a
+    run with no transcript would have had, with one narrow exception -- a
+    server-side cancellation of THIS insert (a ``statement_timeout``) latches on
+    behalf of a row write that might have succeeded. Recorded in #260 rather
+    than worked around here: every route around it either merges the two writes
+    into one transaction, which is the thing this separation exists to prevent,
+    or reaches past a bound :mod:`sidecar.db` owns.
+
+    Its OWN ``db_best_effort`` block, deliberately, and that is the ordering
+    constraint the acceptance criterion turns on: one block is one transaction,
+    so writing both rows inside it would let a failing index insert roll the
+    ``review_runs`` row back with it -- losing duration, outcome, attempts and
+    token counts to an observability write.
+
+    ``ON CONFLICT DO NOTHING`` because a re-delivered metrics post must not fail
+    on a key it already stored; the blob is write-once and so is this row, so
+    "already there" is success, not a conflict to resolve.
+
+    Accepts a mapping or any object with the same attributes, so the endpoint
+    can hand over its pydantic model and the direct path its dict without either
+    side converting.
+    """
+    if not transcript:
+        return None
+    if not isinstance(transcript, dict):
+        transcript = {
+            field: getattr(transcript, field, None)
+            for field in (
+                "key",
+                "complete",
+                "tool_calls",
+                "tool_result_bytes",
+                "repeated_read_files",
+            )
+        }
+    from .db import db_best_effort
+    from .objectstore import BLOB_KEY_RE
+
+    key = transcript.get("key")
+    if not isinstance(key, str) or not BLOB_KEY_RE.fullmatch(key):
+        # Validated HERE rather than by the request model: a 422 would reject the
+        # whole body, so one unusable key would cost the run row too -- the same
+        # blast-radius argument `_storable_cost` makes about an unstorable cost.
+        print(f"fuko: transcript index skipped, invalid key {key!r}", file=sys.stderr)
+        return None
+    tool_calls = _tool_calls(transcript.get("tool_calls"))
+    complete = transcript.get("complete")
+    totals = [_count(transcript.get(f)) for f in ("tool_result_bytes", "repeated_read_files")]
+    if not isinstance(complete, bool) or None in totals:
+        # These three are the whole row's measurement rather than one entry in a
+        # mapping, so an unusable one is not droppable the way a single tool's
+        # count is -- there is nothing left to store that would be true. The
+        # reference goes NULL and the run row lands beside it, exactly as for an
+        # unusable key.
+        #
+        # Coercion is what is being refused, not just the wrong type. The
+        # columns are BIGINT/INTEGER with no CHECK, so a bare `int()` would
+        # store a negative; and `bool("false")` is `True`, so a bare `bool()`
+        # would mark a feed that said it was CUT SHORT as whole -- silently
+        # inverting the one field a reader uses to decide whether the figures
+        # describe a finished run.
+        print(f"fuko: transcript index skipped, unusable figures in {key}", file=sys.stderr)
+        return None
+    try:
+        with db_best_effort() as conn:
+            conn.execute(
+                "INSERT INTO review_transcripts "
+                "(key, complete, tool_calls, tool_result_bytes, repeated_read_files) "
+                "VALUES (%s, %s, %s::jsonb, %s, %s) ON CONFLICT (key) DO NOTHING",
+                (
+                    key,
+                    complete,
+                    # Serialized here rather than passed as a dict: psycopg does
+                    # not adapt a mapping to `jsonb` on its own, and json.dumps
+                    # keeps this module free of a psycopg import it otherwise
+                    # has no use for.
+                    json.dumps(tool_calls),
+                    *totals,
+                ),
+            )
+    except Exception as e:
+        print(f"fuko: transcript index write failed (continuing): {e}", file=sys.stderr)
+        return None
+    return key
+
+
 def record(
     repo: str,
     pr: int,
@@ -117,6 +274,7 @@ def record(
     cache_write_tokens: int | None = None,
     cost_usd: float | None = None,
     turns: int | None = None,
+    transcript=None,
 ) -> None:
     """Insert one review-run row (no-op when persistence is disabled).
 
@@ -132,18 +290,25 @@ def record(
     measured", never a zero that would later be read as "free". ``cost_usd``
     passes :func:`_storable_cost` on the way in, so a figure the column cannot
     hold costs only itself rather than the whole row.
+
+    ``transcript`` (#239) is this run's session-transcript index -- its key plus
+    the per-tool figures derived from the feed. It is written FIRST, into its own
+    table and its own transaction (:func:`_index_transcript`), and only a row
+    that landed becomes the reference on this one; anything else records NULL,
+    which is what a run with no transcript honestly has.
     """
     if not _enabled():
         return
     from .db import db_best_effort
 
+    transcript_key = _index_transcript(transcript)
     with db_best_effort() as conn:
         conn.execute(
             "INSERT INTO review_runs "
             "(repo, pr, provider, model, slot, duration_s, attempts, outcome, findings, "
             "detail, backend, endpoint, input_tokens, output_tokens, cache_read_tokens, "
-            "cache_write_tokens, cost_usd, turns) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "cache_write_tokens, cost_usd, turns, transcript_key) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 repo,
                 pr,
@@ -163,6 +328,7 @@ def record(
                 cache_write_tokens,
                 _storable_cost(cost_usd),
                 turns,
+                transcript_key,
             ),
         )
 

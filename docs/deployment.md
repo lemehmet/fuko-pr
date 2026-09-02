@@ -191,6 +191,26 @@ store that was *meant* to work and does not (unknown backend, missing bucket,
 absent `boto3`) is a different `503`: the sidecar logs it and the runner reports
 it, once, on stderr. Neither ever faults the review.
 
+With `FUKO_DATABASE_URL` also configured, every review run gets a `review_runs`
+row, and a run whose transcript **reached the store** also gets a
+`review_transcripts` row — per-tool call counts, tool-result bytes, and how many
+files the run read more than once — which the run row then references by key
+(#239). No extra configuration: the figures ride the metrics post the runner
+already makes.
+
+Reaching the store is necessary but not sufficient, because the index row is
+written first, in its own transaction, and the reference only if that landed. So
+the run row carries a NULL `transcript_key` — never a key naming a blob a reader
+cannot fetch — whenever any of these holds: the runner had no destination and the
+transcript is only ever a local file; the staged rollout above, where the silent
+`503` stored nothing for a reference to name; the capture failed, or a feed line
+could not be metered, so there are no figures that honestly describe it; or the
+`review_transcripts` insert itself did not land, which by design costs the
+reference and never the run row beside it.
+
+Without `FUKO_DATABASE_URL` there are no rows at all — the blob is stored and
+nothing records it.
+
 ## Ollama in Docker
 
 PR-Agent runs in a container; for a host Ollama, set the review model's
