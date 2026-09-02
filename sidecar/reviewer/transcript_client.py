@@ -150,11 +150,18 @@ def upload_target() -> str:
     return "store" if BlobStoreConfig.from_settings().backend else ""
 
 
-def ship(key: str, path: Path) -> None:
+def ship(key: str, path: Path) -> bool:
     """Send the finished transcript at ``path`` to shared storage under ``key``.
 
     Raises on any failure; the caller (:class:`sidecar.reviewer.transcript.
     Transcript`) is what turns that into one stderr line and an inert capture.
+
+    Returns whether the bytes were STORED. ``False`` has exactly one source --
+    the sidecar's marked off state below, which is a silent success as far as
+    the review is concerned but is not a stored blob -- and it exists because
+    #239's index row names a blob a reader is meant to be able to fetch. Without
+    it the recommended staged rollout (capture on before storage) would write a
+    reference per run to something that is only ever on the runner's disk.
     """
     fuko_url = os.environ.get("FUKO_URL", "").strip()
     if not fuko_url:
@@ -164,7 +171,7 @@ def ship(key: str, path: Path) -> None:
         if store is None:
             raise RuntimeError("no transcript store configured")
         store.put(key, path.read_bytes())
-        return
+        return True
 
     headers = {"Content-Type": "application/x-ndjson"}
     token = os.environ.get("FUKO_TOKEN", "")
@@ -206,5 +213,10 @@ def ship(key: str, path: Path) -> None:
                 # would make the feature store nothing in silence -- the exact
                 # failure the endpoint's distinguished statuses exist to
                 # prevent. It raises like any other.
-                return
+                #
+                # `False` rather than `None`: silent for the operator, but the
+                # bytes are NOT in the store, and #239's caller has to know
+                # that before it writes a reference to them.
+                return False
             resp.raise_for_status()
+            return True

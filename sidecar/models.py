@@ -7,7 +7,7 @@ from "leave it alone", and :class:`DuplicateLearningError`. It imports nothing
 from the rest of the package, so every layer can depend on it.
 """
 
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import BaseModel, Field
 
@@ -290,6 +290,15 @@ class ReviewerHealthResponse(BaseModel):
     reviewers: list[ReviewerHealthRow] = Field(default_factory=list)
 
 
+NonNegativeCount = Annotated[int, Field(ge=0)]
+"""A count that cannot be negative.
+
+The constraint has to live on the annotation rather than on the ``Field`` when
+the count is a dict *value*: ``ge`` given to the field constrains the mapping,
+not what is in it.
+"""
+
+
 class TranscriptIndexRequest(BaseModel):
     """One run's session-transcript index row, riding ``POST /metrics/run`` (#239).
 
@@ -317,8 +326,9 @@ class TranscriptIndexRequest(BaseModel):
         )
     )
     complete: bool = Field(description="Whether the feed reached its terminal `result` event.")
-    tool_calls: dict[str, int] = Field(
-        default_factory=dict, description="Call counts keyed by tool name."
+    tool_calls: dict[str, NonNegativeCount] = Field(
+        default_factory=dict,
+        description="Call counts keyed by tool name.",
     )
     tool_result_bytes: int = Field(
         default=0, ge=0, description="Total UTF-8 bytes of tool-result content the run was fed."

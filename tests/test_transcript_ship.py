@@ -287,7 +287,7 @@ def test_no_sidecar_and_no_store_is_no_destination(monkeypatch):
 def test_a_runner_with_no_sidecar_writes_straight_to_its_own_store(tmp_path, store_dir):
     path = tmp_path / "t.ndjson"
     path.write_bytes(BODY)
-    transcript_client.ship(KEY, path)
+    assert transcript_client.ship(KEY, path) is True
     assert transcript_store().get(KEY) == BODY
 
 
@@ -311,7 +311,7 @@ def test_the_runner_streams_the_file_to_the_sidecar_under_its_token(tmp_path, mo
     monkeypatch.setattr(httpx, "stream", _as_stream(fake_post))
     path = tmp_path / "t.ndjson"
     path.write_bytes(BODY)
-    transcript_client.ship(KEY, path)
+    assert transcript_client.ship(KEY, path) is True
 
     assert seen["url"] == f"http://sidecar:8000/transcripts/{KEY}"
     assert seen["body"] == BODY
@@ -419,7 +419,10 @@ def test_a_sidecar_with_storage_turned_off_is_the_off_state_not_a_failure(tmp_pa
     monkeypatch.setattr(httpx, "stream", _as_stream(fake_post))
     path = tmp_path / "t.ndjson"
     path.write_bytes(BODY)
-    transcript_client.ship(KEY, path)  # returns, raises nothing
+    # Returns, raises nothing -- but reports that nothing was STORED, which is
+    # what keeps #239 from writing a reference to a blob that only ever existed
+    # on this runner's disk.
+    assert transcript_client.ship(KEY, path) is False
 
 
 def test_a_503_from_a_store_that_was_meant_to_work_still_reports(tmp_path, monkeypatch):

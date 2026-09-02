@@ -636,7 +636,9 @@ column — `transcript_key` — pointing at it:
   There is no foreign key, deliberately: the invariant is held by write order,
   and a constraint would let a transcript-side failure reject the run row's
   duration, outcome, attempts and token counts too. A failed capture or upload
-  simply records no reference.
+  simply records no reference — and so does the off state above: shipping to a
+  sidecar whose store is unconfigured is silent, but nothing was stored, so
+  there is nothing for a reference to name.
 
 The readers (#240, #241) are the rest of the epic; nothing reads the blobs yet.
 

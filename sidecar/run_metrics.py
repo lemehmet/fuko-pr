@@ -105,6 +105,34 @@ def _costs(row) -> dict:
     }
 
 
+def _tool_calls(value) -> dict:
+    """The call-count mapping this column will accept, entry by entry (#239).
+
+    ``TranscriptIndexRequest`` states the same contract for the HTTP hop --
+    ``dict[str, NonNegativeCount]`` -- but :func:`record` is also called
+    DIRECTLY, with a plain mapping that no request model ever saw, so the two
+    transports would otherwise disagree about what reaches a column documented
+    as counts. Restated here so they cannot.
+
+    An entry that does not fit is dropped rather than clamped or rejected: a
+    count is not recoverable by guessing, and one unusable entry must not cost
+    the rest of the row -- the same reason an unusable key costs only the
+    reference (:func:`_index_transcript`) and an unstorable cost only itself
+    (:func:`_storable_cost`). ``bool`` is excluded despite being an ``int``:
+    ``True`` as a call count is a shape error, not one call.
+    """
+    if not isinstance(value, dict):
+        return {}
+    return {
+        name: count
+        for name, count in value.items()
+        if isinstance(name, str)
+        and isinstance(count, int)
+        and not isinstance(count, bool)
+        and count >= 0
+    }
+
+
 def _index_transcript(transcript) -> str | None:
     """Write this run's transcript index row and return the key to reference (#239).
 
@@ -152,7 +180,7 @@ def _index_transcript(transcript) -> str | None:
         # blast-radius argument `_storable_cost` makes about an unstorable cost.
         print(f"fuko: transcript index skipped, invalid key {key!r}", file=sys.stderr)
         return None
-    tool_calls = transcript.get("tool_calls")
+    tool_calls = _tool_calls(transcript.get("tool_calls"))
     try:
         with db_best_effort() as conn:
             conn.execute(
@@ -166,7 +194,7 @@ def _index_transcript(transcript) -> str | None:
                     # not adapt a mapping to `jsonb` on its own, and json.dumps
                     # keeps this module free of a psycopg import it otherwise
                     # has no use for.
-                    json.dumps(tool_calls if isinstance(tool_calls, dict) else {}),
+                    json.dumps(tool_calls),
                     int(transcript.get("tool_result_bytes") or 0),
                     int(transcript.get("repeated_read_files") or 0),
                 ),

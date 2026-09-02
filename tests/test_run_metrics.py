@@ -1,5 +1,6 @@
 """Tests for review-run metrics: module, endpoints, and runner recording."""
 
+import pytest
 from fastapi.testclient import TestClient
 
 from sidecar import main, run_metrics, runner
@@ -610,6 +611,37 @@ def test_record_drops_a_key_the_blob_store_could_never_have_held(monkeypatch, ca
     assert conn.statements[0][0].startswith("INSERT INTO review_runs")
     assert conn.statements[0][1][-1] is None
     assert "invalid key" in capsys.readouterr().err
+
+
+def test_record_drops_call_counts_the_column_is_not_documented_to_hold(monkeypatch):
+    """The direct path takes a plain mapping no request model ever saw, so the
+    contract `TranscriptIndexRequest` states for the HTTP hop is restated in
+    `record()`. One unusable entry costs itself, never the rest of the row."""
+    import json
+
+    conn, _ = _pg(monkeypatch)
+    run_metrics.record(
+        "o/r",
+        7,
+        "p",
+        "m",
+        transcript={**_INDEX, "tool_calls": {"Read": 3, "Grep": -1, "Bash": True, 9: 2, "Ok": 0}},
+    )
+    assert json.loads(conn.statements[0][1][2]) == {"Read": 3, "Ok": 0}
+    # The row itself still lands, and the reference with it.
+    assert conn.statements[1][1][-1] == _INDEX["key"]
+
+
+def test_the_request_model_rejects_a_negative_call_count():
+    """`ge=0` has to sit on the dict's VALUE annotation: given to the field it
+    would constrain the mapping, not the counts in it."""
+    from pydantic import ValidationError
+
+    from sidecar.models import TranscriptIndexRequest
+
+    with pytest.raises(ValidationError):
+        TranscriptIndexRequest(**{**_INDEX, "tool_calls": {"Read": -1}})
+    assert TranscriptIndexRequest(**{**_INDEX, "tool_calls": {"Read": 0}}).tool_calls == {"Read": 0}
 
 
 def test_record_accepts_the_request_model_the_endpoint_hands_it(monkeypatch):

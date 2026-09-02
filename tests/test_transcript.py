@@ -718,6 +718,32 @@ def test_a_close_after_a_failed_ship_does_not_retry_it(tmp_path):
     assert calls == ["k"]
 
 
+def test_a_store_that_declined_the_bytes_indexes_nothing(tmp_path):
+    """Shipping to a sidecar whose store is unconfigured is a SILENT success --
+    that silence is the point of the off state -- but nothing was stored, so a
+    reference would name a blob that only ever existed on this runner's disk."""
+    inner = FileTranscriptSink(tmp_path / "t.ndjson")
+    sink = ShippingTranscriptSink(inner, "k", lambda key, path: False)
+    transcript = Transcript("k", sink, Scrubber())
+    transcript.write(json.dumps(_tool_use("Read", file_path="a.py")) + "\n")
+    transcript.close()
+    assert sink.stored is False
+    assert transcript.index() is None
+
+
+def test_a_store_that_accepted_the_bytes_is_indexed(tmp_path):
+    """The other half of the same flag, and the shape a ship callable that
+    reports nothing still lands in: raising is how this interface reports a
+    failure, so a silent return means stored."""
+    inner = FileTranscriptSink(tmp_path / "t.ndjson")
+    sink = ShippingTranscriptSink(inner, "k", lambda key, path: None)
+    transcript = Transcript("k", sink, Scrubber())
+    transcript.write(json.dumps(_tool_use("Read", file_path="a.py")) + "\n")
+    transcript.close()
+    assert sink.stored is True
+    assert transcript.index().tool_calls == {"Read": 1}
+
+
 def test_a_first_write_that_fails_ships_nothing(tmp_path, monkeypatch):
     """`opened` has to mean a line LANDED, not that the file was created:
     otherwise a failure on the very first write ships an empty blob under a
@@ -925,6 +951,22 @@ def test_a_nameless_tool_use_counts_under_the_folds_own_placeholder():
     transcript, _ = _transcript()
     transcript.write(
         json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use"}]}}) + "\n"
+    )
+    transcript.close()
+    assert transcript.index().tool_calls == {"?": 1}
+
+
+@pytest.mark.parametrize("name", [["Read"], {"tool": "Read"}, 7, ""])
+def test_an_unhashable_or_non_string_tool_name_folds_into_the_placeholder(name):
+    """The name is a dict KEY, so a feed spelling it as a list or an object
+    would raise `TypeError` out of `write()` -- past the sink's own guard, into
+    the review path this module promises never to fault."""
+    transcript, _ = _transcript()
+    transcript.write(
+        json.dumps(
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": name}]}}
+        )
+        + "\n"
     )
     transcript.close()
     assert transcript.index().tool_calls == {"?": 1}

@@ -279,6 +279,12 @@ class ShippingTranscriptSink:
         self._key = key
         self._ship = ship
         self._closed = False
+        #: Whether shared storage ACCEPTED these bytes; ``None`` until
+        #: :meth:`close` has tried. Read by :meth:`Transcript.index` (#239),
+        #: because shipping can succeed silently without storing anything --
+        #: the sidecar's marked off state -- and a reference must not name a
+        #: blob that only ever existed on this runner's disk.
+        self.stored: bool | None = None
 
     def write(self, line: str) -> None:
         """Append one already-scrubbed line to the local file."""
@@ -308,7 +314,11 @@ class ShippingTranscriptSink:
         self._closed = True
         self._inner.close()
         if self._inner.opened:
-            self._ship(self._key, self.path)
+            # `is not False`, not `bool(...)`: only an EXPLICIT refusal marks
+            # these bytes unstored. A ship callable that returns nothing has
+            # returned without raising, and raising is how this interface
+            # reports every real failure -- so silence means it stored.
+            self.stored = self._ship(self._key, self.path) is not False
 
 
 #: The tool whose calls the repeated-read figure is derived from.
@@ -447,8 +457,14 @@ class _Meter:
             if not isinstance(block, dict) or block.get("type") != "tool_use":
                 continue
             # `"?"` matches the progress fold's own placeholder for a nameless
-            # tool_use block, so one vocabulary describes both.
-            name = block.get("name") or "?"
+            # tool_use block, so one vocabulary describes both. The isinstance
+            # test is what keeps it a placeholder rather than a crash: a feed
+            # naming a tool with a list or an object would otherwise be used as
+            # a dict key and raise TypeError out of `write()`, past the sink's
+            # own guard, into the review path this module promises never to
+            # fault. An unrecognised shape costs a tool name, never a review.
+            raw_name = block.get("name")
+            name = raw_name if isinstance(raw_name, str) and raw_name else "?"
             self.tool_calls[name] = self.tool_calls.get(name, 0) + 1
             if name == READ_TOOL:
                 self._read(block.get("input"))
@@ -551,12 +567,19 @@ class Transcript:
         delivers the bytes or fails; the figures themselves are complete from
         the last :meth:`write` on, and closing clears no state this reads.
 
-        ``None`` in two cases, both of which mean the reference on the
+        ``None`` in three cases, all of which mean the reference on the
         ``review_runs`` row stays NULL rather than naming a blob:
 
         * **Nothing landed.** A run that streamed no events leaves no file and
           ships nothing (:class:`ShippingTranscriptSink`), so an index row would
           point at a blob that does not exist.
+        * **Storage declined the bytes.** Shipping to a sidecar whose blob store
+          is unconfigured is a SILENT success -- deliberately, so staging
+          capture ahead of storage does not print a line per run -- but nothing
+          was stored, and that is the configuration the deployment docs
+          recommend passing through. Reported by the sink rather than inferred
+          here, which is why an ordinary file sink (no ``stored`` attribute) is
+          read as "nothing to decline" and indexes normally.
         * **The capture failed.** Conservative on purpose, and knowingly
           over-suppressing one case: a sink that failed at event 900 still has
           its clean prefix shipped by ``close``, and that prefix would be
@@ -573,6 +596,8 @@ class Transcript:
         runs that finished.
         """
         if self._failed or not self._stored:
+            return None
+        if getattr(self._sink, "stored", None) is False:
             return None
         return TranscriptIndex(
             key=self.key,

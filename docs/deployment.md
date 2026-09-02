@@ -196,7 +196,9 @@ With `FUKO_DATABASE_URL` also configured, each captured transcript adds a row to
 files the run read more than once — and the run's `review_runs` row references
 it by key (#239). No extra configuration: the figures ride the metrics post the
 runner already makes, and a deployment without Postgres stores the blob and
-skips the row.
+skips the row. Staging the other way round — capture on, store still off —
+writes no row and no reference either: the `503` above is silent, but it stored
+nothing for a reference to name.
 
 ## Ollama in Docker
 

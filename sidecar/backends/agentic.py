@@ -1093,9 +1093,13 @@ class AgenticBackend:
         # Lifted off the transcript in the `finally` below, because every return
         # path past that point needs it and the object it comes from is closed
         # there. The two returns INSIDE the try (no harness on PATH, a sandbox
-        # that could not be prepared) do not carry one, and cannot: both happen
-        # before a single event has streamed, so `index()` would answer `None`
-        # anyway.
+        # that could not be prepared) carry none, because on every realistic
+        # shape of those two failures nothing has streamed yet and `index()`
+        # answers `None` anyway. The one exception is an `OSError` raised while
+        # ITERATING the harness pipe rather than while spawning it, which leaves
+        # a shipped blob with no index row -- the direction this design accepts
+        # (an orphan blob, never a reference naming nothing), and rare enough
+        # not to restructure the block for.
         transcript_index: dict | None = None
         try:
             workdir = Path(mkdtemp(prefix="fuko-agentic-cwd-"))
