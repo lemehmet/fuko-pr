@@ -554,6 +554,29 @@ def test_a_count_that_is_not_a_non_negative_integer_is_fatal(monkeypatch, count)
     assert "'count'" in str(e.value)
 
 
+def test_a_count_smaller_than_its_own_page_is_fatal(monkeypatch):
+    # The only thing the two fields assert about each other. A real sidecar
+    # cannot produce it -- the total rides `count(*) OVER ()` on these rows --
+    # so a body that does is not one of ours however well it typechecks.
+    body = json.dumps({"transcripts": [_ROW], "count": 0}).encode()
+    monkeypatch.setattr(
+        transcriptscli.urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(body)
+    )
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._list(_ns())
+    assert "smaller than its own page" in str(e.value)
+
+
+def test_a_count_smaller_than_its_page_is_caught_before_the_json_dump(monkeypatch):
+    body = json.dumps({"transcripts": [_ROW, _ROW], "count": 1}).encode()
+    monkeypatch.setattr(
+        transcriptscli.urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(body)
+    )
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._list(_ns(json=True))
+    assert "smaller than its own page" in str(e.value)
+
+
 def test_the_count_is_validated_before_the_json_dump_too(monkeypatch):
     # `--json` prints the body unchanged, so without this check it would hand a
     # malformed body straight to whatever is downstream of the pipe.

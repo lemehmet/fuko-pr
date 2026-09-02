@@ -300,6 +300,13 @@ def _list(args) -> None:
     total = resp.get("count")
     if not isinstance(total, int) or isinstance(total, bool) or total < 0:
         sys.exit("fuko transcripts: the listing response's 'count' is not a non-negative integer")
+    # The one thing the two fields say about EACH OTHER, and the last check this
+    # body admits: the total counts the window the page came from, so it cannot
+    # be smaller than the page. A real sidecar cannot produce otherwise -- the
+    # total rides `count(*) OVER ()` on these very rows -- so a body that does
+    # is not one of ours, whatever else about it typechecked.
+    if total < len(resp["transcripts"]):
+        sys.exit("fuko transcripts: the listing response's 'count' is smaller than its own page")
     # The same closed-pipe contract `get` has: `list | head` and
     # `list --json | jq -e ... | head` are documented uses, and a reader that
     # walked away is not a fault to report.
