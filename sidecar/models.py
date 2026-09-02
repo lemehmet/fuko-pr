@@ -9,7 +9,7 @@ from the rest of the package, so every layer can depend on it.
 
 from typing import Annotated, Any
 
-from pydantic import BaseModel, Field, StrictInt
+from pydantic import BaseModel, Field, StrictBool, StrictInt
 
 SOURCES: tuple[str, ...] = ("remember", "review_thread", "docs", "digest")
 """Where a learning came from.
@@ -336,7 +336,9 @@ class TranscriptIndexRequest(BaseModel):
             "the reference, never the metrics row it rides with."
         )
     )
-    complete: bool = Field(description="Whether the feed reached its terminal `result` event.")
+    complete: StrictBool = Field(
+        description="Whether the feed reached its terminal `result` event."
+    )
     tool_calls: dict[str, NonNegativeCount] = Field(
         default_factory=dict,
         description="Call counts keyed by tool name.",

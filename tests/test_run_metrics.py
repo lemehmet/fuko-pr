@@ -723,6 +723,11 @@ def test_the_request_model_refuses_a_boolean_spelled_as_a_call_count():
         for value in (True, "5", 5.0):
             with pytest.raises(ValidationError):
                 TranscriptIndexRequest(**{**_INDEX, field: value})
+    # And `complete`, the last field of the four: lax bool reads "false" as
+    # False and 1 as True, neither of which the direct path accepts at all.
+    for value in ("false", "true", 1, 0):
+        with pytest.raises(ValidationError):
+            TranscriptIndexRequest(**{**_INDEX, "complete": value})
 
 
 def test_record_accepts_the_request_model_the_endpoint_hands_it(monkeypatch):
