@@ -148,6 +148,14 @@ backends answer `503 transcript store unusable: No module named 'boto3'` on
 every upload, and log the same line on the sidecar. The `file` backend and the
 unconfigured default need nothing.
 
+One exception to configuring it on the sidecar alone: if you run a
+`file`-backend sidecar as a plain process **on a host that also runs agentic
+reviews**, export `FUKO_TRANSCRIPT_STORE_BACKEND` / `_ROOT` to the runner as
+well. The reviewer's read denylist is built from the runner process's own
+settings, so otherwise the blob corpus sits on the harness's filesystem with no
+rule covering it (see [`agentic-reviewer.md`](agentic-reviewer.md)). The
+containerized deployment below is insulated by the container boundary.
+
 **Runners need nothing.** They ship what they captured to the sidecar they
 already talk to, over `POST /transcripts/<key>` with the `FUKO_TOKEN` they
 already hold; no storage credentials are added to any workflow. An IAM user

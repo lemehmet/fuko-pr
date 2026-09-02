@@ -370,7 +370,17 @@ def local_blob_root(cfg: BlobStoreConfig) -> Path | None:
     """
     if cfg.backend != "file" or not cfg.root:
         return None
-    resolved = Path(cfg.root).expanduser().resolve()
+    try:
+        resolved = Path(cfg.root).expanduser().resolve()
+    except (OSError, RuntimeError) as e:
+        # `expanduser` raises RuntimeError for a `~user` with no home to
+        # resolve, and `resolve` can raise OSError on a path the filesystem
+        # refuses to walk. Normalized to ValueError HERE rather than caught at
+        # each call site: both callers already treat "this root is unusable" as
+        # a ValueError -- the endpoint turns it into a 503 and the driver into
+        # one stderr line -- and a resolution failure is the same fact about
+        # the same setting as a root that is the filesystem root.
+        raise ValueError(f"transcript store root {cfg.root!r} cannot be resolved: {e}") from e
     if resolved.parent == resolved:
         raise ValueError(
             f"transcript store root {resolved} is the filesystem root; "

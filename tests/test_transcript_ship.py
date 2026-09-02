@@ -118,6 +118,20 @@ def test_a_filesystem_root_store_is_refused_rather_than_left_undenied(monkeypatc
     assert "transcript store unusable" in capsys.readouterr().err
 
 
+def test_an_unresolvable_store_root_is_the_same_refusal_as_a_root_one(monkeypatch):
+    """`expanduser` raises RuntimeError for a `~user` with no home, and
+    `resolve` can raise OSError. Normalized inside `local_blob_root`, so the
+    endpoint answers 503 rather than 500 and the driver's guard sees the class
+    it already handles."""
+    monkeypatch.setattr(settings, "transcript_store_backend", "file")
+    monkeypatch.setattr(settings, "transcript_store_root", "~nosuchuser12345/blobs")
+    with pytest.raises(ValueError, match="cannot be resolved"):
+        transcript_store()
+    resp = _client(monkeypatch).post(f"/transcripts/{KEY}", content=BODY)
+    assert resp.status_code == 503
+    assert "cannot be resolved" in resp.json()["detail"]
+
+
 def test_a_configured_but_unusable_store_is_a_503_with_the_reason(monkeypatch):
     """The store is built per request, so a bad configuration would otherwise
     reach the caller as a 500 and a traceback on every single upload."""
@@ -160,6 +174,34 @@ def test_the_unconfigured_503_is_answered_only_after_the_body_is_drained(monkeyp
     assert resp.headers.get(objectstore.STORE_HEADER) == objectstore.STORE_UNCONFIGURED
     # Every chunk was pulled before the refusal was written.
     assert sent == [b"a" * 16, b"b" * 16, b"c" * 16]
+
+
+def test_a_refused_upload_drains_without_buffering_the_body(monkeypatch):
+    """The drain is required so the marked 503 reaches a still-sending client,
+    but nothing in the classification needs the bytes -- so the recommended
+    rollout order (capture on, storage not yet) must not push every transcript
+    into sidecar memory purely to discard it."""
+    monkeypatch.setattr(settings, "transcript_store_backend", "")
+    monkeypatch.setattr(settings, "transcript_max_bytes", 1024)
+    held = []
+
+    class _Watched(bytearray):
+        def __iadd__(self, other):
+            held.append(len(other))
+            return super().__iadd__(other)
+
+    monkeypatch.setattr(main, "bytearray", _Watched, raising=False)
+    sent = []
+
+    def chunks():
+        for chunk in (b"a" * 16, b"b" * 16, b"c" * 16):
+            sent.append(chunk)
+            yield chunk
+
+    resp = _client(monkeypatch).post(f"/transcripts/{KEY}", content=chunks())
+    assert resp.status_code == 503
+    assert sent == [b"a" * 16, b"b" * 16, b"c" * 16]  # drained
+    assert held == []  # ...and never accumulated
 
 
 def test_a_store_that_fails_when_used_is_a_503_and_a_named_log_line(monkeypatch, capsys):

@@ -969,12 +969,17 @@ class AgenticBackend:
         deny_dirs = [str(deny_dir)] if deny_dir is not None else []
         try:
             blob_root = local_blob_root(BlobStoreConfig.from_settings())
-        except ValueError as e:
+        except Exception as e:
             # A root the denylist cannot cover -- refused by the same rule and
             # for the same reason `transcript_dir()` refuses one, and refused
             # HERE too so the driver and the store agree: `make_blob_store`
             # raises on it as well, so shipping fails loudly rather than
             # writing a corpus no rule reaches.
+            #
+            # As broad as the `transcript_dir()` guard beside it, and for the
+            # same reason: this runs before `fetch_pr_context`, so anything
+            # this misses does not degrade the capture, it fails the REVIEW.
+            # `local_blob_root` already normalizes what it can foresee.
             print(f"fuko: transcript store unavailable: {e}", file=sys.stderr)
             blob_root = None
         if blob_root is not None:

@@ -2141,6 +2141,25 @@ def test_the_transcript_destination_reaches_the_harness_for_the_deny_rule(monkey
     )
 
 
+def test_a_renamed_store_credential_prefix_is_stripped_from_the_harness_env(monkeypatch):
+    """The SCRUB half of this is tested beside `_transcript_secrets`; this is
+    the STRIP half. A renamed prefix puts the two variables outside the `FUKO_`
+    namespace the comprehension strips, so without the explicit exclusion they
+    ride into the agent's own environment -- and deleting that one clause would
+    otherwise leave the suite green."""
+    monkeypatch.setattr(settings, "transcript_store_creds_env_prefix", "MYCO_S3", raising=False)
+    monkeypatch.setenv("MYCO_S3_ACCESS_KEY_ID", "the-access-key-id")
+    monkeypatch.setenv("MYCO_S3_SECRET_ACCESS_KEY", "the-secret-access-key")
+    monkeypatch.setenv("MYCO_S3_REGION", "auto")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert "MYCO_S3_ACCESS_KEY_ID" not in captured["env"]
+    assert "MYCO_S3_SECRET_ACCESS_KEY" not in captured["env"]
+    # The region code is not a credential and is deliberately NOT stripped --
+    # asserting it keeps the exclusion from quietly widening into the namespace.
+    assert captured["env"]["MYCO_S3_REGION"] == "auto"
+
+
 def test_a_local_blob_store_root_is_denied_beside_the_capture_dir(monkeypatch, tmp_path):
     """With the `file` backend on this host the shipped blobs are a SECOND,
     longer-lived copy of the same corpus -- the capture directory can be

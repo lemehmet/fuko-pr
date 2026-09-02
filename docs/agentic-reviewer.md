@@ -599,7 +599,13 @@ for trying the path out before there is a bucket.
 - **A local blob store is denied to the agent.** With the `file` backend on the
   host that runs the harness, the store root is a second, longer-lived copy of
   the transcript corpus, so it goes into the reviewer's read denylist beside
-  `FUKO_TRANSCRIPT_DIR` — same reasoning, same rule.
+  `FUKO_TRANSCRIPT_DIR` — same reasoning, same rule. The rule is built from the
+  **runner process's own** `FUKO_TRANSCRIPT_STORE_*`, because that is the only
+  configuration it can see. In the containerized deployment the sidecar's store
+  lives behind a container boundary and the question does not arise; but if you
+  run a `file`-backend sidecar as a plain process **on the runner host**, export
+  the same `FUKO_TRANSCRIPT_STORE_BACKEND` / `_ROOT` to the runner too, or the
+  corpus is written where no deny rule reaches it.
 
 The derived per-tool metrics (#239) and the readers (#240, #241) are the rest of
 the epic; nothing reads the blobs yet.
