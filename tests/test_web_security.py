@@ -81,13 +81,26 @@ def test_a_crafted_cookie_cannot_500_an_open_page(client):
     passes no ``extra_nav``, so ``/ui/login`` never calls ``nav_extra`` and this
     same assertion pointed there would pass whether or not the guard exists.
 
-    Only the long-digit value is exercised end to end. The non-ASCII digits are
-    unit-tested above instead, because the test client encodes headers as ASCII
-    and cannot send them at all -- a raw HTTP client can, since Starlette
-    decodes the header bytes as latin-1.
+    Only the long-digit value goes through the cookie jar, which encodes as
+    ASCII. A non-ASCII field still reaches the server over a pure-ASCII wire
+    header -- see the octal-escape test below.
     """
     client.cookies.set(security.COOKIE, f"v1.{'9' * 5000}.x")
     assert client.get(transcripts.PAGE.path).status_code == 200
+
+
+def test_an_octal_escaped_cookie_cannot_500_an_open_page(client):
+    """A pure-ASCII wire header still delivers a non-ASCII cookie value.
+
+    ``http.cookies`` unquotes ``\\351`` to ``é`` before the app sees it, so
+    ``hmac.compare_digest`` would be handed a non-ASCII ``str`` and raise
+    ``TypeError`` -- reachable with any in-range expiry, independent of the
+    expiry's own contents.
+    """
+    resp = client.get(
+        transcripts.PAGE.path, headers={"Cookie": f'{security.COOKIE}="v1.9999999999.\\351"'}
+    )
+    assert resp.status_code == 200
 
 
 def test_a_session_signed_by_another_token_is_rejected(client, monkeypatch):

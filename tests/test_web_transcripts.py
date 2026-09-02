@@ -395,6 +395,10 @@ def test_a_text_block_that_is_not_text_goes_through_the_json_door(wire, client):
     _sign_in(client)
     resp = client.get(f"{page.PAGE.path}?key=k")
     assert resp.status_code == 200
+    # The load-bearing assertion. `str()` survives this depth, so a 200 alone
+    # holds under the bare-`str()` code this replaced and would pin nothing;
+    # only the placeholder proves the value went through `_json_text`.
+    assert "unrenderable event" in resp.text
     assert "still here" in resp.text
 
 
