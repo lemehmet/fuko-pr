@@ -39,6 +39,7 @@ they drift in is silent corpus corruption, since scrubbing cannot be undone.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import uuid
 from collections.abc import Sequence
@@ -48,15 +49,6 @@ from pathlib import Path
 from typing import Protocol
 
 from ..config import settings
-
-MIN_SECRET_LENGTH = 8
-"""Shortest injected value worth replacing.
-
-A guard against the opposite failure mode from a missed secret: an env var
-holding ``1``, ``true`` or a two-letter region code is not a credential, and
-replacing every occurrence of it would corrupt the corpus the epic exists to
-build -- silently, and in a way no later reader could detect.
-"""
 
 
 def _redaction(name: str) -> str:
@@ -82,8 +74,18 @@ class Scrubber:
 
         Each value is registered twice: verbatim, and in its JSON-escaped
         spelling, because the feed is NDJSON and a value carrying a quote or a
-        backslash appears on the wire escaped rather than raw. Empty, short
-        (:data:`MIN_SECRET_LENGTH`) and non-string values are skipped.
+        backslash appears on the wire escaped rather than raw. Only empty and
+        non-string values are skipped -- an empty needle matches between every
+        pair of characters, so it would redact the whole feed.
+
+        There is deliberately NO minimum length. A short value here is still a
+        credential: the caller hands this method the exact values of variables
+        it already decided are credential-bearing, so the "an env var holding
+        ``1`` or ``true`` is not a secret" hazard belongs to a scrubber that
+        reads the whole environment, which this one never does. Length would
+        instead decide that an operator's short ``FUKO_TOKEN`` is written to
+        durable storage verbatim -- and between a leaked credential and a
+        transcript with an over-eager redaction in it, only one is recoverable.
 
         Longest needle first, so a credential that happens to contain another
         one cannot be half-replaced into a string that no longer matches the
@@ -91,7 +93,7 @@ class Scrubber:
         """
         needles: dict[str, str] = {}
         for name, value in secrets:
-            if not isinstance(value, str) or len(value) < MIN_SECRET_LENGTH:
+            if not isinstance(value, str) or not value:
                 continue
             marker = _redaction(name)
             for needle in (value, json.dumps(value)[1:-1]):
@@ -131,7 +133,17 @@ class FileTranscriptSink:
     leaves no empty file behind and a capture nobody exercises costs no inode.
     It is line-buffered because the tail is the interesting part of a cut-short
     run: a killed process's buffer is not flushed by anyone.
+
+    Owner-only, not umask's choice. Scrubbing removes the credential values the
+    driver holds and nothing else, so what stays is the whole reviewed
+    repository as the agent read it -- which is the same content the checkout
+    itself carries, and ``invoke`` gives that ``mkdtemp``'s ``0o700``. A
+    transcript outlives the checkout by design (the corpus is kept), so leaving
+    it at a default ``0o644`` would make the durable copy the readable one.
     """
+
+    DIR_MODE = 0o700
+    FILE_MODE = 0o600
 
     def __init__(self, path: Path) -> None:
         """Record the destination path; nothing is created until first write."""
@@ -141,8 +153,13 @@ class FileTranscriptSink:
     def write(self, line: str) -> None:
         """Append ``line``, creating the file and its parents on first use."""
         if self._handle is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self._handle = self.path.open("a", encoding="utf-8", buffering=1)
+            self.path.parent.mkdir(mode=self.DIR_MODE, parents=True, exist_ok=True)
+            # `os.open` rather than `Path.open`, because the mode has to be set
+            # AS the file is created: a chmod afterwards leaves a window in
+            # which the file exists world-readable. `mode` is still subject to
+            # the umask, which can only narrow it further -- never widen it.
+            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, self.FILE_MODE)
+            self._handle = open(fd, "a", encoding="utf-8", buffering=1)
         self._handle.write(line if line.endswith("\n") else line + "\n")
 
     def close(self) -> None:

@@ -106,12 +106,15 @@ def test_a_credential_shaped_string_that_was_never_injected_is_written_verbatim(
     assert look_alike in sink.lines[0]
 
 
-def test_a_short_value_is_not_scrubbed():
-    """A var holding `1` or `true` is not a credential; replacing every
-    occurrence of it would corrupt the transcript with no secret at stake."""
+def test_a_short_value_is_still_scrubbed():
+    """The caller supplies only values of variables it already decided are
+    credential-bearing, so a short one is a short SECRET -- an operator's brief
+    `FUKO_TOKEN` -- not a boolean flag. A length floor here would write it to
+    durable storage verbatim."""
     transcript, sink = _transcript([("FUKO_TOKEN", "abc")])
     transcript.write(json.dumps({"type": "assistant", "text": "abc appears in prose"}))
-    assert "abc appears in prose" in sink.lines[0]
+    assert "abc" not in sink.lines[0]
+    assert "[REDACTED:FUKO_TOKEN]" in sink.lines[0]
 
 
 def test_a_secret_containing_another_secret_is_replaced_whole():
@@ -147,6 +150,18 @@ def test_the_file_is_created_lazily_and_flushed_per_line(tmp_path):
     assert path.read_text().splitlines() == ['{"type": "system"}', '{"type": "result"}']
     sink.close()
     sink.close()
+
+
+def test_the_transcript_file_and_directory_are_owner_only(tmp_path):
+    """The scrub drops the driver's credential values and nothing else, so what
+    is left is the reviewed repository as the agent read it -- the content the
+    checkout gets `mkdtemp`'s 0o700 for, kept durably rather than deleted."""
+    path = tmp_path / "nested" / "run.ndjson"
+    sink = FileTranscriptSink(path)
+    sink.write('{"type": "system"}')
+    sink.close()
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.parent.stat().st_mode & 0o777 == 0o700
 
 
 # --- the tee ---------------------------------------------------------------
@@ -341,6 +356,7 @@ def test_the_secret_set_covers_the_checkout_token_and_both_environments(monkeypa
     """The GitHub App token is the case an env-derived set would miss: it never
     enters the harness environment (every spelling is stripped), it belongs to
     the checkout."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("GITHUB_TOKEN", "ambient-github-token")
     monkeypatch.setenv("ZAI_KEY", "other-seats-provider-key")
     monkeypatch.setenv("FUKO_TOKEN", "fuko-ledger-write-token")
@@ -359,14 +375,57 @@ def test_the_secret_set_covers_the_checkout_token_and_both_environments(monkeypa
     assert "ANTHROPIC_BASE_URL" not in values
 
 
+def test_the_secret_set_covers_the_sibling_seats_app_tokens(monkeypatch):
+    """A seat's run holds every OTHER seat's write-scoped App token: the review
+    workflow mints one per App and exports them all into the one process. Only
+    the branch's own arrives as the `token` argument, so the siblings reach the
+    transcript unless the prefix is scrubbed."""
+    monkeypatch.setenv("FUKO_GITHUB_TOKEN_HENRY", "ghs_henrys-own-app-token")
+    monkeypatch.setenv("FUKO_GITHUB_TOKEN_GRAY", "ghs_grays-app-token")
+    monkeypatch.setenv("FUKO_GITHUB_TOKEN_DORIAN", "ghs_dorians-app-token")
+    values = dict(_transcript_secrets({}, "ghs_henrys-own-app-token"))
+    assert values["FUKO_GITHUB_TOKEN_GRAY"] == "ghs_grays-app-token"
+    assert values["FUKO_GITHUB_TOKEN_DORIAN"] == "ghs_dorians-app-token"
+
+
+def test_the_secret_set_covers_the_object_store_credentials(monkeypatch):
+    """Namespace-stripped like the rest of `FUKO_`, and a credential."""
+    monkeypatch.setenv("FUKO_S3_ACCESS_KEY_ID", "the-access-key-id")
+    monkeypatch.setenv("FUKO_S3_SECRET_ACCESS_KEY", "the-secret-access-key")
+    monkeypatch.setenv("FUKO_S3_REGION", "auto")
+    values = dict(_transcript_secrets({}, ""))
+    assert values["FUKO_S3_ACCESS_KEY_ID"] == "the-access-key-id"
+    assert values["FUKO_S3_SECRET_ACCESS_KEY"] == "the-secret-access-key"
+    # A region code is not a credential; scrubbing "auto" would hit prose.
+    assert "FUKO_S3_REGION" not in values
+
+
+def test_the_secret_set_covers_the_runners_own_anthropic_credential(monkeypatch):
+    """`_ANTHROPIC_INHERITED_VARS` strips the ambient value so config alone
+    decides the seat's auth -- which means it never appears in `harness_env`,
+    and a set read only from there would miss the credential this process
+    actually holds."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "the-runners-own-key")
+    secrets = _transcript_secrets({"ANTHROPIC_API_KEY": "the-seats-injected-key"}, "")
+    # BOTH spellings are live at once and both must go: the seat's injected
+    # credential and the runner's ambient one are different secrets.
+    scrubbed = Scrubber.for_secrets(secrets).scrub(
+        "saw the-runners-own-key and the-seats-injected-key"
+    )
+    assert "the-runners-own-key" not in scrubbed
+    assert "the-seats-injected-key" not in scrubbed
+
+
 def test_a_run_with_no_checkout_token_registers_no_empty_secret(monkeypatch):
-    """An empty needle would match everywhere; the guard is the length rule,
-    but the set should not carry it at all."""
+    """An empty needle would match between every pair of characters; the
+    scrubber drops it, but the set should not carry it at all."""
     for name in ("GITHUB_TOKEN", "GH_TOKEN", "FUKO_TOKEN"):
         monkeypatch.delenv(name, raising=False)
     assert not any(value == "" for _name, value in _transcript_secrets({}, ""))
 
 
-@pytest.mark.parametrize("value", ["", "short"])
+@pytest.mark.parametrize("value", ["", None, 1234])
 def test_scrubber_skips_values_it_must_not_replace(value):
+    """Only the two that cannot name a credential occurrence: an empty needle
+    (matches everywhere) and a non-string (has no spelling on the wire)."""
     assert Scrubber.for_secrets([("X", value)]).replacements == ()

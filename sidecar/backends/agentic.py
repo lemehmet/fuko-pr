@@ -399,6 +399,42 @@ _FUKO_SECRET_VARS = (
     "FUKO_AUTH_TOKEN",
     "FUKO_EMBED_API_KEY",
     "FUKO_DATABASE_URL",
+    # The object store's default credential spelling
+    # (``object_store.creds_env_prefix``, :mod:`sidecar.objectstore`). A
+    # deployment that renames the prefix must add its two names here; the
+    # sibling ``_REGION`` variable is deliberately absent, being a region code
+    # rather than a credential.
+    "FUKO_S3_ACCESS_KEY_ID",
+    "FUKO_S3_SECRET_ACCESS_KEY",
+)
+
+#: Credential-bearing ``FUKO_`` variables whose full names this module cannot
+#: know, matched by PREFIX over the live environment.
+#:
+#: Still named rather than inferred -- the prefix itself is the declaration.
+#: Every variable under ``FUKO_GITHUB_TOKEN_`` is a per-seat GitHub App token by
+#: construction (each seat's ``token_env`` in ``.fuko.toml``; the review
+#: workflow mints one per App and exports them all into the same process), so
+#: membership carries the same certainty a literal name would. It has to be a
+#: prefix because the suffix is the seat's name, which is fleet configuration.
+#:
+#: This matters because a seat's run holds every OTHER seat's write-scoped App
+#: token in its own environment: the ``FUKO_`` namespace strip keeps them out of
+#: the harness environment, but only the branch's own token arrives here as the
+#: ``token`` argument, so the siblings' would otherwise reach durable storage.
+_FUKO_SECRET_PREFIXES = ("FUKO_GITHUB_TOKEN_",)
+
+#: Anthropic credentials read from the AMBIENT environment rather than from the
+#: harness environment. :data:`_ANTHROPIC_INHERITED_VARS` strips these so config
+#: alone decides the seat's auth, which means the runner's own value never
+#: reaches the agent -- and therefore never appears in ``harness_env`` for the
+#: by-name pass below to find. It is still in this process's environment, and a
+#: transcript is durable, so it is scrubbed by value like every other
+#: deliberately-withheld credential.
+_AMBIENT_ANTHROPIC_VARS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
 )
 
 
@@ -417,11 +453,18 @@ def _transcript_secrets(harness_env: dict[str, str], token: str) -> list[tuple[s
     * the checkout token, which authenticates the fetch of the reviewed head;
     * what the harness environment ACTUALLY carries, so the seat's own
       credential is scrubbed under the name it was injected as;
-    * the ambient values this driver strips -- other seats' provider keys,
-      every GitHub spelling, fuko's own secrets. They never reach the agent's
+    * the ambient values this driver strips -- other seats' provider keys and
+      GitHub App tokens, every GitHub spelling, the runner's own Anthropic
+      credential, fuko's own secrets. They never reach the agent's
       environment, but this process's environment is readable through
       ``/proc/<pid>/environ`` (the reason the harness denies those paths at
       all), and a transcript is durable storage.
+
+    The ambient half must cover everything the strip covers, or the scrub layer
+    stops being the backstop for that read path: the harness environment is
+    stripped by the whole ``FUKO_`` NAMESPACE, so the names listed here have to
+    keep pace with the credential-bearing members of it -- see
+    :data:`_FUKO_SECRET_VARS` and :data:`_FUKO_SECRET_PREFIXES`.
 
     Nothing is inferred from a value's SHAPE, and nothing is derived from a
     variable's name looking credential-ish: the driver's credential lists are
@@ -429,13 +472,22 @@ def _transcript_secrets(harness_env: dict[str, str], token: str) -> list[tuple[s
     scrubbing text that is not a secret.
     """
     secrets: list[tuple[str, str]] = [("GITHUB_APP_TOKEN", token)] if token else []
-    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+    for key in _AMBIENT_ANTHROPIC_VARS:
         value = harness_env.get(key, "")
         if value:
             secrets.append((key, value))
-    for key in (*_GITHUB_CRED_VARS, *sorted(_provider_key_vars()), *_FUKO_SECRET_VARS):
+    ambient = (
+        *_GITHUB_CRED_VARS,
+        *sorted(_provider_key_vars()),
+        *_FUKO_SECRET_VARS,
+        *_AMBIENT_ANTHROPIC_VARS,
+        *sorted(k for k in os.environ if k.startswith(_FUKO_SECRET_PREFIXES)),
+    )
+    seen: set[str] = set()
+    for key in ambient:
         value = os.environ.get(key, "")
-        if value:
+        if value and key not in seen:
+            seen.add(key)
             secrets.append((key, value))
     return secrets
 

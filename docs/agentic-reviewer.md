@@ -495,6 +495,11 @@ Properties worth knowing before turning it on:
 - **Streamed, never buffered.** One line at a time, line-buffered, so peak
   memory does not track transcript size and a run killed at `tool_timeout`
   keeps everything that arrived before the cut.
+- **Owner-only on disk.** The directory is created `0700` and each file `0600`,
+  set as the file is created rather than chmod'ed after. What survives the
+  scrub is the reviewed repository as the agent read it — the same content the
+  checkout gets a `0700` temp dir for, except a transcript is kept rather than
+  deleted, so on a shared runner the durable copy must not be the readable one.
 - **Capture never fails a review.** An unwritable destination, a full disk, a
   misconfigured path: one stderr line, an inert transcript, and a review whose
   text, `usage`, `cost_usd`, `turns` and `subtype` are identical to a run with
