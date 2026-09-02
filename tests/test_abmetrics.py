@@ -170,6 +170,22 @@ def test_candidate_pairs_are_drawn_from_the_rounds_the_receipts_name():
     assert len(candidate_pairs(claims, "a", "b")) == 1
 
 
+def test_candidate_pairs_yield_nothing_for_a_round_only_one_arm_published_in():
+    """A round both arms reviewed and only one spoke in has no pair to adjudicate.
+
+    Receipts make such a round shared, and the agreement figure counts it. The
+    listing must stay silent on it: pinned here so a later edit that "discloses"
+    one-sided rounds cannot quietly decouple the list from the figure.
+    """
+    claims = [_c("a", "r1", "src/app.py", "leak")]
+    receipts = [("a", "r1"), ("b", "r1")]
+
+    p = pair_metrics(claims, "a", "b", receipts)
+
+    assert (p.rounds, p.shared, p.union, p.agreement) == (1, 0, 1, 0.0)
+    assert candidate_pairs(claims, "a", "b", receipts) == ()
+
+
 def test_claim_title_prefers_the_stored_title_and_unwraps_its_rendering():
     assert claim_title("Unchecked None", "body") == "Unchecked None"
     assert claim_title("**Unchecked None**", "body") == "Unchecked None"
