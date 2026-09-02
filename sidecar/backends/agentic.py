@@ -464,6 +464,11 @@ _AWS_DEFAULT_CRED_VARS = (
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",
+    # botocore's LEGACY spelling of the session token, and it checks this one
+    # FIRST (`botocore.credentials.EnvProvider.TOKENS` is
+    # `["AWS_SECURITY_TOKEN", "AWS_SESSION_TOKEN"]`), so a deployment that sets
+    # it is actively using it rather than merely carrying it.
+    "AWS_SECURITY_TOKEN",
     "AWS_CONTAINER_AUTHORIZATION_TOKEN",
 )
 

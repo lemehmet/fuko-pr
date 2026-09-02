@@ -2169,6 +2169,7 @@ def test_boto3s_default_credential_chain_never_reaches_the_harness(monkeypatch):
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
+        "AWS_SECURITY_TOKEN",
         "AWS_CONTAINER_AUTHORIZATION_TOKEN",
     ):
         monkeypatch.setenv(name, f"value-of-{name}")
@@ -2179,6 +2180,7 @@ def test_boto3s_default_credential_chain_never_reaches_the_harness(monkeypatch):
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
+        "AWS_SECURITY_TOKEN",
         "AWS_CONTAINER_AUTHORIZATION_TOKEN",
     ):
         assert name not in captured["env"]

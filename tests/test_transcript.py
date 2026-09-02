@@ -495,11 +495,15 @@ def test_boto3s_default_credential_chain_is_stripped_and_scrubbed(monkeypatch):
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAtheaccesskey")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "thesecretaccesskey")
     monkeypatch.setenv("AWS_SESSION_TOKEN", "thesessiontoken")
+    monkeypatch.setenv("AWS_SECURITY_TOKEN", "thelegacytoken")
     monkeypatch.setenv("AWS_CONTAINER_AUTHORIZATION_TOKEN", "thecontainertoken")
     values = dict(_transcript_secrets({}, ""))
     assert values["AWS_ACCESS_KEY_ID"] == "AKIAtheaccesskey"
     assert values["AWS_SECRET_ACCESS_KEY"] == "thesecretaccesskey"
     assert values["AWS_SESSION_TOKEN"] == "thesessiontoken"
+    # botocore checks the legacy spelling FIRST, so a deployment that sets it
+    # is the one actually using it.
+    assert values["AWS_SECURITY_TOKEN"] == "thelegacytoken"
     assert values["AWS_CONTAINER_AUTHORIZATION_TOKEN"] == "thecontainertoken"
 
 
