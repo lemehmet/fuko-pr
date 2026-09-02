@@ -5,7 +5,10 @@ publish FINDINGS on -- inline comments, and the review bodies that carry
 unanchorable ones -- normalizes them with fuko's own recognizers, assigns each to
 an ARM by its author login, and reports the metrics the epic is scored on:
 findings per arm, distinct paths, path concentration, one-shot rate, cross-arm
-agreement, and Chapman pool coverage.
+agreement, and Chapman pool coverage. Beside the agreement figure it lists the
+same-round same-file pairs the exact-title rule scored as disagreeing, because on
+same-model arms that figure is a LOWER bound and the pairs are what a reader
+adjudicates to find out how loose it is (#243).
 The branch headers are read as a third channel, for their ``fuko-run:v1``
 receipts alone: a round a failover backup answered is scored under the rescued
 arm and is named in the output as a model confound (#204).
@@ -65,6 +68,7 @@ from sidecar.abmetrics import (
     TOP_PATHS,
     arm_metrics,
     backup_served_rounds,
+    candidate_pairs,
     collect_claims,
     pair_metrics,
 )
@@ -208,6 +212,42 @@ def _report_pair(claims: list[Claim], arms: dict[str, str], receipts: set[tuple[
             "near 5% a handful of rounds cannot separate the arms; report this as "
             "a null result rather than a decision."
         )
+    _report_candidates(claims, names[0], names[1], receipts)
+
+
+def _report_candidates(claims: list[Claim], a: str, b: str, receipts: set[tuple[str, str]]) -> None:
+    """List the same-round, same-file pairs the exact-title rule scored as disagreeing.
+
+    Printed after the agreement figure because it is that figure's caveat: two
+    arms on one model paraphrase, so the agreement above is a LOWER bound, and
+    these are the pairs a reader has to adjudicate to know how loose the bound is
+    (#243). Nothing here is counted, averaged, or fed back into a metric -- the
+    adjudication is a human's, and a tool that pre-empted it would be the
+    fitted-to-its-answer matcher #159 rules out.
+
+    The empty line says only that no such PAIR exists, which is the one claim
+    that holds however the list came out empty: the arms shared no round at all,
+    every same-file claim matched exactly, or one arm carried an unmatched
+    surplus the other had nothing to weigh against. Widening it to "nothing sits
+    outside the exact-title match" would assert the second of those three in all
+    three cases.
+    """
+    pairs = candidate_pairs(claims, a, b, sorted(receipts))
+    if not pairs:
+        print("\nno same-round same-file pair with unmatched claims on both arms")
+        return
+    print(
+        f"\n{len(pairs)} same-round same-file pair(s) the exact-title rule scored as "
+        "DISAGREEING. Cross-arm agreement above is a LOWER bound; adjudicate these by "
+        "hand to see how loose it is (#243), and do not fold the verdict back into a "
+        "matcher:"
+    )
+    for pair in pairs:
+        print(f"    {pair.round_key} {pair.file}")
+        for title in pair.a_titles:
+            print(f"        {a}: {title}")
+        for title in pair.b_titles:
+            print(f"        {b}: {title}")
 
 
 def _report_backup_rounds(rescued: set[tuple[str, str]], receipts: set[tuple[str, str]]) -> None:

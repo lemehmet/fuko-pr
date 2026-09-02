@@ -366,6 +366,89 @@ class PairMetrics:
     coverage: float | None
 
 
+@dataclass(frozen=True)
+class CandidatePair:
+    """One same-round, same-file disagreement between two arms, awaiting a human.
+
+    :func:`pair_metrics` scores two claims as one finding only when their anchors
+    are equal -- ``(file, casefolded title)``, the findings ledger's rule. Two
+    arms running the SAME model paraphrase, so that rule scores the same defect
+    under two wordings as a disagreement, and #159's first window came out at
+    0.0% agreement with 9 of 13 candidates adjudicated by hand as the same defect
+    (#243). This type is what makes that hand pass repeatable: the pairs the
+    exact rule rejected, printed for adjudication, rather than a second automatic
+    number nobody can audit.
+
+    Deliberately NOT a looser matcher, and NOT folded into any figure the tool
+    prints. Same file and same round is far too coarse to be agreement on its own
+    -- the epic's own measurement is that seats collide on files constantly and
+    on findings almost never -- and a matcher tuned until it reproduces a target
+    is fitted to its answer, which is the failure #159 exists to avoid. What this
+    supports is the honest statement that the printed agreement is a LOWER bound,
+    with the evidence for it in front of the reader.
+
+    Titles that already matched exactly are excluded: they are agreement under
+    the rule in force and are counted there, so re-listing them here would invite
+    adjudicating the same claim twice.
+    """
+
+    round_key: str
+    file: str
+    a_titles: tuple[str, ...]
+    b_titles: tuple[str, ...]
+
+
+def candidate_pairs(
+    claims: Sequence[Claim], a: str, b: str, receipts: Sequence[tuple[str, str]] = ()
+) -> tuple[CandidatePair, ...]:
+    """List the same-round, same-file claims the exact-title rule scored as disagreeing.
+
+    Round membership is :func:`pair_metrics`'s -- the heads both arms left a
+    review receipt on, falling back to the heads both published on -- so the
+    pairs listed are drawn from exactly the rounds the agreement figure was
+    computed over, and a reader can hold the two side by side.
+
+    Returns pairs ordered by round then file, each carrying every unmatched title
+    each arm published on that file in that round. A file where one arm's claims
+    all matched the other's exactly yields no pair, and neither does a one-sided
+    surplus: an unmatched claim with nothing on the other arm to weigh it against
+    is not a paraphrase awaiting adjudication, it is one arm finding what the
+    other did not, which the pooled shared/union counts already carry.
+    """
+    left = [c for c in claims if c.arm == a]
+    right = [c for c in claims if c.arm == b]
+    if receipts:
+        rounds = _receipt_rounds(a, receipts) & _receipt_rounds(b, receipts)
+    else:
+        rounds = {c.round_key for c in left} & {c.round_key for c in right}
+    mine, theirs = _by_round_file(left, rounds), _by_round_file(right, rounds)
+    out: list[CandidatePair] = []
+    for key in sorted(set(mine) & set(theirs)):
+        matched = {c.anchor for c in mine[key]} & {c.anchor for c in theirs[key]}
+        a_titles = tuple(c.title for c in mine[key] if c.anchor not in matched)
+        b_titles = tuple(c.title for c in theirs[key] if c.anchor not in matched)
+        if a_titles and b_titles:
+            out.append(
+                CandidatePair(round_key=key[0], file=key[1], a_titles=a_titles, b_titles=b_titles)
+            )
+    return tuple(out)
+
+
+def _by_round_file(claims: Iterable[Claim], rounds: set[str]) -> dict[tuple[str, str], list[Claim]]:
+    """Group claims in ``rounds`` by their round and their ANCHORED file.
+
+    The file comes from :attr:`Claim.anchor`, not from ``Claim.file``: these
+    buckets have to draw the same "same file" line the exact-title rule draws, or
+    two paths differing only in surrounding whitespace land in disjoint buckets
+    and the pair that rule scored as disagreeing is silently never listed.
+    """
+    out: dict[tuple[str, str], list[Claim]] = {}
+    for claim in claims:
+        if claim.round_key in rounds:
+            out.setdefault((claim.round_key, claim.anchor[0]), []).append(claim)
+    return out
+
+
 def chapman_pool_size(n1: int, n2: int, shared: int) -> float | None:
     """Chapman's bias-corrected capture-recapture estimate of the pool size.
 
