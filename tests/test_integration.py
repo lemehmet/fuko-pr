@@ -585,3 +585,166 @@ def test_migrations_replay_cleanly_with_a_digest_row_present():
     with db() as conn:
         for stmt in _migration_sql(_resolve_embed_dim()[0]):
             conn.execute(stmt)
+
+
+# --- Session transcripts: migration 013 and the reader over it (#239, #240).
+#
+# The one place these are exercised against a REAL Postgres. Everything else
+# about them is unit-tested against a fake connection, which can confirm the SQL
+# is shaped as intended and nothing about whether the server accepts it: the
+# JSONB cast, the BIGINT width, the LEFT JOIN LATERAL and the `count(*) OVER ()`
+# window are all things only a live server can answer.
+
+_TKEY_PREFIX = "citest240"
+
+
+@pytest.fixture
+def transcript_rows():
+    """Clean up every transcript row this suite writes, before and after."""
+
+    def purge():
+        from sidecar.db import db
+
+        with db() as conn:
+            conn.execute("DELETE FROM review_runs WHERE repo = %s", (TEST_REPO,))
+            conn.execute("DELETE FROM review_transcripts WHERE key LIKE %s", (_TKEY_PREFIX + "%",))
+
+    purge()
+    yield _TKEY_PREFIX
+    purge()
+
+
+def _record(key, *, pr, slot, tool_calls, complete=True, read_bytes=1024, repeated=3):
+    from sidecar import run_metrics
+
+    run_metrics.record(
+        TEST_REPO,
+        pr,
+        "openrouter",
+        "qwen3.8-max",
+        slot=slot,
+        duration_s=12.5,
+        outcome="ok",
+        findings=1,
+        backend="agentic",
+        transcript={
+            "key": key,
+            "complete": complete,
+            "tool_calls": tool_calls,
+            "tool_result_bytes": read_bytes,
+            "repeated_read_files": repeated,
+        },
+    )
+
+
+def test_transcript_index_row_lands_and_reads_back(transcript_rows):
+    """Migration 013 applied for real: the row inserts and the reader joins it."""
+    from sidecar import transcripts
+
+    key = f"{_TKEY_PREFIX}-a"
+    _record(key, pr=101, slot="dorian", tool_calls={"Read": 182, "Grep": 9})
+
+    page = transcripts.list_transcripts(repo=TEST_REPO)
+    assert page.total == 1
+    row = page.rows[0]
+    assert row.key == key
+    assert row.tool_calls == {"Read": 182, "Grep": 9}
+    assert row.tool_result_bytes == 1024
+    assert row.repeated_read_files == 3
+    assert row.complete is True
+    assert (row.repo, row.pr, row.seat, row.backend) == (TEST_REPO, 101, "dorian", "agentic")
+    assert row.created_at and row.started_at
+
+
+def test_transcript_filters_narrow_and_combine(transcript_rows):
+    from sidecar import transcripts
+
+    _record(f"{_TKEY_PREFIX}-b", pr=101, slot="dorian", tool_calls={"Read": 1})
+    _record(f"{_TKEY_PREFIX}-c", pr=102, slot="gray", tool_calls={"Read": 2})
+    _record(f"{_TKEY_PREFIX}-d", pr=102, slot="dorian", tool_calls={"Read": 3})
+
+    assert transcripts.list_transcripts(repo=TEST_REPO).total == 3
+    assert transcripts.list_transcripts(repo=TEST_REPO, pr=102).total == 2
+    assert transcripts.list_transcripts(repo=TEST_REPO, seat="dorian").total == 2
+    # Combining narrows rather than widens.
+    assert transcripts.list_transcripts(repo=TEST_REPO, pr=102, seat="dorian").total == 1
+    assert transcripts.list_transcripts(repo=TEST_REPO, pr=102, seat="nobody").total == 0
+    assert transcripts.list_transcripts(repo="someone/else").total == 0
+
+
+def test_transcript_date_window_is_half_open(transcript_rows):
+    from datetime import UTC, datetime, timedelta
+
+    from sidecar import transcripts
+
+    _record(f"{_TKEY_PREFIX}-e", pr=103, slot="dorian", tool_calls={"Read": 1})
+    now = datetime.now(UTC)
+    assert transcripts.list_transcripts(repo=TEST_REPO, since=now - timedelta(hours=1)).total == 1
+    assert transcripts.list_transcripts(repo=TEST_REPO, since=now + timedelta(hours=1)).total == 0
+    assert transcripts.list_transcripts(repo=TEST_REPO, until=now + timedelta(hours=1)).total == 1
+    assert transcripts.list_transcripts(repo=TEST_REPO, until=now - timedelta(hours=1)).total == 0
+
+
+def test_total_counts_the_window_not_the_page(transcript_rows):
+    from sidecar import transcripts
+
+    for n in range(3):
+        _record(f"{_TKEY_PREFIX}-p{n}", pr=104, slot="dorian", tool_calls={"Read": n})
+    page = transcripts.list_transcripts(repo=TEST_REPO, limit=1)
+    assert len(page.rows) == 1 and page.total == 3
+    assert transcripts.list_transcripts(repo=TEST_REPO, limit=1, offset=9).rows == ()
+
+
+def test_a_transcript_with_no_run_row_still_lists(transcript_rows):
+    """The reference is a separate transaction, so a row can stand on its own."""
+    import json as _json
+
+    from sidecar import transcripts
+    from sidecar.db import db
+
+    key = f"{_TKEY_PREFIX}-orphan"
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO review_transcripts (key, complete, tool_calls, tool_result_bytes, "
+            "repeated_read_files) VALUES (%s, %s, %s::jsonb, %s, %s)",
+            (key, False, _json.dumps({"Bash": 4}), 9_000_000_000, 0),
+        )
+    # MAX_ROWS, not the default page: on a persistent local database with more
+    # than a page of transcripts the orphan would fall off page one and the
+    # test would fail for a reason that has nothing to do with the query.
+    rows = [
+        r for r in transcripts.list_transcripts(limit=transcripts.MAX_ROWS).rows if r.key == key
+    ]
+    assert len(rows) == 1
+    assert rows[0].repo is None and rows[0].pr is None and rows[0].seat is None
+    assert rows[0].complete is False
+    # BIGINT, not INTEGER: a long review's tool results are past 2^31 bytes.
+    assert rows[0].tool_result_bytes == 9_000_000_000
+    # And a repo filter excludes it, because nothing claims it for a repo.
+    assert transcripts.list_transcripts(repo=TEST_REPO).total == 0
+
+
+def test_a_redelivered_metrics_post_lists_the_transcript_once(transcript_rows):
+    """`review_runs` has no ON CONFLICT, so one key really can have two run rows."""
+    from sidecar import transcripts
+
+    key = f"{_TKEY_PREFIX}-dup"
+    _record(key, pr=105, slot="dorian", tool_calls={"Read": 1})
+    _record(key, pr=105, slot="dorian", tool_calls={"Read": 1})
+
+    page = transcripts.list_transcripts(repo=TEST_REPO)
+    assert [r.key for r in page.rows] == [key]
+    assert page.total == 1
+
+
+def test_transcripts_endpoint_over_a_live_index(transcript_rows):
+    from fastapi.testclient import TestClient
+
+    from sidecar.main import app
+
+    _record(f"{_TKEY_PREFIX}-http", pr=106, slot="sybil", tool_calls={"Read": 7})
+    client = TestClient(app, headers=_AUTH)
+    body = client.get("/transcripts", params={"repo": TEST_REPO, "pr": 106}).json()
+    assert body["count"] == 1
+    assert body["transcripts"][0]["seat"] == "sybil"
+    assert body["transcripts"][0]["tool_calls"] == {"Read": 7}

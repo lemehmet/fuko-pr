@@ -1,0 +1,286 @@
+"""Tests for ``fuko transcripts`` (the network call is faked), #240."""
+
+import argparse
+import io
+import json
+import urllib.error
+
+import pytest
+
+from sidecar import cli, transcriptscli
+
+_ROW = {
+    "key": "20260901T120000Z-a1b2c3d4e5f6",
+    "created_at": "2026-09-01T12:00:00+00:00",
+    "complete": True,
+    "tool_calls": {"Read": 182, "Grep": 9, "Bash": 23, "Edit": 2, "Glob": 1},
+    "tool_result_bytes": 41_943_040,
+    "repeated_read_files": 37,
+    "repo": "lemehmet/mepro",
+    "pr": 42,
+    "seat": "dorian",
+    "provider": "openrouter",
+    "model": "qwen3.8-max",
+    "backend": "agentic",
+    "outcome": "ok",
+    "started_at": "2026-09-01T11:58:00+00:00",
+    "duration_s": 612.5,
+}
+
+
+def _ns(**kw):
+    defaults = dict(
+        repo=None,
+        pr=None,
+        seat=None,
+        since=None,
+        until=None,
+        limit=50,
+        offset=0,
+        full=False,
+        json=False,
+    )
+    defaults.update(kw)
+    return argparse.Namespace(**defaults)
+
+
+class _FakeResponse(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
+@pytest.fixture(autouse=True)
+def _env(monkeypatch):
+    monkeypatch.setenv("FUKO_AUTH_TOKEN", "t")
+    monkeypatch.setenv("FUKO_URL", "http://sidecar:8000")
+
+
+# --- listing.
+
+
+def test_list_calls_the_endpoint_and_prints_the_figures(monkeypatch, capsys):
+    seen = {}
+
+    def fake(path, params=None):
+        seen.update(path=path, params=params)
+        return {"transcripts": [_ROW], "count": 7}
+
+    monkeypatch.setattr(transcriptscli, "_call", fake)
+    transcriptscli._list(_ns())
+    out = capsys.readouterr().out
+    assert seen["path"] == "/transcripts"
+    assert "1 shown · 7 total" in out
+    assert "lemehmet/mepro#42" in out and "dorian" in out
+    assert "complete" in out and "INCOMPLETE" not in out
+    assert "217 calls" in out and "Read=182" in out
+    assert "40.0 MiB results" in out
+    assert "37 files re-read" in out
+
+
+def test_list_caps_the_tool_list_unless_full(monkeypatch, capsys):
+    monkeypatch.setattr(transcriptscli, "_call", lambda p, params=None: {"transcripts": [_ROW]})
+    transcriptscli._list(_ns())
+    capped = capsys.readouterr().out
+    assert "+1 more" in capped and "Glob=1" not in capped
+
+    transcriptscli._list(_ns(full=True))
+    full = capsys.readouterr().out
+    assert "Glob=1" in full and "+1 more" not in full
+    # --full also shows how the run itself ended.
+    assert "ok in 612.5s via openrouter (agentic)" in full
+
+
+def test_list_flags_an_incomplete_transcript(monkeypatch, capsys):
+    row = {**_ROW, "complete": False}
+    monkeypatch.setattr(transcriptscli, "_call", lambda p, params=None: {"transcripts": [row]})
+    transcriptscli._list(_ns())
+    assert "INCOMPLETE" in capsys.readouterr().out
+
+
+def test_list_names_a_transcript_no_run_row_claims(monkeypatch, capsys):
+    row = {**_ROW, "repo": None, "pr": None, "seat": None, "model": None, "started_at": None}
+    monkeypatch.setattr(transcriptscli, "_call", lambda p, params=None: {"transcripts": [row]})
+    transcriptscli._list(_ns())
+    out = capsys.readouterr().out
+    assert "(no run row)" in out and "None" not in out
+
+
+def test_list_forwards_every_filter(monkeypatch):
+    seen = {}
+
+    def fake(path, params=None):
+        seen.update(params)
+        return {"transcripts": [], "count": 0}
+
+    monkeypatch.setattr(transcriptscli, "_call", fake)
+    transcriptscli._list(
+        _ns(
+            repo="o/r", pr=7, seat="gray", since="2026-08-01", until="2026-09-01", limit=5, offset=2
+        )
+    )
+    assert seen == {
+        "repo": "o/r",
+        "pr": 7,
+        "seat": "gray",
+        "since": "2026-08-01",
+        "until": "2026-09-01",
+        "limit": 5,
+        "offset": 2,
+    }
+
+
+def test_list_json_prints_the_body_unchanged(monkeypatch, capsys):
+    body = {"transcripts": [_ROW], "count": 1}
+    monkeypatch.setattr(transcriptscli, "_call", lambda p, params=None: body)
+    transcriptscli._list(_ns(json=True))
+    assert json.loads(capsys.readouterr().out) == body
+
+
+def test_a_run_with_no_tool_calls_says_so_rather_than_showing_nothing(monkeypatch, capsys):
+    row = {**_ROW, "tool_calls": {}}
+    monkeypatch.setattr(transcriptscli, "_call", lambda p, params=None: {"transcripts": [row]})
+    transcriptscli._list(_ns())
+    assert "no tool calls" in capsys.readouterr().out
+
+
+# --- the transport's failure modes: none of them may look like an empty corpus.
+
+
+def test_a_missing_token_is_fatal_before_any_request(monkeypatch):
+    monkeypatch.delenv("FUKO_AUTH_TOKEN")
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._url("/transcripts")
+    assert "FUKO_AUTH_TOKEN" in str(e.value)
+
+
+def test_an_unreachable_sidecar_exits_non_zero(monkeypatch):
+    def boom(req, timeout=None):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(transcriptscli.urllib.request, "urlopen", boom)
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._call("/transcripts")
+    assert "cannot reach http://sidecar:8000" in str(e.value)
+
+
+@pytest.mark.parametrize(
+    ("code", "detail", "expected"),
+    [
+        (503, "transcript index needs the Postgres store", "503"),
+        (404, "no transcript stored under abc123", "404"),
+        (400, "invalid blob key '..'", "400"),
+    ],
+)
+def test_an_http_error_exits_with_the_sidecars_own_taxonomy(monkeypatch, code, detail, expected):
+    def boom(req, timeout=None):
+        raise urllib.error.HTTPError(
+            "http://sidecar:8000/transcripts",
+            code,
+            "Service Unavailable",
+            {},
+            io.BytesIO(json.dumps({"detail": detail}).encode()),
+        )
+
+    monkeypatch.setattr(transcriptscli.urllib.request, "urlopen", boom)
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._call("/transcripts")
+    message = str(e.value)
+    assert expected in message and detail in message
+
+
+def test_a_non_json_body_is_reported_verbatim(monkeypatch):
+    def boom(req, timeout=None):
+        raise urllib.error.HTTPError(
+            "http://sidecar:8000/transcripts", 502, "Bad Gateway", {}, io.BytesIO(b"<html>nginx")
+        )
+
+    monkeypatch.setattr(transcriptscli.urllib.request, "urlopen", boom)
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._call("/transcripts")
+    assert "nginx" in str(e.value)
+
+
+def test_a_non_json_success_body_is_fatal_not_an_empty_listing(monkeypatch):
+    monkeypatch.setattr(
+        transcriptscli.urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(b"nope")
+    )
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._call("/transcripts")
+    assert "non-JSON" in str(e.value)
+
+
+# --- fetch.
+
+
+def test_get_writes_the_stored_bytes_to_stdout(monkeypatch, capsysbinary):
+    body = b'{"type":"assistant"}\n{"type":"result"}\n'
+    monkeypatch.setattr(
+        transcriptscli.urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(body)
+    )
+    transcriptscli._get(argparse.Namespace(key="abc123", out=None))
+    assert capsysbinary.readouterr().out == body
+
+
+def test_get_writes_to_a_file_when_asked(monkeypatch, tmp_path, capsys):
+    body = b'{"type":"result"}\n' * 3
+    monkeypatch.setattr(
+        transcriptscli.urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(body)
+    )
+    out = tmp_path / "session.ndjson"
+    transcriptscli._get(argparse.Namespace(key="abc123", out=str(out)))
+    assert out.read_bytes() == body
+    # The receipt goes to stderr so `--out` still leaves stdout clean.
+    assert f"wrote {len(body)} bytes" in capsys.readouterr().err
+
+
+def test_get_url_encodes_the_key(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        transcriptscli.urllib.request,
+        "urlopen",
+        lambda req, timeout=None: (seen.update(url=req.full_url), _FakeResponse(b""))[1],
+    )
+    transcriptscli._get(argparse.Namespace(key="../etc/passwd", out=None))
+    assert seen["url"] == "http://sidecar:8000/transcripts/..%2Fetc%2Fpasswd"
+
+
+def test_get_of_an_absent_key_exits_non_zero(monkeypatch):
+    def boom(req, timeout=None):
+        raise urllib.error.HTTPError(
+            "http://sidecar:8000/transcripts/x",
+            404,
+            "Not Found",
+            {},
+            io.BytesIO(b'{"detail":"no transcript stored under x"}'),
+        )
+
+    monkeypatch.setattr(transcriptscli.urllib.request, "urlopen", boom)
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._get(argparse.Namespace(key="x", out=None))
+    assert "404" in str(e.value)
+
+
+# --- registration.
+
+
+def test_the_subcommand_is_registered_and_parses(monkeypatch):
+    called = {}
+    monkeypatch.setattr(transcriptscli, "_list", lambda args: called.update(vars(args)))
+    monkeypatch.setattr(
+        cli.sys, "argv", ["fuko", "transcripts", "list", "--repo", "o/r", "--pr", "9"]
+    )
+    cli.main()
+    assert called["repo"] == "o/r" and called["pr"] == 9
+
+
+def test_get_is_registered(monkeypatch):
+    called = {}
+    monkeypatch.setattr(transcriptscli, "_get", lambda args: called.update(vars(args)))
+    monkeypatch.setattr(cli.sys, "argv", ["fuko", "transcripts", "get", "k1", "-o", "f.ndjson"])
+    cli.main()
+    assert called["key"] == "k1" and called["out"] == "f.ndjson"
+    assert called["transcripts_cmd"] == "get"

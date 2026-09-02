@@ -434,3 +434,56 @@ class RunSummaryResponse(BaseModel):
     """Body returned by ``GET /metrics/summary``."""
 
     summary: list[RunSummaryRow] = Field(default_factory=list)
+
+
+class TranscriptRunRow(BaseModel):
+    """One captured transcript returned by ``GET /transcripts`` (#240).
+
+    Mirrors :class:`sidecar.transcripts.TranscriptRun` field for field, because
+    a ``response_model`` silently DROPS undeclared keys -- a figure missing from
+    this class is a figure the listing cannot show, and it would look exactly
+    like a figure the run did not produce.
+
+    The transcript's own five values are required: the index row exists only for
+    a transcript that reached storage and every column behind them is NOT NULL.
+    Everything from the run row is optional, because that row is written in a
+    separate transaction afterwards and may never have followed.
+    """
+
+    key: str = Field(description="The transcript's own key; names its blob in the store.")
+    created_at: str | None = None
+    complete: bool = Field(
+        description=(
+            "Whether the captured feed reached its terminal `result` event. False means "
+            "the stored bytes are a prefix of a run that was cut short -- a short "
+            "session, not a cheap one."
+        )
+    )
+    tool_calls: dict[str, int] = Field(
+        default_factory=dict, description="Call counts keyed by tool name."
+    )
+    tool_result_bytes: int = 0
+    repeated_read_files: int = Field(
+        default=0,
+        description="Distinct files read more than once; one file read three times counts once.",
+    )
+    repo: str | None = None
+    pr: int | None = None
+    seat: str | None = Field(
+        default=None, description="The run's slot -- the lane label a model occupied."
+    )
+    provider: str | None = None
+    model: str | None = None
+    backend: str | None = None
+    outcome: str | None = None
+    started_at: str | None = None
+    duration_s: float | None = None
+
+
+class TranscriptListResponse(BaseModel):
+    """Body returned by ``GET /transcripts``: one page, plus how many matched."""
+
+    transcripts: list[TranscriptRunRow] = Field(default_factory=list)
+    count: int = Field(
+        default=0, description="Transcripts matching the filters, not just those on this page."
+    )

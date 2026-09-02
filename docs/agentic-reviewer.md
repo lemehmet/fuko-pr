@@ -647,7 +647,49 @@ column — `transcript_key` — pointing at it:
   is a local file. Those runs still get their `review_runs` row — they get a
   NULL `transcript_key`.
 
-The readers (#240, #241) are the rest of the epic; nothing reads the blobs yet.
+### Reading the corpus (`fuko transcripts`)
+
+The first reader (#240). An HTTP client over the running sidecar — the same
+`FUKO_URL` + `FUKO_AUTH_TOKEN` pair `fuko kb` uses, because the sidecar is what
+holds both the index (Postgres) and the blobs (object storage):
+
+```bash
+fuko transcripts list --repo owner/name --pr 42        # who reviewed this PR, and on what
+fuko transcripts list --seat dorian --since 2026-08-30 # one lane, one window
+fuko transcripts list --full --json                    # every tool, machine-readable
+fuko transcripts get <key> | grep '"tool_use"'         # the session itself
+fuko transcripts get <key> -o session.ndjson
+```
+
+A listing line carries the run's identity (key, `repo#pr`, seat, model, when)
+and what it spent: per-tool call counts, total tool-result bytes, how many files
+it re-read, and — called out in capitals — whether the transcript is
+`INCOMPLETE`, so a session that was cut short is never read as a cheap one.
+
+Three properties worth knowing before you trust an empty answer:
+
+- **An unconfigured or unreachable store is never an empty list.** Both exit
+  non-zero with a message naming which one it was — `FUKO_DATABASE_URL` unset is
+  a deployment that keeps no index, an unreachable Postgres is a fault. Same
+  fail-unsafe direction as the ledger page (#235): "nothing found" and "could
+  not look" must not render identically.
+- **`get` gives you the bytes**, not a rendering, so a pipe to `grep`, `jq` or a
+  pager works on the real feed. That is the epic's answer for content search —
+  nothing is full-text indexed, by decision.
+- **The listing is over `review_transcripts`**, so a run that produced no
+  transcript (every pr-agent run, everything predating capture) is absent rather
+  than shown with empty figures. The converse — a blob stored under a key the
+  index never recorded (#258) — is fetchable by key and simply not listed;
+  `get` deliberately does not consult the index.
+
+Filters are AND-ed, so combining them narrows. `--since` is inclusive and
+`--until` exclusive, both UTC when given as a bare date, so adjacent windows
+tile without counting a transcript twice.
+
+#241's `/ui` page shares these query shapes rather than reimplementing them:
+they live in `sidecar/transcripts.py` (`list_transcripts`, `fetch`), which is
+what that page will import, the way `sidecar/web/ledger.py` imports
+`sidecar/review_state.py`.
 
 ## Configuration
 

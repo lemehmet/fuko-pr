@@ -3,7 +3,7 @@
 import sys
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
 
@@ -13,6 +13,7 @@ from . import review_state
 from . import review_state_client as rs
 from . import reviewer_health
 from . import run_metrics
+from . import transcripts
 from . import web
 from . import threads as threads_mod
 from .config import settings
@@ -467,6 +468,115 @@ async def transcripts_put_endpoint(key: str, request: Request) -> dict:
             status.HTTP_503_SERVICE_UNAVAILABLE, f"transcript store failed: {e}"
         ) from e
     return {"stored": True, "key": key, "bytes": len(body)}
+
+
+@app.get(
+    "/transcripts", response_model=models.TranscriptListResponse, dependencies=[Depends(_auth)]
+)
+def transcripts_list_endpoint(
+    repo: str | None = None,
+    pr: int | None = None,
+    seat: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int = transcripts.DEFAULT_ROWS,
+    offset: int = 0,
+) -> dict:
+    """List captured transcripts, newest first, with the run that produced each (#240).
+
+    Three states an operator must be able to tell apart, so none of them is an
+    empty ``200``:
+
+    * **503, no store** -- ``FUKO_DATABASE_URL`` is unset, so this deployment
+      keeps no index and never will until it is configured. Tested HERE rather
+      than inside the read for :mod:`sidecar.web.ledger`'s reason: with no URL
+      the connection fails on the way to the pool, and a deployment that was
+      never set up would be reported as a broken one.
+    * **503, unreachable** -- the store is configured and did not answer. The
+      read raises deliberately (see :mod:`sidecar.transcripts`); swallowing it
+      would render exactly the empty list a healthy, empty corpus does.
+    * **200 with nothing** -- the corpus really is empty for these filters.
+
+    ``since``/``until`` are taken as TEXT, not as typed ``datetime`` parameters:
+    a malformed one is then this endpoint's own 400 naming the offending value,
+    rather than a 422 body about a query parameter, and the same strings a
+    ``/ui`` form will submit parse through one function
+    (:func:`sidecar.transcripts._instant`) for both readers.
+    """
+    if not settings.database_url:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "transcript index needs the Postgres store (FUKO_DATABASE_URL unset); "
+            "this is not an empty corpus",
+        )
+    try:
+        page = transcripts.list_transcripts(
+            repo=repo, pr=pr, seat=seat, since=since, until=until, limit=limit, offset=offset
+        )
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    except Exception as e:
+        transcripts.log_read_failure("listing", e)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"transcript index unreachable: {e}; this is a fault, not an empty corpus",
+        ) from e
+    return {"transcripts": [row.as_dict() for row in page.rows], "count": page.total}
+
+
+@app.get("/transcripts/{key}", dependencies=[Depends(_auth)])
+async def transcripts_get_endpoint(key: str) -> Response:
+    """Return one stored transcript's bytes verbatim (#240).
+
+    The bytes AS STORED, as ``application/x-ndjson``, so the operator's pipe to
+    a pager or a ``grep`` sees the real feed; #236 made fetch-and-grep the
+    answer for content search and a formatter here would be the thing that
+    breaks it.
+
+    The status taxonomy is the POST's, read backwards, so a caller that already
+    handles one handles the other -- and 404 means only one thing:
+
+    * **400** -- the key is not a well-formed blob key.
+    * **503** -- nothing here can serve a transcript: ``unconfigured`` (marked
+      with the ``X-Fuko-Transcript-Store`` header, the same off-state marker the
+      upload path uses) or a deployment fault, which is logged on this side.
+    * **404** -- the store answered and holds nothing under that key.
+
+    Kept apart because the whole sub-issue turns on it: an operator who cannot
+    tell "no such transcript" from "could not look" will read a broken store as
+    a corpus that never captured the run.
+
+    ``async`` with the read handed to the threadpool for the upload path's
+    reason: boto3's ``get_object`` blocks, and a multi-megabyte transcript
+    fetched inline would hold the event loop -- and with it ``/healthz`` -- for
+    the length of the download.
+    """
+    try:
+        validate_blob_key(key)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    try:
+        data = await run_in_threadpool(transcripts.fetch, key)
+    except transcripts.StoreUnconfigured as e:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            str(e),
+            headers={STORE_HEADER: STORE_UNCONFIGURED},
+        ) from e
+    except Exception as e:
+        # A store that is configured and unusable: an unknown backend, a root
+        # that cannot be resolved, a missing `boto3`, credentials boto3 never
+        # resolved, an endpoint that does not answer. Caught as broadly as the
+        # taxonomy is stated, for the upload path's reason -- anything not
+        # mapped here reaches the operator as a 500 and a traceback instead of
+        # the deployment fault it is.
+        transcripts.log_read_failure(f"fetch of {key}", e)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, f"transcript store unusable: {e}"
+        ) from e
+    if data is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"no transcript stored under {key}")
+    return Response(content=bytes(data), media_type="application/x-ndjson")
 
 
 @app.post("/rh/observe", dependencies=[Depends(_auth)])

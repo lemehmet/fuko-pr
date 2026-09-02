@@ -219,6 +219,18 @@ fuko kb forget owner/name --id <uuid>
 
 (`fuko query`/`fuko forget` do the same against the *local* store via `.fuko.toml`.)
 
+`fuko transcripts` reads the agentic session corpus over the same two variables —
+which runs reviewed a PR, what each spent its turns on, and the session itself:
+
+```bash
+fuko transcripts list --repo owner/name --pr 42   # + --seat/--since/--until/--full/--json
+fuko transcripts get <key> | grep '"tool_use"'    # the stored NDJSON, verbatim
+```
+
+An unconfigured or unreachable store exits non-zero rather than printing the
+empty list a healthy, empty corpus prints. See
+[`docs/agentic-reviewer.md`](docs/agentic-reviewer.md).
+
 ## Configuration
 
 - **`.fuko.toml`** (committed, per-repo): backend, model provider, tools, store.
