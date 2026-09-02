@@ -527,11 +527,20 @@ _STORE_NOTICES = {
 
 
 def _session_notices(*, store_state: str, db_enabled: bool, db_error: bool, indexed: bool) -> str:
-    """Render the session view's store states: the blob's, then the index's."""
+    """Render the session view's store states: the blob's, then the index's.
+
+    Nothing is said about the index that the reads do not license. A key
+    rejected at the boundary was never looked up in either place, and the
+    absence of an index row only means "stored but unindexed" (#258) when the
+    store actually handed over bytes -- otherwise the page would answer "nothing
+    is here" and "this is a real stored session" in the same breath.
+    """
     parts = []
     message = _STORE_NOTICES.get(store_state)
     if message:
         parts.append(c.notice(message[0], kind=message[1]))
+    if store_state == "invalid":
+        return "".join(parts)
     if not db_enabled:
         parts.append(
             c.notice(
@@ -548,7 +557,7 @@ def _session_notices(*, store_state: str, db_enabled: bool, db_error: bool, inde
                 kind="danger",
             )
         )
-    elif not indexed:
+    elif not indexed and store_state == "ok":
         parts.append(
             c.notice(
                 "No index row for this key. A transcript can reach shared storage without "

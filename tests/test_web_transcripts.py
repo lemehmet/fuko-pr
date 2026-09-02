@@ -383,6 +383,33 @@ def test_a_configured_but_broken_store_is_a_fault_not_a_bad_key(wire, client):
     assert "not a well-formed transcript key" not in text
 
 
+def test_a_malformed_key_reports_nothing_about_the_index(wire, client):
+    """Neither read ran, so the page has nothing it may say about the index."""
+    wire()
+    _sign_in(client)
+    text = client.get(f"{page.PAGE.path}?key=..%2Fetc%2Fpasswd").text
+    assert "not a well-formed transcript key" in text
+    assert "No index row for this key" not in text
+    assert "real stored session" not in text
+
+
+def test_a_key_that_holds_nothing_is_not_also_a_real_stored_session(wire, client):
+    """The #258 claim needs bytes behind it: "holds nothing" and "is stored" cannot both run."""
+    wire(blob=None, run=None)
+    _sign_in(client)
+    text = client.get(f"{page.PAGE.path}?key=k").text
+    assert "holds nothing under this key" in text
+    assert "real stored session" not in text
+
+
+def test_an_unreachable_store_makes_no_claim_about_a_stored_session(wire, client):
+    wire(blob_error=RuntimeError("connection reset"), run=None)
+    _sign_in(client)
+    text = client.get(f"{page.PAGE.path}?key=k").text
+    assert "Transcript store unreachable" in text
+    assert "real stored session" not in text
+
+
 def test_a_key_that_holds_nothing_says_so(wire, client):
     wire(blob=None)
     _sign_in(client)
