@@ -29,7 +29,14 @@ timeout. It is paid for here rather than papered over:
 * exactly ONE attempt. The blob is write-once, so a retry after a client-side
   timeout races the upload that may already have landed and answers ``409``;
   and a transcript is an observability artifact, so a second chance at it is
-  worth less than the wall-clock it charges the review's completion path.
+  worth less than the wall-clock it charges the review's completion path. The
+  worst case that costs is :data:`UPLOAD_CEILING_S`, stated in full there;
+* a sidecar that has no store CONFIGURED answers ``503`` with
+  ``X-Fuko-Transcript-Store: unconfigured``, which is the off state rather than
+  a failure and is silent here -- so turning capture on before storage, the
+  staged rollout the deployment docs recommend, does not print a line per run.
+  A 503 without that header is a store that was meant to work and does not, and
+  reports like anything else.
 
 The ``FUKO_URL``-unset path (a laptop ``fuko review``, or a host that IS the
 sidecar) writes straight to the configured store, mirroring
@@ -45,14 +52,18 @@ from pathlib import Path
 
 import httpx
 
+from ..objectstore import STORE_HEADER, STORE_UNCONFIGURED
+
 #: How long the runner will wait for a transcript upload, in seconds.
 #:
 #: ``/metrics/run``'s 10s prices a small JSON row on a LAN; this prices a
 #: multi-megabyte NDJSON body, and the acceptance criterion it answers is that
 #: an upload substantially larger than a metrics row completes without tripping
-#: the timeout governing its path. It is also the entire latency this adds to a
-#: review's completion in the worst case, which is why it is a ceiling rather
-#: than a generous ceiling.
+#: the timeout governing its path.
+#:
+#: It bounds the BODY TRANSFER absolutely (:func:`_deadlined`). The whole
+#: request's worst case is :data:`UPLOAD_CEILING_S`, which is this plus the
+#: phases a clock check cannot interleave with.
 UPLOAD_TIMEOUT_S = 120.0
 
 #: How much of the file is handed to the transport at a time.
@@ -69,6 +80,28 @@ UPLOAD_CHUNK_BYTES = 64 * 1024
 #: :func:`_deadlined`); connecting and waiting for the response are still
 #: phase-scoped, because there is nothing to interleave a clock check with.
 CONNECT_TIMEOUT_S = 10.0
+
+#: Bound on one socket write and on waiting for the response.
+#:
+#: Deliberately far below :data:`UPLOAD_TIMEOUT_S`. The deadline is only tested
+#: BETWEEN chunks, so the chunk in flight when it passes still runs out its own
+#: write timeout; giving that phase the full ceiling would make the true worst
+#: case several multiples of the number this module promises. Thirty seconds for
+#: :data:`UPLOAD_CHUNK_BYTES` is 2 KB/s, which no working peer approaches, and
+#: for the response it is a few hundred bytes of JSON.
+PHASE_TIMEOUT_S = 30.0
+
+#: A CONSERVATIVE bound on what this module can cost a review's completion.
+#:
+#: Stated rather than implied, because the arithmetic is the whole point: a
+#: connect, then the absolutely-bounded body, then one more phase. Conservative
+#: because the last term cannot be paid twice -- either the deadline passes and
+#: the run ends inside the write already in flight (no response is ever
+#: awaited), or the body finishes in time and only the response remains. It is
+#: summed once for whichever occurs. Nothing else is attempted -- there is no
+#: retry -- so this is the ceiling, not a typical cost (a real upload finishes
+#: in well under a second on a LAN).
+UPLOAD_CEILING_S = CONNECT_TIMEOUT_S + UPLOAD_TIMEOUT_S + PHASE_TIMEOUT_S
 
 
 def _deadlined(handle, deadline: float) -> Iterator[bytes]:
@@ -133,7 +166,22 @@ def ship(key: str, path: Path) -> None:
             content=_deadlined(handle, deadline),
             headers=headers,
             timeout=httpx.Timeout(
-                UPLOAD_TIMEOUT_S, connect=CONNECT_TIMEOUT_S, pool=CONNECT_TIMEOUT_S
+                connect=CONNECT_TIMEOUT_S,
+                read=PHASE_TIMEOUT_S,
+                write=PHASE_TIMEOUT_S,
+                pool=CONNECT_TIMEOUT_S,
             ),
         )
+    if resp.status_code == 503 and resp.headers.get(STORE_HEADER) == STORE_UNCONFIGURED:
+        # Storage is not turned on. That is the OFF STATE, not this run's
+        # failure: reporting it would print a line per run, per seat, on every
+        # fleet that turned capture on before storage -- which is the staged
+        # rollout the deployment docs recommend.
+        #
+        # ONLY this shape. A 503 without the header means a store that was
+        # meant to work does not (an unknown backend, a missing bucket, a
+        # bucket backend without boto3), and swallowing that would make the
+        # feature store nothing in silence -- the exact failure the endpoint's
+        # distinguished statuses exist to prevent. It raises like any other.
+        return
     resp.raise_for_status()

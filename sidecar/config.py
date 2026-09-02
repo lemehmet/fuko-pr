@@ -89,8 +89,12 @@ class Settings(BaseSettings):
     transcript_store_endpoint_url: str = ""  # s3/r2: set for R2 and S3-compatibles
     # Names the two credential variables read for s3/r2:
     # <prefix>_ACCESS_KEY_ID and <prefix>_SECRET_ACCESS_KEY (plus <prefix>_REGION).
-    # Renaming it means adding the new names to `agentic._FUKO_SECRET_VARS`, or
-    # the transcript stops being scrubbed of the credential that stores it.
+    # Renaming it needs no source edit: `agentic._store_credential_vars()`
+    # derives the two names from THIS setting at run time and feeds them to
+    # both the harness-environment strip and the transcript scrub list. That
+    # derivation is the mechanism -- `agentic._FUKO_SECRET_VARS`' literal
+    # `FUKO_S3_*` entries only cover the default when settings are absent, and
+    # deleting the derivation as redundant with them would reopen the leak.
     transcript_store_creds_env_prefix: str = "FUKO_S3"
     # Largest transcript the sidecar will accept in one upload. A ceiling on
     # what a single request can make the process hold, not a policy about

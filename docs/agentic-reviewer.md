@@ -578,14 +578,26 @@ for trying the path out before there is a bucket.
   workflow artifact upload still works.
 - **Unconfigured stays working.** No `FUKO_TRANSCRIPT_STORE_BACKEND` means the
   sidecar starts, reviews run, and transcripts are simply absent from storage.
-  With capture on and no store reachable the runner does not even attempt an
-  upload; with a store that rejects the write it is one stderr line and a review
-  identical to one with no capture at all.
+  A runner with no destination at all (no `FUKO_URL`, no local store) does not
+  even wrap the sink, so it never attempts an upload. A runner that ships to a
+  sidecar whose store is unconfigured attempts once, gets a `503`, and treats
+  that as the off state — silently, so staging capture ahead of storage does
+  not print a line per run. Any *other* rejection is one stderr line and a
+  review identical to one with no capture at all.
 - **It costs the review at most one timeout.** The upload happens once, at
-  close, on the finished file, streamed off disk under a 120-second ceiling —
-  an order of magnitude above `/metrics/run`'s 10 seconds, which is why it is
-  not that endpoint. There is no retry: the blob is write-once, so a retry after
-  a client-side timeout would race an upload that may already have landed.
+  close, on the finished file, streamed off disk in 64 KiB chunks under an
+  absolute 120-second body deadline — an order of magnitude above
+  `/metrics/run`'s 10 seconds, which is why it is not that endpoint. `httpx`
+  has no request lifetime, only per-phase timeouts, so the deadline rides on
+  the body stream itself; the phases it cannot interleave with (connect, the
+  one write already in flight, the response) are bounded separately, and the
+  true worst case is `transcript_client.UPLOAD_CEILING_S` — 160 seconds. There
+  is no retry: the blob is write-once, so a retry after a client-side timeout
+  would race an upload that may already have landed.
+- **A local blob store is denied to the agent.** With the `file` backend on the
+  host that runs the harness, the store root is a second, longer-lived copy of
+  the transcript corpus, so it goes into the reviewer's read denylist beside
+  `FUKO_TRANSCRIPT_DIR` — same reasoning, same rule.
 
 The derived per-tool metrics (#239) and the readers (#240, #241) are the rest of
 the epic; nothing reads the blobs yet.

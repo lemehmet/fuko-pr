@@ -96,9 +96,15 @@ DENIED_TOOLS = (
 #: Claude Code does not know the name.
 _ENV_AMBIENT_CONFIG_DIR = "FUKO_AMBIENT_CLAUDE_CONFIG_DIR"
 
-#: Set by a caller that captures session transcripts, carrying the destination
-#: purely so the read denylist can cover it. Consumed only by
-#: :func:`_permission_settings`; nothing here writes through it.
+#: Set by a caller that captures session transcripts, carrying every directory
+#: a transcript can land in purely so the read denylist can cover them all.
+#: Consumed only by :func:`_permission_settings`; nothing here writes through it.
+#:
+#: NEWLINE-separated, because there is more than one such directory once #238
+#: adds a local blob store: the capture destination and, where the ``file``
+#: backend is configured on this host, the store root the finished transcripts
+#: are shipped into. A newline rather than ``os.pathsep``, whose POSIX value
+#: ``:`` also separates a Windows drive letter from its path.
 #:
 #: It has its own name rather than riding ``FUKO_TRANSCRIPT_DIR`` because that
 #: one is stripped with the rest of the ``FUKO_`` namespace before the spawn, so
@@ -253,9 +259,15 @@ def _permission_settings(env: dict[str, str]) -> str:
     # Denied whenever a destination is configured, not only when THIS run
     # captures: the files an earlier round left behind are the ones worth
     # reading, and they outlive the run that wrote them.
-    transcript_deny = (env.get(_ENV_TRANSCRIPT_DENY_DIR) or "").replace("\\", "/").rstrip("/")
-    if transcript_deny:
-        candidates.append((transcript_deny, True))
+    #
+    # EVERY directory, not just the capture one: with #238's `file` backend on
+    # this host the shipped blobs are a second, longer-lived copy of the same
+    # corpus, and a rule covering only `FUKO_TRANSCRIPT_DIR` would leave it
+    # exactly as readable as the capture directory was before #237 denied it.
+    for entry in (env.get(_ENV_TRANSCRIPT_DENY_DIR) or "").split("\n"):
+        transcript_deny = entry.strip().replace("\\", "/").rstrip("/")
+        if transcript_deny:
+            candidates.append((transcript_deny, True))
     # Unconditional: these do not depend on HOME, and on a runner without one
     # they are the only rules that remain.
     candidates += [(d, True) for d in SENSITIVE_SYSTEM_DIRS]

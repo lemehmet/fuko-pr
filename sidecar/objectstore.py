@@ -168,6 +168,21 @@ def make_object_store(cfg: ObjectStoreConfig):
 # --- Keyed, write-once blobs (#238).
 
 
+#: Marks the ``503`` from ``POST /transcripts/{key}`` that means "no transcript
+#: store is CONFIGURED", so a runner can tell the off state from a deployment
+#: fault (an unknown backend, a missing bucket, an absent ``boto3``) without
+#: parsing prose. Both are 503 because both really are "this service cannot
+#: store"; a caller that ignores the header degrades safely, to reporting.
+#:
+#: The two constants live HERE, in the module that defines what a transcript
+#: blob store is, because that is the only thing the endpoint
+#: (:func:`sidecar.main.transcripts_put_endpoint`) and the runner-side shipper
+#: (:func:`sidecar.reviewer.transcript_client.ship`) already share -- importing
+#: one from the other is a cycle.
+STORE_HEADER = "X-Fuko-Transcript-Store"
+STORE_UNCONFIGURED = "unconfigured"
+
+
 class BlobExists(RuntimeError):
     """Raised when a write-once ``put`` names a key the store already holds."""
 

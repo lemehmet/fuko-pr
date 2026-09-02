@@ -160,10 +160,20 @@ truncated, since a partial blob under a write-once key could never be corrected.
 It is a memory ceiling, not a retention policy — real sessions are tens of MB.
 
 **Growth is unbounded by design** — every agentic seat, every push, kept
-forever (epic #236). Budget for it, and note that renaming
-`FUKO_TRANSCRIPT_STORE_CREDS_ENV_PREFIX` means adding the new variable names to
-the driver's scrub list, or the credential that stores the transcript can be
-written into one.
+forever (epic #236). Budget for it.
+
+Renaming `FUKO_TRANSCRIPT_STORE_CREDS_ENV_PREFIX` needs no source edit: the
+driver derives `<prefix>_ACCESS_KEY_ID` / `<prefix>_SECRET_ACCESS_KEY` from the
+setting at run time and both strips them from the agent's environment and
+scrubs them by value from transcripts.
+
+**Turning capture on before storage is a supported order.** A runner that ships
+to a sidecar with `FUKO_TRANSCRIPT_STORE_BACKEND` unset gets a `503` marked
+`X-Fuko-Transcript-Store: unconfigured`, treats it as the off state, and says
+nothing — you do not get a failure line per run while you stage the rollout. A
+store that was *meant* to work and does not (unknown backend, missing bucket,
+absent `boto3`) is a different `503`: the sidecar logs it and the runner reports
+it, once, on stderr. Neither ever faults the review.
 
 ## Ollama in Docker
 

@@ -45,6 +45,7 @@ import httpx
 
 from ..config import settings
 from ..fukoconfig import ModelConfig, ReviewConfig
+from ..objectstore import BlobStoreConfig
 from ..logfmt import flatten_for_log as _flatten_for_log
 from ..presets import PRESETS, ProviderPreset
 from ..reviewer.checkout import (
@@ -958,8 +959,21 @@ class AgenticBackend:
         except Exception as e:
             print(f"fuko: transcript capture unavailable: {e}", file=sys.stderr)
             deny_dir, refused = None, True
-        if deny_dir is not None:
-            harness_env[_ENV_TRANSCRIPT_DENY_DIR] = str(deny_dir)
+        # Both places a transcript can land on THIS host: the capture directory,
+        # and -- where the local `file` blob store is configured -- the root the
+        # finished transcripts are shipped into (#238). The second is the
+        # longer-lived copy (capture may be rotated; the blob corpus is kept by
+        # design), so a denylist that covered only the first would leave the
+        # bigger prize readable through exactly the channel #237 closed.
+        # Configured is enough; it does not have to be THIS run's destination.
+        deny_dirs = [str(deny_dir)] if deny_dir is not None else []
+        blob_cfg = BlobStoreConfig.from_settings()
+        if blob_cfg.backend == "file" and blob_cfg.root:
+            # `.resolve()` like `transcript_dir()` does: a deny rule written
+            # against a symlinked root is bypassed by naming the real path.
+            deny_dirs.append(str(Path(blob_cfg.root).expanduser().resolve()))
+        if deny_dirs:
+            harness_env[_ENV_TRANSCRIPT_DENY_DIR] = "\n".join(deny_dirs)
         # DELIVERY-side receipt (mepro#2012 r2, both gating seats converged):
         # a workflow validator can only prove the CONFIG carries a window;
         # this line is the one place that knows what the spawned harness

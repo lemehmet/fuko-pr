@@ -15,7 +15,13 @@ from . import run_metrics
 from . import web
 from . import threads as threads_mod
 from .config import settings
-from .objectstore import BlobExists, transcript_store, validate_blob_key
+from .objectstore import (
+    STORE_HEADER,
+    STORE_UNCONFIGURED,
+    BlobExists,
+    transcript_store,
+    validate_blob_key,
+)
 from .stores import current_store
 
 
@@ -314,12 +320,13 @@ async def transcripts_put_endpoint(key: str, request: Request) -> dict:
     The three failure modes are distinguished, because the runner does not
     retry and a caller reading its logs needs to know which happened:
 
-    * **503** -- nothing here can store a transcript: no store configured
-      (the unconfigured deployment stays a working deployment, and this is the
-      honest way to say transcripts are absent), a store configured
-      incompletely, or a bucket backend whose ``boto3`` is not installed. All
-      three are the operator's to fix and none is the caller's, so they answer
-      alike and carry the reason in the detail rather than a traceback.
+    * **503** -- nothing here can store a transcript. Two shapes, told apart by
+      the ``X-Fuko-Transcript-Store`` header rather than by parsing the detail:
+      ``unconfigured`` (no backend set -- the off state, which the runner
+      treats as success so staging capture ahead of storage costs no noise),
+      and no header (configured incompletely, or a bucket backend whose
+      ``boto3`` is missing) -- a deployment fault, which the runner reports and
+      which is logged on this side too.
     * **409** -- the key is taken. Blobs are write-once, so this is a
       re-delivery, never something to resolve by overwriting.
     * **400** -- the key is not a well-formed blob key.
@@ -343,13 +350,26 @@ async def transcripts_put_endpoint(key: str, request: Request) -> dict:
         # is built per request, so this would otherwise reach the caller as a
         # 500 with a traceback on every upload rather than as the deployment
         # fault it is.
+        #
+        # Logged HERE, on stderr, because `HTTPException` writes nothing: the
+        # access log shows a bare 503 and the runner deliberately says nothing
+        # about a 503 it cannot act on. Somebody has to name a store that was
+        # meant to work and does not, or the feature stores nothing in silence.
+        print(f"fuko: transcript store unusable: {e}", file=sys.stderr)
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE, f"transcript store unusable: {e}"
         ) from e
     if store is None:
+        # The header is what separates "the operator has not turned storage on"
+        # from the branch above, which is also a 503. The runner treats only
+        # THIS one as the off state and stays silent for it; a 503 without the
+        # header is a deployment fault and still reports. A header rather than a
+        # distinct status because both really are "this service cannot store",
+        # and a caller that ignores the header degrades safely -- to reporting.
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "no transcript store configured (set FUKO_TRANSCRIPT_STORE_BACKEND)",
+            headers={STORE_HEADER: STORE_UNCONFIGURED},
         )
     # Read against the cap rather than `request.body()`, which is unbounded. A
     # client may omit Content-Length (or state one it then exceeds), so the

@@ -1,4 +1,13 @@
-"""The path a captured transcript takes from the runner into shared storage (#238)."""
+"""The path a captured transcript takes from the runner into shared storage (#238).
+
+Every branch below that asserts the NO-SIDECAR path depends on ``FUKO_URL``
+being unset, which is arranged repo-wide by ``conftest``'s autouse
+``_no_ambient_sidecar`` (it clears ``FUKO_URL`` and ``FUKO_TOKEN`` for every
+test in the suite). The tests that want the HTTP branch set them back
+themselves. Do not add a second fixture here: a module-level one of the same
+name SHADOWS the shared guard, which is worse than nothing the day the shared
+one grows another variable.
+"""
 
 from urllib.parse import urlsplit
 
@@ -8,26 +17,13 @@ from fastapi.testclient import TestClient
 
 from sidecar import main
 from sidecar.config import settings
+from sidecar import objectstore
 from sidecar.objectstore import FileBlobStore, transcript_store
 from sidecar.reviewer import transcript_client
 
 _TOKEN = "test-token"
 KEY = "20260901T101500Z-abcdef012345"
 BODY = b'{"type":"assistant"}\n{"type":"user"}\n{"type":"result"}\n'
-
-
-@pytest.fixture(autouse=True)
-def _no_ambient_sidecar(monkeypatch):
-    """Start every test from "this host has no sidecar".
-
-    `ship` and `upload_target` branch on `FUKO_URL` being unset, and it is a
-    variable a developer or a CI job may legitimately have exported -- under
-    which the no-sidecar assertions below would silently exercise the HTTP
-    branch and POST at whatever host it names. The absence has to be arranged,
-    not assumed; the tests that want the sidecar branch set it themselves.
-    """
-    monkeypatch.delenv("FUKO_URL", raising=False)
-    monkeypatch.delenv("FUKO_TOKEN", raising=False)
 
 
 @pytest.fixture
@@ -177,9 +173,21 @@ def test_the_runner_streams_the_file_to_the_sidecar_under_its_token(tmp_path, mo
     # An order of magnitude above `/metrics/run`'s 10s, which is the whole
     # reason this is not that endpoint. Per-phase, because httpx has no request
     # lifetime -- the absolute bound is `_deadlined`, asserted below.
-    assert seen["timeout"].read == transcript_client.UPLOAD_TIMEOUT_S > 10.0
-    assert seen["timeout"].write == transcript_client.UPLOAD_TIMEOUT_S
+    assert transcript_client.UPLOAD_TIMEOUT_S > 10.0
+    # Per-phase bounds are deliberately FAR below the body deadline: the
+    # deadline is only tested between chunks, so a write phase given the whole
+    # ceiling would make the true worst case several multiples of it.
+    assert seen["timeout"].write == transcript_client.PHASE_TIMEOUT_S
+    assert seen["timeout"].read == transcript_client.PHASE_TIMEOUT_S
     assert seen["timeout"].connect == transcript_client.CONNECT_TIMEOUT_S
+    assert transcript_client.PHASE_TIMEOUT_S < transcript_client.UPLOAD_TIMEOUT_S
+    # Conservative: the deadline path and the response path are exclusive, so
+    # the last phase is counted once for whichever occurs.
+    assert transcript_client.UPLOAD_CEILING_S == (
+        transcript_client.CONNECT_TIMEOUT_S
+        + transcript_client.UPLOAD_TIMEOUT_S
+        + transcript_client.PHASE_TIMEOUT_S
+    )
 
 
 def test_an_upload_that_outlives_its_ceiling_is_abandoned_rather_than_prolonged(
@@ -227,7 +235,7 @@ def test_the_body_is_chunked_by_size_rather_than_by_event(tmp_path, monkeypatch)
     [
         httpx.ConnectError("sidecar unreachable"),
         httpx.ReadTimeout("too slow"),
-        httpx.Response(503, request=httpx.Request("POST", "http://sidecar:8000/")),
+        httpx.Response(500, request=httpx.Request("POST", "http://sidecar:8000/")),
         httpx.Response(409, request=httpx.Request("POST", "http://sidecar:8000/")),
     ],
 )
@@ -243,6 +251,67 @@ def test_every_sidecar_failure_reaches_the_caller_to_be_reported(tmp_path, monke
     path.write_bytes(BODY)
     with pytest.raises(httpx.HTTPError):
         transcript_client.ship(KEY, path)
+
+
+def test_a_sidecar_with_storage_turned_off_is_the_off_state_not_a_failure(tmp_path, monkeypatch):
+    """Storage not configured is the OFF state. Reporting it would print one
+    "capture failed" line per agentic run on every fleet that stages capture
+    ahead of storage, which is the rollout order the deployment docs
+    recommend."""
+
+    def fake_post(url, content=None, headers=None, timeout=None):
+        b"".join(content)
+        return httpx.Response(
+            503,
+            headers={objectstore.STORE_HEADER: objectstore.STORE_UNCONFIGURED},
+            json={"detail": "no transcript store configured (set FUKO_TRANSCRIPT_STORE_BACKEND)"},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setenv("FUKO_URL", "http://sidecar:8000")
+    monkeypatch.setattr(httpx, "post", fake_post)
+    path = tmp_path / "t.ndjson"
+    path.write_bytes(BODY)
+    transcript_client.ship(KEY, path)  # returns, raises nothing
+
+
+def test_a_503_from_a_store_that_was_meant_to_work_still_reports(tmp_path, monkeypatch):
+    """The other 503 -- an unknown backend, a missing bucket, an absent boto3.
+    Swallowing it too would make the feature store nothing in silence, which is
+    exactly what the endpoint's distinguished statuses exist to prevent."""
+
+    def fake_post(url, content=None, headers=None, timeout=None):
+        b"".join(content)
+        return httpx.Response(
+            503,
+            json={"detail": "transcript store unusable: No module named 'boto3'"},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setenv("FUKO_URL", "http://sidecar:8000")
+    monkeypatch.setattr(httpx, "post", fake_post)
+    path = tmp_path / "t.ndjson"
+    path.write_bytes(BODY)
+    with pytest.raises(httpx.HTTPError):
+        transcript_client.ship(KEY, path)
+
+
+def test_the_endpoint_marks_only_the_unconfigured_503(monkeypatch, capsys):
+    """The header is the contract between the two halves, so assert it on the
+    endpoint rather than only on the runner's reading of it."""
+    monkeypatch.setattr(settings, "transcript_store_backend", "")
+    off = _client(monkeypatch).post(f"/transcripts/{KEY}", content=BODY)
+    assert off.status_code == 503
+    assert off.headers.get(objectstore.STORE_HEADER) == objectstore.STORE_UNCONFIGURED
+
+    monkeypatch.setattr(settings, "transcript_store_backend", "s3")
+    monkeypatch.setattr(settings, "transcript_store_bucket", "")
+    broken = _client(monkeypatch).post(f"/transcripts/{KEY}", content=BODY)
+    assert broken.status_code == 503
+    assert objectstore.STORE_HEADER not in broken.headers
+    # `HTTPException` logs nothing, and the runner deliberately says nothing
+    # about a 503 -- so the deployment fault has to be named here or nowhere.
+    assert "transcript store unusable" in capsys.readouterr().err
 
 
 def test_the_whole_path_end_to_end_from_ship_to_stored_blob(tmp_path, monkeypatch, store_dir):
