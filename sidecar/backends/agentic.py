@@ -1095,11 +1095,19 @@ class AgenticBackend:
         # there. The two returns INSIDE the try (no harness on PATH, a sandbox
         # that could not be prepared) carry none, because on every realistic
         # shape of those two failures nothing has streamed yet and `index()`
-        # answers `None` anyway. The one exception is an `OSError` raised while
-        # ITERATING the harness pipe rather than while spawning it, which leaves
-        # a shipped blob with no index row -- the direction this design accepts
-        # (an orphan blob, never a reference naming nothing), and rare enough
-        # not to restructure the block for.
+        # answers `None` anyway. The exception is a failure raised while
+        # ITERATING the harness pipe rather than while spawning it: `_drive`'s
+        # own `finally` has closed -- and with a shipping sink, shipped -- the
+        # transcript by then, so the store holds a blob with no index row.
+        #
+        # That surface is wider than the `OSError` caught here, and deliberately
+        # not enumerated: the pipe is a strict-decoding text stream, so a kill
+        # landing mid multibyte character raises `UnicodeDecodeError`, which
+        # reaches the runner's branch-level handler instead and costs the whole
+        # metrics row rather than only the reference. Both land on the direction
+        # this design accepts -- an orphan blob, never a reference naming
+        # nothing -- which is why the block is not restructured for either. #258
+        # tracks the residue.
         transcript_index: dict | None = None
         try:
             workdir = Path(mkdtemp(prefix="fuko-agentic-cwd-"))
