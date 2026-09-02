@@ -191,17 +191,18 @@ store that was *meant* to work and does not (unknown backend, missing bucket,
 absent `boto3`) is a different `503`: the sidecar logs it and the runner reports
 it, once, on stderr. Neither ever faults the review.
 
-With `FUKO_DATABASE_URL` also configured, each captured transcript adds a row to
-`review_transcripts` — per-tool call counts, tool-result bytes, and how many
-files the run read more than once — and the run's `review_runs` row references
-it by key (#239). No extra configuration: the figures ride the metrics post the
-runner already makes, and a deployment without Postgres stores the blob and
-skips the row. The row is written only for a transcript that reached the store,
-because the key is what a reader fetches it by — so staging the other way round
-(capture on, store still off) writes neither row nor reference, and neither does
-a runner with no destination at all, whose transcript is only ever a local file.
-The `503` above stays silent either way; it simply stored nothing for a
-reference to name.
+With `FUKO_DATABASE_URL` also configured, a transcript that **reached the store**
+adds a row to `review_transcripts` — per-tool call counts, tool-result bytes, and
+how many files the run read more than once — and the run's `review_runs` row
+references it by key (#239). No extra configuration: the figures ride the metrics
+post the runner already makes.
+
+Reaching the store is the whole condition, because the key is what a reader
+fetches the transcript by. So three deployments write the run row with a NULL
+`transcript_key` and no `review_transcripts` row: no Postgres (the blob is
+stored, the row is not), the staged rollout above (capture on, store still off —
+the silent `503` stored nothing for a reference to name), and a runner with no
+destination at all, whose transcript is only ever a local file.
 
 ## Ollama in Docker
 
