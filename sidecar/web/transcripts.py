@@ -289,7 +289,13 @@ def _block_html(block: object) -> str:
         return _fold("block", _json_text(block))
     kind = block.get("type")
     if kind == "text":
-        return _fold("assistant", str(block.get("text", "")), css="")
+        # A `text` that is not text goes through the same door as every other
+        # structured value, rather than through `str()`. The schema does not
+        # promise the field's type, and `repr` of a deeply nested container
+        # recurses per level exactly as the encoder does -- the last render
+        # seam that was reaching a stdlib call this module otherwise guards.
+        text = block.get("text", "")
+        return _fold("assistant", text if isinstance(text, str) else _json_text(text), css="")
     if kind == "tool_use":
         name = block.get("name")
         label = f"tool call · {name if isinstance(name, str) and name else '?'}"
@@ -782,16 +788,22 @@ def view(
     the filter submits an untouched PR box as ``pr=``, which an ``int | None``
     parameter answers with a 422 rather than treating as absent.
     """
+    # `Vary: Cookie` on BOTH branches, because both bodies differ by cookie:
+    # `nav_extra` renders a sign-out form carrying the viewer's CSRF token to a
+    # signed-in operator and a sign-in link to everyone else. Without it a
+    # shared cache may serve one viewer's rendered page -- token included -- to
+    # the next, and that is true of the open listing too, which is otherwise
+    # left cacheable because its content is index-row figures published by
+    # design.
+    response.headers["Vary"] = "Cookie"
     if key:
-        # The session view is the only page here that renders stored repository
-        # content, and a 200 carrying no freshness information is heuristically
-        # cacheable by a shared cache (RFC 9111 §4.2.2). A LAN forward proxy in
-        # front of the sidecar could therefore hold this response and later hand
-        # it to a request with no session -- serving the very bytes
-        # `security.require` stands in front of. The listing is left cacheable:
-        # it publishes index-row figures and is open by design.
+        # The session view alone renders stored repository content, and a 200
+        # carrying no freshness information is heuristically cacheable by a
+        # shared cache (RFC 9111 §4.2.2). A LAN forward proxy in front of the
+        # sidecar could therefore hold this response and later hand it to a
+        # request with no session -- serving the very bytes `security.require`
+        # stands in front of.
         response.headers["Cache-Control"] = "no-store"
-        response.headers["Vary"] = "Cookie"
         return _session_view(request, key=key, offset=offset, limit=limit)
     number = c.form_int(pr)
     limit = min(max(1, limit or PAGE_SIZE), corpus.MAX_ROWS)

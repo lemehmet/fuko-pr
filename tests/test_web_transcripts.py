@@ -383,6 +383,21 @@ def test_a_configured_but_broken_store_is_a_fault_not_a_bad_key(wire, client):
     assert "not a well-formed transcript key" not in text
 
 
+def test_a_text_block_that_is_not_text_goes_through_the_json_door(wire, client):
+    """`repr` recurses per level like the encoder does, so `str()` was the odd seam out.
+
+    Built as a raw line rather than via ``json.dumps``, which would recurse in
+    the test helper before the page ever saw it.
+    """
+    nested = "[" * 2000 + "]" * 2000
+    line = '{"type":"assistant","message":{"content":[{"type":"text","text":' + nested + "}]}}"
+    wire(blob=_feed(line, _assistant("still here")))
+    _sign_in(client)
+    resp = client.get(f"{page.PAGE.path}?key=k")
+    assert resp.status_code == 200
+    assert "still here" in resp.text
+
+
 def test_a_line_that_decodes_but_will_not_re_encode_still_draws(wire, client):
     """`json.dumps(indent=…)` recurses too, from a deeper stack than `json.loads` did.
 
@@ -420,11 +435,26 @@ def test_a_session_response_forbids_shared_caching(wire, client):
     assert resp.headers["vary"] == "Cookie"
 
 
-def test_the_open_listing_stays_cacheable(wire, client):
-    """The listing publishes index-row figures and is open, so it is not no-store."""
+def test_the_open_listing_stays_cacheable_but_varies_on_the_cookie(wire, client):
+    """Cacheable, because index-row figures are published by design.
+
+    But `nav_extra` renders the viewer's CSRF token into a signed-in operator's
+    copy, so the response is not uniform across viewers and a cache must key on
+    the cookie or it will hand one viewer's page to the next.
+    """
     wire(rows=[_run()])
     resp = client.get(page.PAGE.path)
     assert "cache-control" not in resp.headers
+    assert resp.headers["vary"] == "Cookie"
+
+
+def test_a_signed_in_listing_carries_a_csrf_token_a_cache_must_not_share(wire, client):
+    """The reason the listing needs `Vary` at all — pin it, so it cannot regress quietly."""
+    wire(rows=[_run()])
+    _sign_in(client)
+    resp = client.get(page.PAGE.path)
+    assert "csrf" in resp.text.lower()
+    assert resp.headers["vary"] == "Cookie"
 
 
 def test_a_malformed_key_reports_nothing_about_the_index(wire, client):
