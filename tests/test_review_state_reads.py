@@ -28,6 +28,7 @@ class _FakeConn:
     def __init__(self, rows):
         self.rows = list(rows)
         self.statements: list[tuple[str, tuple]] = []
+        self.opened_with: list[dict] = []
 
     def execute(self, sql, params=()):
         self.statements.append((" ".join(sql.split()), tuple(params)))
@@ -42,7 +43,8 @@ def pg(monkeypatch):
         conn = _FakeConn(rows)
 
         @contextlib.contextmanager
-        def fake_db(*_a, **_k):
+        def fake_db(*_a, **kwargs):
+            conn.opened_with.append(kwargs)
             yield conn
 
         monkeypatch.setattr(sidecar.db, "db", fake_db)
@@ -312,3 +314,18 @@ def test_iso_keeps_none_distinguishable_and_accepts_a_string():
     assert review_state._iso(None) is None
     assert review_state._iso(_ACTIVITY) == _ACTIVITY.isoformat()
     assert review_state._iso("2026-07-22T20:15:00+00:00") == "2026-07-22T20:15:00+00:00"
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: review_state.lanes(),
+        lambda: review_state.pr_findings("a/b", 7),
+        lambda: review_state.pr_coverage("a/b", 7),
+    ],
+)
+def test_every_operator_read_bounds_its_acquisition(pg, call):
+    """An unreachable store must reach the page as a notice, not as a 30s hang."""
+    conn = pg([])
+    call()
+    assert conn.opened_with == [{"timeout": review_state.UI_READ_TIMEOUT_S}]

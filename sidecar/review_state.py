@@ -778,6 +778,19 @@ MAX_LANES = 200
 MAX_LEDGER_ROWS = 200
 """Cap on findings or coverage rows one detail read returns, before paging."""
 
+UI_READ_TIMEOUT_S = 5.0
+"""How long an operator read may wait for a connection, in seconds.
+
+These reads do not go through :func:`sidecar.db.db_best_effort`, so they would
+otherwise inherit psycopg_pool's own 30s -- and the page whose whole point is to
+report an unreachable store would take half a minute to say so. Bounds
+ACQUISITION only, exactly as :data:`sidecar.db.BEST_EFFORT_TIMEOUT_S` does.
+
+Higher than that 2s budget on purpose: nothing here is on a review's critical
+path, so waiting a little longer for a busy-but-live pool is cheaper than
+telling an operator their healthy database is down.
+"""
+
 
 def _iso(value: object) -> str | None:
     """Render a timestamp column as text, keeping ``None`` distinguishable.
@@ -972,17 +985,20 @@ _LANE_INDEX_SQL = (
     " ON f.repo = l.repo AND f.pr = l.pr AND f.seat = l.seat"
     " GROUP BY l.repo, l.pr, l.seat"
     "), examined AS ("
-    " SELECT repo, pr, seat, count(*) AS n_total,"
-    " count(*) FILTER (WHERE expired_at IS NULL) AS n_live"
-    " FROM review_coverage GROUP BY repo, pr, seat"
+    " SELECT l.repo, l.pr, l.seat, count(v.id) AS n_total,"
+    " count(v.id) FILTER (WHERE v.expired_at IS NULL) AS n_live"
+    " FROM lanes l"
+    " LEFT JOIN review_coverage v"
+    " ON v.repo = l.repo AND v.pr = l.pr AND v.seat = l.seat"
+    " GROUP BY l.repo, l.pr, l.seat"
     ") "
     "SELECT l.repo, l.pr, l.seat, l.latest_round, l.last_activity,"
     " t.n_open, t.n_fixed, t.n_rejected, t.n_stale, t.n_reopened, t.n_offerable,"
     " t.n_eligible, t.n_carried, t.n_settled,"
-    " coalesce(e.n_total, 0), coalesce(e.n_live, 0), count(*) OVER () "
+    " e.n_total, e.n_live, count(*) OVER () "
     "FROM lanes l"
     " JOIN tallies t ON t.repo = l.repo AND t.pr = l.pr AND t.seat = l.seat"
-    " LEFT JOIN examined e ON e.repo = l.repo AND e.pr = l.pr AND e.seat = l.seat "
+    " JOIN examined e ON e.repo = l.repo AND e.pr = l.pr AND e.seat = l.seat "
     "ORDER BY l.last_activity DESC, l.repo, l.pr, l.seat LIMIT %s OFFSET %s"
 )
 
@@ -1024,7 +1040,7 @@ def lanes(
     """
     from .db import db
 
-    with db() as conn:
+    with db(timeout=UI_READ_TIMEOUT_S) as conn:
         rows = conn.execute(
             _LANE_INDEX_SQL,
             (
@@ -1102,7 +1118,7 @@ def pr_findings(
     """
     from .db import db
 
-    with db() as conn:
+    with db(timeout=UI_READ_TIMEOUT_S) as conn:
         rows = conn.execute(
             _PR_FINDINGS_SQL,
             (repo, pr, seat, seat, min(max(1, limit), MAX_LEDGER_ROWS), max(0, offset)),
@@ -1167,7 +1183,7 @@ def pr_coverage(
     """
     from .db import db
 
-    with db() as conn:
+    with db(timeout=UI_READ_TIMEOUT_S) as conn:
         rows = conn.execute(
             _PR_COVERAGE_SQL,
             (repo, pr, seat, seat, min(max(1, limit), MAX_LEDGER_ROWS), max(0, offset)),
