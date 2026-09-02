@@ -344,7 +344,13 @@ class BlobStoreConfig:
             bucket=settings.transcript_store_bucket,
             prefix=settings.transcript_store_prefix,
             endpoint_url=settings.transcript_store_endpoint_url or None,
-            creds_env_prefix=settings.transcript_store_creds_env_prefix,
+            # STRIPPED here, because the same value is normalized that way in
+            # `agentic._store_credential_vars()`. Normalizing on only one side
+            # is the whole leak the runtime derivation exists to close: the
+            # store would read `" FUKO_S3_ACCESS_KEY_ID"` while the strip and
+            # scrub lists named the trimmed spelling, so the live credential
+            # would reach the agent's environment and the transcript unredacted.
+            creds_env_prefix=settings.transcript_store_creds_env_prefix.strip(),
         )
 
 
@@ -371,7 +377,8 @@ def local_blob_root(cfg: BlobStoreConfig) -> Path | None:
     if cfg.backend != "file" or not cfg.root:
         return None
     try:
-        resolved = Path(cfg.root).expanduser().resolve()
+        expanded = Path(cfg.root).expanduser()
+        resolved = expanded.resolve()
     except (OSError, RuntimeError) as e:
         # `expanduser` raises RuntimeError for a `~user` with no home to
         # resolve, and `resolve` can raise OSError on a path the filesystem
@@ -381,10 +388,31 @@ def local_blob_root(cfg: BlobStoreConfig) -> Path | None:
         # one stderr line -- and a resolution failure is the same fact about
         # the same setting as a root that is the filesystem root.
         raise ValueError(f"transcript store root {cfg.root!r} cannot be resolved: {e}") from e
+    if not expanded.is_absolute():
+        # RELATIVE roots are refused rather than resolved. `resolve()` anchors
+        # them at the CALLING process's cwd, and this function runs in two
+        # different processes: the sidecar decides where `FileBlobStore` writes,
+        # the runner driver decides what the read denylist covers. In the
+        # same-host deployment the docs describe, a relative root therefore lets
+        # the two disagree about which directory the corpus is in -- silently,
+        # and in the direction that leaves it undenied.
+        raise ValueError(
+            f"transcript store root {cfg.root!r} is relative; "
+            "set FUKO_TRANSCRIPT_STORE_ROOT to an absolute path"
+        )
     if resolved.parent == resolved:
         raise ValueError(
             f"transcript store root {resolved} is the filesystem root; "
             "set FUKO_TRANSCRIPT_STORE_ROOT to a dedicated directory"
+        )
+    if "\n" in str(resolved):
+        # Same refusal, same reason, as `transcript_dir`: the driver hands the
+        # deny paths over newline-separated, so a name holding a newline is
+        # split into a rule for some other directory plus a tail dropped as
+        # non-POSIX, while the blobs still land at the real path.
+        raise ValueError(
+            "transcript store root contains a newline, which the read-denylist "
+            "hand-off cannot represent; rename the directory"
         )
     return resolved
 

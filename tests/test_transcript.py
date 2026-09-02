@@ -487,6 +487,46 @@ def test_a_renamed_store_credential_prefix_is_still_stripped_and_scrubbed(monkey
     assert values["MYCO_S3_SECRET_ACCESS_KEY"] == "the-secret-access-key"
 
 
+def test_boto3s_default_credential_chain_is_stripped_and_scrubbed(monkeypatch):
+    """The `FUKO_URL`-unset path writes straight to the store, so a bucket
+    credential is in THIS process for the first time -- and `_s3_client` passes
+    `None` when the explicit names are unset, which makes botocore resolve
+    these. The agent has no use for any of them."""
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAtheaccesskey")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "thesecretaccesskey")
+    monkeypatch.setenv("AWS_SESSION_TOKEN", "thesessiontoken")
+    values = dict(_transcript_secrets({}, ""))
+    assert values["AWS_ACCESS_KEY_ID"] == "AKIAtheaccesskey"
+    assert values["AWS_SECRET_ACCESS_KEY"] == "thesecretaccesskey"
+    assert values["AWS_SESSION_TOKEN"] == "thesessiontoken"
+
+
+def test_a_credential_prefix_is_normalized_the_same_way_on_both_sides(monkeypatch):
+    """Normalizing on only one side IS the leak: the store would read the
+    padded spelling while the strip and scrub lists named the trimmed one."""
+    from sidecar.objectstore import BlobStoreConfig
+
+    monkeypatch.setattr(agentic_settings, "transcript_store_creds_env_prefix", "  MYCO_S3  ")
+    assert BlobStoreConfig.from_settings().creds_env_prefix == "MYCO_S3"
+    assert agentic._store_credential_vars() == {
+        "MYCO_S3_ACCESS_KEY_ID",
+        "MYCO_S3_SECRET_ACCESS_KEY",
+    }
+
+
+def test_a_destination_holding_a_newline_is_refused(monkeypatch, tmp_path):
+    """The deny-dir hand-off is newline-separated, so a directory name holding
+    one is split into a rule for somewhere else plus a tail dropped as
+    non-POSIX -- while the transcript still lands at the real path."""
+    from sidecar.objectstore import BlobStoreConfig, local_blob_root
+
+    bad = tmp_path / "one\ntwo"
+    with pytest.raises(ValueError, match="newline"):
+        transcript_mod.transcript_dir(str(bad))
+    with pytest.raises(ValueError, match="newline"):
+        local_blob_root(BlobStoreConfig(backend="file", root=str(bad)))
+
+
 def test_an_unset_store_credential_prefix_names_nothing(monkeypatch):
     """An empty prefix must not resolve to bare `_ACCESS_KEY_ID`."""
     monkeypatch.setattr(agentic_settings, "transcript_store_creds_env_prefix", "")

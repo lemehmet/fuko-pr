@@ -9,12 +9,15 @@ name SHADOWS the shared guard, which is worse than nothing the day the shared
 one grows another variable.
 """
 
+import asyncio
 import contextlib
 from urllib.parse import urlsplit
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from starlette.requests import ClientDisconnect, Request
 
 from sidecar import main
 from sidecar.config import settings
@@ -130,6 +133,33 @@ def test_an_unresolvable_store_root_is_the_same_refusal_as_a_root_one(monkeypatc
     resp = _client(monkeypatch).post(f"/transcripts/{KEY}", content=BODY)
     assert resp.status_code == 503
     assert "cannot be resolved" in resp.json()["detail"]
+
+
+def test_a_relative_store_root_is_refused(monkeypatch):
+    """`resolve()` anchors a relative root at the CALLING process's cwd, and
+    this runs in two processes -- the sidecar deciding where blobs are written,
+    the runner driver deciding what the deny rule covers. They would disagree
+    silently, in the direction that leaves the corpus undenied."""
+    monkeypatch.setattr(settings, "transcript_store_backend", "file")
+    monkeypatch.setattr(settings, "transcript_store_root", "blobs")
+    with pytest.raises(ValueError, match="relative"):
+        transcript_store()
+
+
+def test_a_client_that_vanishes_mid_body_stays_inside_the_taxonomy(monkeypatch, store_dir):
+    """`request.stream()` raises starlette's `ClientDisconnect`, which is a
+    plain Exception -- the one shape that would otherwise reach
+    ServerErrorMiddleware as an attempted 500 and a traceback per occurrence."""
+
+    async def _disconnect(self):
+        raise ClientDisconnect()
+        yield b""  # pragma: no cover - never reached, makes this a generator
+
+    monkeypatch.setattr(Request, "stream", _disconnect)
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(main.transcripts_put_endpoint(KEY, Request({"type": "http"})))
+    assert caught.value.status_code == 400
+    assert "disconnected" in caught.value.detail
 
 
 def test_a_configured_but_unusable_store_is_a_503_with_the_reason(monkeypatch):

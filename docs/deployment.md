@@ -138,8 +138,15 @@ or, for a single host with no bucket:
 
 ```bash
 FUKO_TRANSCRIPT_STORE_BACKEND=file
-FUKO_TRANSCRIPT_STORE_ROOT=/var/lib/fuko/transcript-blobs
+FUKO_TRANSCRIPT_STORE_ROOT=/var/lib/fuko/transcript-blobs   # absolute, no newline
 ```
+
+The `file` root must be **absolute** and must not contain a newline. Both are
+refused at startup of the first upload rather than silently accepted: a relative
+root resolves against whichever process reads it, and the reviewer's read
+denylist is built in a different process from the store; a newline cannot be
+represented in the deny-path hand-off. Either would leave the corpus written
+where no rule covers it.
 
 The **`s3`/`r2` backends need `boto3`**, which `docker/Dockerfile.sidecar`
 installs via the `s3` extra (`pip install ".[s3]"`). Running the sidecar from a

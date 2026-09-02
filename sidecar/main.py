@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from starlette.concurrency import run_in_threadpool
+from starlette.requests import ClientDisconnect
 
 from . import circuit_breaker
 from . import models
@@ -408,30 +409,44 @@ async def transcripts_put_endpoint(key: str, request: Request) -> dict:
     # both stores take a bytes-like body, so peak stays one copy.
     body = bytearray()
     discarded = 0
-    async for chunk in request.stream():
-        if refusal is not None:
-            # Read and drop. Counted only so an endless body cannot hold the
-            # worker forever: past the cap we stop draining and answer anyway,
-            # which is the same trade the 413 below makes.
-            discarded += len(chunk)
-            if discarded > settings.transcript_max_bytes:
-                break
-            continue
-        if len(body) + len(chunk) > settings.transcript_max_bytes:
-            # The one refusal that CANNOT wait for the body: it exists to stop
-            # reading. A client mid-send may see a transport error rather than
-            # this status, which is the accepted cost of not buffering past the
-            # cap -- and unlike the off state, this shape is meant to be loud.
-            #
-            # 413 as a literal: starlette renamed the constant
-            # (REQUEST_ENTITY_TOO_LARGE -> CONTENT_TOO_LARGE) and deprecated the
-            # old spelling, so naming either one ties this to a version range
-            # that `fastapi>=0.115` does not pin.
-            raise HTTPException(
-                413,
-                f"transcript exceeds FUKO_TRANSCRIPT_MAX_BYTES ({settings.transcript_max_bytes})",
-            )
-        body += chunk
+    try:
+        async for chunk in request.stream():
+            if refusal is not None:
+                # Read and drop. Counted only so an endless body cannot hold
+                # the worker forever: past the cap we stop draining and answer
+                # anyway, which is the same trade the 413 below makes.
+                discarded += len(chunk)
+                if discarded > settings.transcript_max_bytes:
+                    break
+                continue
+            if len(body) + len(chunk) > settings.transcript_max_bytes:
+                # The one refusal that CANNOT wait for the body: it exists to
+                # stop reading. A client mid-send may see a transport error
+                # rather than this status, which is the accepted cost of not
+                # buffering past the cap -- and unlike the off state, this
+                # shape is meant to be loud.
+                #
+                # 413 as a literal: starlette renamed the constant
+                # (REQUEST_ENTITY_TOO_LARGE -> CONTENT_TOO_LARGE) and
+                # deprecated the old spelling, so naming either one ties this
+                # to a version range that `fastapi>=0.115` does not pin.
+                raise HTTPException(
+                    413,
+                    "transcript exceeds FUKO_TRANSCRIPT_MAX_BYTES "
+                    f"({settings.transcript_max_bytes})",
+                )
+            body += chunk
+    except ClientDisconnect as e:
+        # The client vanished mid-body. Nothing is stored and there is nobody
+        # left to tell, but it is still the one shape that would otherwise pass
+        # through the guards below into ServerErrorMiddleware -- an attempted
+        # 500 against a dead socket plus a full traceback per occurrence, which
+        # is exactly the unclassified shape this taxonomy exists to replace. A
+        # dropped upload is ordinary operational noise (a killed runner), so it
+        # is not logged.
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "client disconnected before the body completed"
+        ) from e
     if refusal is not None:
         raise refusal
     try:

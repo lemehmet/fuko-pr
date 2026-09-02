@@ -425,6 +425,18 @@ def transcript_dir(directory: str | None = None) -> Path | None:
             f"transcript_dir {resolved} is the filesystem root; "
             "set FUKO_TRANSCRIPT_DIR to a dedicated directory"
         )
+    if "\n" in str(resolved):
+        # A FOURTH spelling of the same failure, and one #238 introduced: the
+        # driver hands the deny paths over newline-separated (a directory name
+        # may legally contain `:`, so `os.pathsep` was worse), and a name
+        # holding a newline is split into two candidates -- a rule for some
+        # other directory, and a tail dropped as non-POSIX -- while the
+        # transcript still lands at the real path. Refused for the same reason
+        # the root is: the capture must not open where no rule reaches.
+        raise ValueError(
+            "transcript_dir contains a newline, which the read-denylist "
+            "hand-off cannot represent; rename the directory"
+        )
     return resolved
 
 

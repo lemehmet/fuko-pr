@@ -444,6 +444,22 @@ def _store_credential_vars() -> frozenset[str]:
     return frozenset({f"{prefix}_ACCESS_KEY_ID", f"{prefix}_SECRET_ACCESS_KEY"})
 
 
+#: boto3's DEFAULT credential chain, which the transcript blob store falls back
+#: to when ``<prefix>_ACCESS_KEY_ID`` is unset (:func:`sidecar.objectstore._s3_client`
+#: passes ``None``, and botocore then resolves these).
+#:
+#: Named here even though they are nobody's fuko-specific spelling, because the
+#: ``FUKO_URL``-unset path puts a bucket credential in THIS process for the
+#: first time: the runner writes straight to the store rather than shipping
+#: through a sidecar. They are credentials by name in every deployment and the
+#: agent has no use for any of them, so they are stripped from its environment
+#: and scrubbed by value from the transcript unconditionally.
+_AWS_DEFAULT_CRED_VARS = (
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+)
+
 #: Credential-bearing ``FUKO_`` variables whose full names this module cannot
 #: know, matched by PREFIX over the live environment.
 #:
@@ -516,6 +532,7 @@ def _transcript_secrets(harness_env: dict[str, str], token: str) -> list[tuple[s
         *_GITHUB_CRED_VARS,
         *sorted(_provider_key_vars()),
         *_FUKO_SECRET_VARS,
+        *_AWS_DEFAULT_CRED_VARS,
         *sorted(_store_credential_vars()),
         *_AMBIENT_ANTHROPIC_VARS,
         *sorted(k for k in os.environ if k.startswith(_FUKO_SECRET_PREFIXES)),
@@ -930,6 +947,7 @@ class AgenticBackend:
             and k not in _ANTHROPIC_INHERITED_VARS
             and k not in provider_key_vars
             and k not in store_cred_vars
+            and k not in _AWS_DEFAULT_CRED_VARS
         }
         # Auth-mode-independent: the entry's context window rides along
         # whenever build_env derived one (from `max_context`). The ambient
