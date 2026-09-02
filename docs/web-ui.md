@@ -15,6 +15,7 @@ sidecar/web/
   security.py    # session cookie + CSRF for the routes that write
   metrics.py     # the review-metrics page
   kb.py          # the knowledge-base console
+  ledger.py      # the review-state ledgers (read-only)
 ```
 
 ## Adding a page
@@ -28,6 +29,7 @@ place a page's title, path, and nav order are written down:
 PAGES: tuple[Page, ...] = (
     Page(slug="metrics", title="Metrics", path=f"{PREFIX}/metrics", order=10),
     Page(slug="kb", title="Knowledge base", path=f"{PREFIX}/kb", order=20),
+    Page(slug="ledger", title="Ledger", path=f"{PREFIX}/ledger", order=30),
 )
 ```
 
@@ -88,10 +90,21 @@ one deliberate exception, for markup the page already assembled and escaped.
 stylesheet in `layout._STYLE`; pages work with plain forms and links. A page that
 wants progressive enhancement can add it, but it must not be load-bearing.
 
-**Read is open, mutation is not.** `/ui/metrics` and the knowledge-base browsing
-and preview views are deliberately unauthenticated — read-only on a LAN-only
-deployment, following the precedent `/healthz` set. Every API endpoint keeps its
-bearer auth. Anything that writes goes through `security.py`.
+**Read is open, mutation is not.** `/ui/metrics`, `/ui/ledger` and the
+knowledge-base browsing and preview views are deliberately unauthenticated —
+read-only on a LAN-only deployment, following the precedent `/healthz` set.
+Every API endpoint keeps its bearer auth. Anything that writes goes through
+`security.py`.
+
+**A degraded store has more than two states.** `metrics.render` distinguishes
+"no database configured" from "configured but unreachable"; `ledger` keeps the
+same split and it is load-bearing there, since a sqlite-vec deployment holds no
+review-state tables at all. The configuration test belongs in the route, before
+the read: a read that raises on an unset `database_url` would report an
+unconfigured deployment as a broken one. Note also that `ledger`'s reads
+deliberately do *not* go through `review_state._best_effort` — a swallowed
+exception renders exactly the empty table a healthy-but-idle store does, which
+is the fail-unsafe direction for a page a human is reading.
 
 ## Writing routes that mutate
 
