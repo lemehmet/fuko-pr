@@ -247,6 +247,21 @@ def test_tool_calls_of_an_unexpected_shape_cost_only_that_figure(pg):
     assert transcripts.list_transcripts().rows[0].tool_calls == {}
 
 
+@pytest.mark.parametrize("pr", [transcripts.MAX_PR + 1, 2**40, -1])
+def test_a_pr_outside_the_column_range_is_the_readers_own_valueerror(pg, pr):
+    # The bound belongs to the query that imposes it, not only to the endpoint:
+    # #241's page imports this function, and a `%s::integer` cast failure is a
+    # DataError that a caller's store-unreachable arm would report as an outage.
+    pg([])
+    with pytest.raises(ValueError, match="outside the range"):
+        transcripts.list_transcripts(pr=pr)
+
+
+def test_a_pr_at_the_column_limit_is_accepted(pg):
+    pg([])
+    assert transcripts.list_transcripts(pr=transcripts.MAX_PR).rows == ()
+
+
 def test_a_tool_call_entry_the_write_side_refuses_is_dropped_on_read_too(pg):
     # `isinstance(True, int)` holds, so a stored `true` would otherwise be read
     # back as one fabricated call and summed into the total. The write side

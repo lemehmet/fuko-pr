@@ -48,6 +48,16 @@ DEFAULT_ROWS = 50
 #: listing wants an answer or an error, not psycopg_pool's 30-second default.
 READ_TIMEOUT_S = 5.0
 
+#: Largest pull-request number the ``pr`` filter may name. ``review_runs.pr`` is
+#: ``INTEGER`` (``migrations/004``) and the filter binds ``%s::integer``, so a
+#: larger value fails the cast SERVER-side -- a ``DataError``, not a
+#: ``ValueError``, which a caller's "the store is unreachable" arm would then
+#: report as an outage for what is a typo. The bound lives HERE, with the query
+#: that imposes it, rather than only in the endpoint: this module is the
+#: contract #241's page imports, and a reader that learned the filter from the
+#: signature would otherwise have to know a rule stated somewhere else.
+MAX_PR = 2**31 - 1
+
 
 class StoreUnconfigured(RuntimeError):
     """Raised by :func:`fetch` when no transcript blob store is configured.
@@ -231,6 +241,10 @@ def list_transcripts(
     Args:
         repo: Restrict to one ``owner/name``, or ``None`` for every repo.
         pr: Restrict to one pull request number, or ``None`` for all of them.
+            Must be in ``[0, MAX_PR]`` -- the range ``review_runs.pr`` can hold,
+            checked here so an out-of-range value is this function's own
+            ``ValueError`` rather than a cast failure indistinguishable from the
+            store being down.
         seat: Restrict to one seat -- ``review_runs.slot``, the lane label a
             model occupies -- or ``None`` for every seat.
         since: Lower bound on the transcript's ``created_at``, INCLUSIVE.
@@ -247,12 +261,15 @@ def list_transcripts(
         end: the window count travels with the rows.
 
     Raises:
-        ValueError: ``since`` or ``until`` is not an ISO-8601 instant.
+        ValueError: ``since`` or ``until`` is not an ISO-8601 instant, or ``pr``
+            is outside the range ``review_runs.pr`` can hold.
     """
     from .db import db
 
     lower = _instant(since)
     upper = _instant(until)
+    if pr is not None and not 0 <= pr <= MAX_PR:
+        raise ValueError(f"pr is outside the range this store can hold: {pr}")
     with db(timeout=READ_TIMEOUT_S, embed_space=False) as conn:
         rows = conn.execute(
             _LIST_SQL,
