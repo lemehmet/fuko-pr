@@ -27,7 +27,9 @@
 -- one failure mode the ordering exists to avoid: a transcript-side problem
 -- rejecting the `review_runs` insert, costing the duration, outcome, attempts
 -- and token counts beside it. Same blast-radius argument as
--- `run_metrics._storable_cost`.
+-- `run_metrics._storable_cost`. The guarantee is scoped to a failure the
+-- STATEMENT earned; a connection-level one latches `db_best_effort` for the
+-- whole process, and then nothing lands either way (see `_index_transcript`).
 --
 -- The columns here are NOT NULL because the row's EXISTENCE is the measurement:
 -- it is written only for a run whose transcript was captured, from that run's

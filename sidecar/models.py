@@ -293,6 +293,9 @@ class ReviewerHealthResponse(BaseModel):
 NonNegativeCount = Annotated[StrictInt, Field(ge=0)]
 """A count: a non-negative integer, and an integer as SPELLED.
 
+Used for every count on :class:`TranscriptIndexRequest`, not only the mapping's
+values, so one spelling cannot be strict while the field beside it is lax.
+
 The constraint has to live on the annotation rather than on the ``Field`` when
 the count is a dict *value*: ``ge`` given to the field constrains the mapping,
 not what is in it.
@@ -338,12 +341,11 @@ class TranscriptIndexRequest(BaseModel):
         default_factory=dict,
         description="Call counts keyed by tool name.",
     )
-    tool_result_bytes: int = Field(
-        default=0, ge=0, description="Total UTF-8 bytes of tool-result content the run was fed."
+    tool_result_bytes: NonNegativeCount = Field(
+        default=0, description="Total UTF-8 bytes of tool-result content the run was fed."
     )
-    repeated_read_files: int = Field(
+    repeated_read_files: NonNegativeCount = Field(
         default=0,
-        ge=0,
         description=(
             "Distinct files read more than once in this run -- one file read three "
             "times counts once."

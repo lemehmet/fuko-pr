@@ -501,25 +501,26 @@ _INDEX = {
 class _RecordingConn:
     """Records every statement; optionally fails the one naming a table."""
 
-    def __init__(self, fail_on=""):
+    def __init__(self, fail_on="", error=RuntimeError):
         self.statements = []
         self._fail_on = fail_on
+        self._error = error
 
     def execute(self, sql, params=()):
         flat = " ".join(sql.split())
         self.statements.append((flat, tuple(params)))
         if self._fail_on and self._fail_on in flat:
-            raise RuntimeError("relation does not exist")
+            raise self._error("relation does not exist")
 
 
-def _pg(monkeypatch, fail_on=""):
+def _pg(monkeypatch, fail_on="", error=RuntimeError):
     """Enable persistence and hand every ``db_best_effort`` block one recorder."""
     import contextlib
 
     import sidecar.db
 
     monkeypatch.setattr(run_metrics.settings, "database_url", "postgres://x")
-    conn = _RecordingConn(fail_on)
+    conn = _RecordingConn(fail_on, error)
     blocks = []
 
     @contextlib.contextmanager
@@ -593,6 +594,31 @@ def test_a_failing_index_write_leaves_the_review_runs_row_intact(monkeypatch, ca
     assert "transcript index write failed" in capsys.readouterr().err
 
 
+def test_a_connection_level_index_failure_is_not_costed_by_write_order(monkeypatch, capsys):
+    """The write-ordering guarantee is scoped to failures the STATEMENT earned.
+
+    A connection-level one latches `db_best_effort` for the whole process, so
+    the run row's own block cannot open either — which is the same nothing-lands
+    a run with no transcript would have had, and is why the docstrings say
+    "statement earned" rather than "any". Pinned here because the sibling test
+    above uses `RuntimeError`, a class `db_best_effort` never latches on, so on
+    its own it would let the narrower claim read as the broader one (#260).
+    """
+    from psycopg import OperationalError
+
+    import sidecar.db
+
+    # Restored on teardown, which also clears the latch this test closes.
+    monkeypatch.setattr(sidecar.db, "_unreachable_until", 0.0)
+    conn, _ = _pg(monkeypatch, fail_on="review_transcripts", error=OperationalError)
+    with pytest.raises(sidecar.db.StoreUnavailable):
+        run_metrics.record("o/r", 7, "p", "m", transcript=dict(_INDEX))
+    # The row block never even ran, so the loss is loud rather than silent.
+    assert len(conn.statements) == 1
+    assert conn.statements[0][0].startswith("INSERT INTO review_transcripts")
+    assert "postgres unreachable" in capsys.readouterr().err
+
+
 def test_a_run_without_a_transcript_writes_no_index_row_and_a_null_reference(monkeypatch):
     """Every pr-agent run, and every agentic run whose capture is off: NULL, not
     a placeholder that would read as a blob gone missing."""
@@ -644,18 +670,31 @@ def test_the_request_model_rejects_a_negative_call_count():
     assert TranscriptIndexRequest(**{**_INDEX, "tool_calls": {"Read": 0}}).tool_calls == {"Read": 0}
 
 
-@pytest.mark.parametrize("field", ["tool_result_bytes", "repeated_read_files"])
-def test_record_skips_an_index_whose_totals_are_not_counts(monkeypatch, capsys, field):
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("tool_result_bytes", -1),
+        ("repeated_read_files", -1),
+        # `bool("false")` is True, so a bare `bool()` would mark a feed that
+        # said it was cut short as whole -- inverting the field a reader uses to
+        # decide whether the figures describe a finished run.
+        ("complete", "false"),
+        ("complete", None),
+    ],
+)
+def test_record_skips_an_index_whose_figures_are_not_measurements(
+    monkeypatch, capsys, field, value
+):
     """Unlike one tool's count, these are the whole row's measurement: there is
     no partial version of them that would be true, so the index is skipped the
-    way an unusable key is -- NULL reference, run row intact. The columns carry
-    no CHECK, so a bare `int()` here would simply store a negative."""
+    way an unusable key is -- NULL reference, run row intact. Neither column
+    carries a CHECK, so coercing instead of refusing would simply store it."""
     conn, _ = _pg(monkeypatch)
-    run_metrics.record("o/r", 7, "p", "m", findings=3, transcript={**_INDEX, field: -1})
+    run_metrics.record("o/r", 7, "p", "m", findings=3, transcript={**_INDEX, field: value})
     assert len(conn.statements) == 1
     assert conn.statements[0][0].startswith("INSERT INTO review_runs")
     assert conn.statements[0][1][-1] is None
-    assert "unusable totals" in capsys.readouterr().err
+    assert "unusable figures" in capsys.readouterr().err
 
 
 def test_record_reads_an_absent_total_as_a_real_zero(monkeypatch):
@@ -678,6 +717,12 @@ def test_the_request_model_refuses_a_boolean_spelled_as_a_call_count():
 
     with pytest.raises(ValidationError):
         TranscriptIndexRequest(**{**_INDEX, "tool_calls": {"Read": True}})
+    # The scalars beside it, for the same reason: one spelling strict and the
+    # field next to it lax is the divergence `NonNegativeCount` exists to close.
+    for field in ("tool_result_bytes", "repeated_read_files"):
+        for value in (True, "5", 5.0):
+            with pytest.raises(ValidationError):
+                TranscriptIndexRequest(**{**_INDEX, field: value})
 
 
 def test_record_accepts_the_request_model_the_endpoint_hands_it(monkeypatch):

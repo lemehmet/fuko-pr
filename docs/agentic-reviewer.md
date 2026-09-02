@@ -635,7 +635,10 @@ column — `transcript_key` — pointing at it:
   first, in its own transaction; the reference is written only if it landed.
   There is no foreign key, deliberately: the invariant is held by write order,
   and a constraint would let a transcript-side failure reject the run row's
-  duration, outcome, attempts and token counts too.
+  duration, outcome, attempts and token counts too. Scoped to a failure the
+  statement earned: a connection-level one latches `db_best_effort` for the
+  whole process, after which the run row's block cannot open either — the same
+  nothing-lands a run with no transcript would have had.
 - **A reference is only ever written for a transcript that reached shared
   storage**, because the key is what a reader fetches it by. A failed capture or
   upload records none; so does the off state above, where shipping to a sidecar

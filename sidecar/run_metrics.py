@@ -164,6 +164,18 @@ def _index_transcript(transcript) -> str | None:
     rather than by a foreign key -- so a transcript-side failure costs the
     reference and never the metrics row beside it.
 
+    SCOPED to a failure the statement earned -- a column that is not there, a
+    constraint, a value the column cannot hold. A CONNECTION-level failure is
+    not costed this way and cannot be: :func:`sidecar.db.db_best_effort` latches
+    the process for a minute on ``OperationalError``/``PoolTimeout``, so the run
+    row's own block then refuses to open too. That is the same nothing-lands a
+    run with no transcript would have had, with one narrow exception -- a
+    server-side cancellation of THIS insert (a ``statement_timeout``) latches on
+    behalf of a row write that might have succeeded. Recorded in #260 rather
+    than worked around here: every route around it either merges the two writes
+    into one transaction, which is the thing this separation exists to prevent,
+    or reaches past a bound :mod:`sidecar.db` owns.
+
     Its OWN ``db_best_effort`` block, deliberately, and that is the ordering
     constraint the acceptance criterion turns on: one block is one transaction,
     so writing both rows inside it would let a failing index insert roll the
@@ -202,15 +214,22 @@ def _index_transcript(transcript) -> str | None:
         print(f"fuko: transcript index skipped, invalid key {key!r}", file=sys.stderr)
         return None
     tool_calls = _tool_calls(transcript.get("tool_calls"))
+    complete = transcript.get("complete")
     totals = [_count(transcript.get(f)) for f in ("tool_result_bytes", "repeated_read_files")]
-    if None in totals:
-        # These two are the whole row's measurement rather than one entry in a
+    if not isinstance(complete, bool) or None in totals:
+        # These three are the whole row's measurement rather than one entry in a
         # mapping, so an unusable one is not droppable the way a single tool's
         # count is -- there is nothing left to store that would be true. The
         # reference goes NULL and the run row lands beside it, exactly as for an
-        # unusable key. The columns are BIGINT/INTEGER with no CHECK, so without
-        # this a negative would simply be stored.
-        print(f"fuko: transcript index skipped, unusable totals in {key}", file=sys.stderr)
+        # unusable key.
+        #
+        # Coercion is what is being refused, not just the wrong type. The
+        # columns are BIGINT/INTEGER with no CHECK, so a bare `int()` would
+        # store a negative; and `bool("false")` is `True`, so a bare `bool()`
+        # would mark a feed that said it was CUT SHORT as whole -- silently
+        # inverting the one field a reader uses to decide whether the figures
+        # describe a finished run.
+        print(f"fuko: transcript index skipped, unusable figures in {key}", file=sys.stderr)
         return None
     try:
         with db_best_effort() as conn:
@@ -220,7 +239,7 @@ def _index_transcript(transcript) -> str | None:
                 "VALUES (%s, %s, %s::jsonb, %s, %s) ON CONFLICT (key) DO NOTHING",
                 (
                     key,
-                    bool(transcript.get("complete")),
+                    complete,
                     # Serialized here rather than passed as a dict: psycopg does
                     # not adapt a mapping to `jsonb` on its own, and json.dumps
                     # keeps this module free of a psycopg import it otherwise
