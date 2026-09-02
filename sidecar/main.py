@@ -3,7 +3,9 @@
 import sys
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from starlette.concurrency import run_in_threadpool
+from starlette.requests import ClientDisconnect
 
 from . import circuit_breaker
 from . import models
@@ -14,6 +16,13 @@ from . import run_metrics
 from . import web
 from . import threads as threads_mod
 from .config import settings
+from .objectstore import (
+    STORE_HEADER,
+    STORE_UNCONFIGURED,
+    BlobExists,
+    transcript_store,
+    validate_blob_key,
+)
 from .stores import current_store
 
 
@@ -296,6 +305,167 @@ def metrics_run_endpoint(req: models.RunMetricRequest) -> dict:
 def metrics_summary_endpoint(repo: str | None = None, days: int = 30) -> dict:
     """Aggregate review runs per provider+model over the last ``days``."""
     return {"summary": run_metrics.summary(repo=repo, days=days)}
+
+
+@app.post("/transcripts/{key}", dependencies=[Depends(_auth)])
+async def transcripts_put_endpoint(key: str, request: Request) -> dict:
+    """Store one runner's session transcript as a write-once blob (#238).
+
+    A DEDICATED endpoint rather than a field on ``/metrics/run``: that path is a
+    small JSON row under a 10-second client timeout, and posting a
+    multi-megabyte NDJSON body over it is the shape that produced the
+    sweep-ingest timeout. This one is sized for the body it carries
+    (:data:`sidecar.reviewer.transcript_client.UPLOAD_TIMEOUT_S`), and it is
+    what lets the runner hold no blob-store credentials of its own.
+
+    The three failure modes are distinguished, because the runner does not
+    retry and a caller reading its logs needs to know which happened:
+
+    * **503** -- nothing here can store a transcript. Two shapes, told apart by
+      the ``X-Fuko-Transcript-Store`` header rather than by parsing the detail:
+      ``unconfigured`` (no backend set -- the off state, which the runner
+      treats as success so staging capture ahead of storage costs no noise),
+      and no header (configured incompletely, or a bucket backend whose
+      ``boto3`` is missing) -- a deployment fault, which the runner reports and
+      which is logged on this side too.
+    * **409** -- the key is taken. Blobs are write-once, so this is a
+      re-delivery, never something to resolve by overwriting.
+    * **400** -- the key is not a well-formed blob key.
+    * **413** -- the body is over ``FUKO_TRANSCRIPT_MAX_BYTES``.
+
+    A 503 also covers a store that constructs and then fails when USED --
+    credentials boto3 resolves lazily, an unreachable endpoint, a full disk --
+    for the same reason: the caller cannot act on any of them, and an
+    unclassified 500 with a traceback per upload is the shape this taxonomy
+    exists to replace.
+
+    ``async`` with the store call handed to the threadpool, rather than a plain
+    ``def``: the body has to be awaited off the wire, and boto3's ``put_object``
+    is blocking, so running it inline would hold the event loop -- and with it
+    ``/healthz`` and every other request -- for the length of an upload to
+    object storage.
+    """
+    # CLASSIFY first, then drain -- but keep the bytes only on the path that
+    # will store them.
+    #
+    # The drain is not optional. Answering while a client is still sending
+    # closes the connection under it, so a runner shipping a multi-megabyte
+    # transcript would get a write error instead of the marked 503 it reads as
+    # the off state, and "no failure line per run while you stage the rollout"
+    # would become a failure line per run. The suite's few-byte bodies never
+    # show this; a real transcript would show nothing else.
+    #
+    # But nothing in the classification needs the body, so on a path that ends
+    # in 400 or 503 the chunks are DISCARDED as they arrive rather than
+    # accumulated. Otherwise the recommended rollout order -- capture on before
+    # storage -- would have every run push its whole transcript into sidecar
+    # memory purely to throw it away, at a transient peak of concurrent seats
+    # times the cap.
+    refusal: HTTPException | None = None
+    store = None
+    try:
+        validate_blob_key(key)
+    except ValueError as e:
+        refusal = HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    if refusal is None:
+        try:
+            store = transcript_store()
+        except Exception as e:
+            # Configured but unusable -- an unknown backend, a missing bucket, a
+            # root that no deny rule can cover or that cannot be resolved at
+            # all, or a bucket backend without `boto3` (`pip install
+            # fuko-pr[s3]`). Caught as broadly as the taxonomy is stated: the
+            # store is built per request, so anything not mapped here reaches
+            # the caller as a 500 and a traceback on every upload rather than as
+            # the deployment fault it is.
+            #
+            # Logged HERE, on stderr, because `HTTPException` writes nothing:
+            # the access log shows a bare 503 and the runner deliberately says
+            # nothing about a 503 it cannot act on. Somebody has to name a store
+            # that was meant to work and does not, or the feature stores nothing
+            # in silence.
+            print(f"fuko: transcript store unusable: {e}", file=sys.stderr)
+            refusal = HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE, f"transcript store unusable: {e}"
+            )
+        else:
+            if store is None:
+                # The header is what separates "the operator has not turned
+                # storage on" from the branch above, which is also a 503. The
+                # runner treats only THIS one as the off state and stays silent
+                # for it; a 503 without the header is a deployment fault and
+                # still reports. A header rather than a distinct status because
+                # both really are "this service cannot store", and a caller that
+                # ignores the header degrades safely -- to reporting.
+                refusal = HTTPException(
+                    status.HTTP_503_SERVICE_UNAVAILABLE,
+                    "no transcript store configured (set FUKO_TRANSCRIPT_STORE_BACKEND)",
+                    headers={STORE_HEADER: STORE_UNCONFIGURED},
+                )
+
+    # ONE growing buffer on the storing path. A list of chunks plus a closing
+    # `b"".join` holds the whole body TWICE at the moment it joins, so the cap
+    # would price a peak of double its own value; `bytearray` grows in place and
+    # both stores take a bytes-like body, so peak stays one copy.
+    body = bytearray()
+    discarded = 0
+    try:
+        async for chunk in request.stream():
+            if refusal is not None:
+                # Read and drop. Counted only so an endless body cannot hold
+                # the worker forever: past the cap we stop draining and answer
+                # anyway, which is the same trade the 413 below makes.
+                discarded += len(chunk)
+                if discarded > settings.transcript_max_bytes:
+                    break
+                continue
+            if len(body) + len(chunk) > settings.transcript_max_bytes:
+                # The one refusal that CANNOT wait for the body: it exists to
+                # stop reading. A client mid-send may see a transport error
+                # rather than this status, which is the accepted cost of not
+                # buffering past the cap -- and unlike the off state, this
+                # shape is meant to be loud.
+                #
+                # 413 as a literal: starlette renamed the constant
+                # (REQUEST_ENTITY_TOO_LARGE -> CONTENT_TOO_LARGE) and
+                # deprecated the old spelling, so naming either one ties this
+                # to a version range that `fastapi>=0.115` does not pin.
+                raise HTTPException(
+                    413,
+                    "transcript exceeds FUKO_TRANSCRIPT_MAX_BYTES "
+                    f"({settings.transcript_max_bytes})",
+                )
+            body += chunk
+    except ClientDisconnect as e:
+        # The client vanished mid-body. Nothing is stored and there is nobody
+        # left to tell, but it is still the one shape that would otherwise pass
+        # through the guards below into ServerErrorMiddleware -- an attempted
+        # 500 against a dead socket plus a full traceback per occurrence, which
+        # is exactly the unclassified shape this taxonomy exists to replace. A
+        # dropped upload is ordinary operational noise (a killed runner), so it
+        # is not logged.
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "client disconnected before the body completed"
+        ) from e
+    if refusal is not None:
+        raise refusal
+    try:
+        await run_in_threadpool(store.put, key, body)
+    except BlobExists as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
+    except Exception as e:
+        # A store that CONSTRUCTS and then fails at request time: credentials
+        # never exported (boto3 resolves them lazily, so the client builds
+        # fine and `put_object` raises `NoCredentialsError`), an endpoint URL
+        # that is unreachable or stalls out the retry ladder, a disk that
+        # fills. Same class as the construction failures above -- a deployment
+        # fault the caller cannot act on -- so it gets the same answer instead
+        # of escaping as an unclassified 500 and a traceback per upload.
+        print(f"fuko: transcript store failed: {e}", file=sys.stderr)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, f"transcript store failed: {e}"
+        ) from e
+    return {"stored": True, "key": key, "bytes": len(body)}
 
 
 @app.post("/rh/observe", dependencies=[Depends(_auth)])

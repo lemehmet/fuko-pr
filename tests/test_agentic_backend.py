@@ -18,7 +18,7 @@ from sidecar.fukoconfig import ModelConfig, ReviewConfig
 from sidecar.presets import PRESETS, ProviderPreset, get_preset
 from sidecar.config import settings
 from sidecar.reviewer.checkout import PRContext
-from sidecar.reviewer.harness import HarnessResult
+from sidecar.reviewer.harness import HarnessResult, _permission_settings
 from sidecar.reviewer.transcript import Transcript
 from sidecar.signals import extract_markers
 
@@ -2139,6 +2139,119 @@ def test_the_transcript_destination_reaches_the_harness_for_the_deny_rule(monkey
         captured["transcript"]._scrubber.scrub(f"key={ambient_key} here")
         == "key=[REDACTED:ZAI_KEY] here"
     )
+
+
+def test_a_renamed_store_credential_prefix_is_stripped_from_the_harness_env(monkeypatch):
+    """The SCRUB half of this is tested beside `_transcript_secrets`; this is
+    the STRIP half. A renamed prefix puts the two variables outside the `FUKO_`
+    namespace the comprehension strips, so without the explicit exclusion they
+    ride into the agent's own environment -- and deleting that one clause would
+    otherwise leave the suite green."""
+    monkeypatch.setattr(settings, "transcript_store_creds_env_prefix", "MYCO_S3", raising=False)
+    monkeypatch.setenv("MYCO_S3_ACCESS_KEY_ID", "the-access-key-id")
+    monkeypatch.setenv("MYCO_S3_SECRET_ACCESS_KEY", "the-secret-access-key")
+    monkeypatch.setenv("MYCO_S3_REGION", "auto")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert "MYCO_S3_ACCESS_KEY_ID" not in captured["env"]
+    assert "MYCO_S3_SECRET_ACCESS_KEY" not in captured["env"]
+    # The region code is not a credential and is deliberately NOT stripped --
+    # asserting it keeps the exclusion from quietly widening into the namespace.
+    assert captured["env"]["MYCO_S3_REGION"] == "auto"
+
+
+def test_boto3s_default_credential_chain_never_reaches_the_harness(monkeypatch):
+    """Not `FUKO_`-prefixed, so the namespace strip does not reach them -- and
+    the `FUKO_URL`-unset path puts a bucket credential in this process for the
+    first time. The container-credentials token is a bearer credential like the
+    other three; the sibling `*_URI` variables are endpoints, not secrets."""
+    for name in (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_SECURITY_TOKEN",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    ):
+        monkeypatch.setenv(name, f"value-of-{name}")
+    monkeypatch.setenv("AWS_CONTAINER_CREDENTIALS_FULL_URI", "http://169.254.170.2/creds")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    for name in (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_SECURITY_TOKEN",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    ):
+        assert name not in captured["env"]
+    # The endpoint is not a secret and is deliberately left alone -- scrubbing a
+    # URI by value would corrupt a transcript wherever it legitimately appears.
+    assert captured["env"]["AWS_CONTAINER_CREDENTIALS_FULL_URI"] == "http://169.254.170.2/creds"
+
+
+def test_a_local_blob_store_root_is_denied_beside_the_capture_dir(monkeypatch, tmp_path):
+    """With the `file` backend on this host the shipped blobs are a SECOND,
+    longer-lived copy of the same corpus -- the capture directory can be
+    rotated, the blob store is kept forever by design -- so a denylist covering
+    only `FUKO_TRANSCRIPT_DIR` leaves the bigger prize readable through exactly
+    the channel #237 closed."""
+    corpus = (tmp_path / "corpus").resolve()
+    blobs = (tmp_path / "blobs").resolve()
+    monkeypatch.setattr(settings, "transcript_dir", str(corpus), raising=False)
+    monkeypatch.setattr(settings, "transcript_store_backend", "file", raising=False)
+    monkeypatch.setattr(settings, "transcript_store_root", str(blobs), raising=False)
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    handed = captured["env"]["FUKO_TRANSCRIPT_DENY_DIR"].split("\n")
+    assert handed == [str(corpus), str(blobs)]
+    # ...and the rule actually renders for both, which the hand-off alone does
+    # not prove.
+    rules = json.loads(_permission_settings(captured["env"]))
+    deny = rules["permissions"]["deny"]
+    assert f"Read(//{str(corpus).lstrip('/')}/**)" in deny
+    assert f"Read(//{str(blobs).lstrip('/')}/**)" in deny
+
+
+def test_a_filesystem_root_blob_store_is_refused_not_silently_undenied(
+    monkeypatch, tmp_path, capsys
+):
+    """`_permission_settings` rstrips `/` to the empty string and drops the
+    candidate without even the non-POSIX announcement, so a root store would be
+    kept where no rule reaches and nothing says so. Refused on BOTH sides --
+    `make_blob_store` raises too -- so the driver and the store agree."""
+    corpus = (tmp_path / "corpus").resolve()
+    monkeypatch.setattr(settings, "transcript_dir", str(corpus), raising=False)
+    monkeypatch.setattr(settings, "transcript_store_backend", "file", raising=False)
+    monkeypatch.setattr(settings, "transcript_store_root", "/", raising=False)
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert captured["env"]["FUKO_TRANSCRIPT_DENY_DIR"] == str(corpus)
+    assert "filesystem root" in capsys.readouterr().err
+
+
+def test_a_bucket_blob_store_adds_no_deny_dir(monkeypatch, tmp_path):
+    """Only a LOCAL store puts bytes on this host; an s3/r2 root is a bucket
+    prefix and would render a rule matching nothing."""
+    corpus = (tmp_path / "corpus").resolve()
+    monkeypatch.setattr(settings, "transcript_dir", str(corpus), raising=False)
+    monkeypatch.setattr(settings, "transcript_store_backend", "r2", raising=False)
+    monkeypatch.setattr(settings, "transcript_store_root", "", raising=False)
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert captured["env"]["FUKO_TRANSCRIPT_DENY_DIR"] == str(corpus)
+
+
+def test_a_local_blob_store_is_denied_even_with_capture_off(monkeypatch, tmp_path):
+    """The blobs an earlier round left behind are the ones worth reading, and
+    they outlive the run -- and the capture setting -- that wrote them."""
+    blobs = (tmp_path / "blobs").resolve()
+    monkeypatch.setattr(settings, "transcript_dir", "", raising=False)
+    monkeypatch.setattr(settings, "transcript_store_backend", "file", raising=False)
+    monkeypatch.setattr(settings, "transcript_store_root", str(blobs), raising=False)
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert captured["env"]["FUKO_TRANSCRIPT_DENY_DIR"] == str(blobs)
+    assert captured["transcript"] is None
 
 
 def test_no_transcript_destination_hands_over_no_deny_dir(monkeypatch):

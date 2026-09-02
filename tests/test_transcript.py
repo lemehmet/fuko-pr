@@ -5,9 +5,12 @@ import os
 import re
 import sys
 
+import httpx
 import pytest
 
+from sidecar.backends import agentic
 from sidecar.backends.agentic import _transcript_secrets
+from sidecar.backends.agentic import settings as agentic_settings
 from sidecar.config import settings
 from sidecar.reviewer import harness as harness_mod
 from sidecar.reviewer import transcript as transcript_mod
@@ -15,6 +18,7 @@ from sidecar.reviewer.harness import run_review
 from sidecar.reviewer.transcript import (
     FileTranscriptSink,
     Scrubber,
+    ShippingTranscriptSink,
     Transcript,
     mint_key,
     open_transcript,
@@ -465,8 +469,317 @@ def test_a_run_with_no_checkout_token_registers_no_empty_secret(monkeypatch):
     assert not any(value == "" for _name, value in _transcript_secrets({}, ""))
 
 
+def test_a_renamed_store_credential_prefix_is_still_stripped_and_scrubbed(monkeypatch):
+    """`FUKO_TRANSCRIPT_STORE_CREDS_ENV_PREFIX` is a supported setting, and a
+    value outside the `FUKO_` namespace is neither stripped by the namespace
+    filter nor covered by the literal default names -- so the credential that
+    stores the transcript would be written into it."""
+    monkeypatch.setattr(agentic_settings, "transcript_store_creds_env_prefix", "MYCO_S3")
+    monkeypatch.setenv("MYCO_S3_ACCESS_KEY_ID", "the-access-key-id")
+    monkeypatch.setenv("MYCO_S3_SECRET_ACCESS_KEY", "the-secret-access-key")
+
+    assert agentic._store_credential_vars() == {
+        "MYCO_S3_ACCESS_KEY_ID",
+        "MYCO_S3_SECRET_ACCESS_KEY",
+    }
+    values = dict(_transcript_secrets({}, ""))
+    assert values["MYCO_S3_ACCESS_KEY_ID"] == "the-access-key-id"
+    assert values["MYCO_S3_SECRET_ACCESS_KEY"] == "the-secret-access-key"
+
+
+def test_boto3s_default_credential_chain_is_stripped_and_scrubbed(monkeypatch):
+    """The `FUKO_URL`-unset path writes straight to the store, so a bucket
+    credential is in THIS process for the first time -- and `_s3_client` passes
+    `None` when the explicit names are unset, which makes botocore resolve
+    these. The agent has no use for any of them."""
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAtheaccesskey")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "thesecretaccesskey")
+    monkeypatch.setenv("AWS_SESSION_TOKEN", "thesessiontoken")
+    monkeypatch.setenv("AWS_SECURITY_TOKEN", "thelegacytoken")
+    monkeypatch.setenv("AWS_CONTAINER_AUTHORIZATION_TOKEN", "thecontainertoken")
+    values = dict(_transcript_secrets({}, ""))
+    assert values["AWS_ACCESS_KEY_ID"] == "AKIAtheaccesskey"
+    assert values["AWS_SECRET_ACCESS_KEY"] == "thesecretaccesskey"
+    assert values["AWS_SESSION_TOKEN"] == "thesessiontoken"
+    # botocore checks the legacy spelling FIRST, so a deployment that sets it
+    # is the one actually using it.
+    assert values["AWS_SECURITY_TOKEN"] == "thelegacytoken"
+    assert values["AWS_CONTAINER_AUTHORIZATION_TOKEN"] == "thecontainertoken"
+
+
+def test_a_credential_prefix_is_normalized_the_same_way_on_both_sides(monkeypatch):
+    """Normalizing on only one side IS the leak: the store would read the
+    padded spelling while the strip and scrub lists named the trimmed one."""
+    from sidecar.objectstore import BlobStoreConfig
+
+    monkeypatch.setattr(agentic_settings, "transcript_store_creds_env_prefix", "  MYCO_S3  ")
+    assert BlobStoreConfig.from_settings().creds_env_prefix == "MYCO_S3"
+    assert agentic._store_credential_vars() == {
+        "MYCO_S3_ACCESS_KEY_ID",
+        "MYCO_S3_SECRET_ACCESS_KEY",
+    }
+
+
+def test_a_destination_holding_a_newline_is_refused(monkeypatch, tmp_path):
+    """The deny-dir hand-off is newline-separated, so a directory name holding
+    one is split into a rule for somewhere else plus a tail dropped as
+    non-POSIX -- while the transcript still lands at the real path."""
+    from sidecar.objectstore import BlobStoreConfig, local_blob_root
+
+    bad = tmp_path / "one\ntwo"
+    with pytest.raises(ValueError, match="newline"):
+        transcript_mod.transcript_dir(str(bad))
+    with pytest.raises(ValueError, match="newline"):
+        local_blob_root(BlobStoreConfig(backend="file", root=str(bad)))
+
+
+def test_an_unset_store_credential_prefix_names_nothing(monkeypatch):
+    """An empty prefix must not resolve to bare `_ACCESS_KEY_ID`."""
+    monkeypatch.setattr(agentic_settings, "transcript_store_creds_env_prefix", "")
+    assert agentic._store_credential_vars() == set()
+
+
 @pytest.mark.parametrize("value", ["", None, 1234])
 def test_scrubber_skips_values_it_must_not_replace(value):
     """Only the two that cannot name a credential occurrence: an empty needle
     (matches everywhere) and a non-string (has no spelling on the wire)."""
     assert Scrubber.for_secrets([("X", value)]).replacements == ()
+
+
+# --- a truncated line cannot keep a credential fragment (#251) --------------
+
+
+def test_a_credential_prefix_left_by_a_cut_is_redacted_off_a_truncated_line():
+    """Exact-substring scrubbing matches whole values only, so a line cut
+    mid-credential holds a prefix nothing matches (#251)."""
+    scrubber = Scrubber.for_secrets([("ANTHROPIC_API_KEY", SECRET)])
+    cut = '{"type":"user","content":"token=' + SECRET[:20]
+    assert scrubber.scrub(cut) == cut  # the gap #251 documents
+    assert (
+        scrubber.scrub_partial(cut)
+        == '{"type":"user","content":"token=[REDACTED:ANTHROPIC_API_KEY]'
+    )
+
+
+def test_a_complete_event_is_untouched_by_the_truncated_line_pass():
+    """The real protection against over-redaction: a whole NDJSON event ends in
+    `}`, and no credential begins with one."""
+    scrubber = Scrubber.for_secrets([("ANTHROPIC_API_KEY", SECRET)])
+    line = json.dumps({"type": "result", "ok": True})
+    assert scrubber.scrub_partial(line) == line
+
+
+def test_the_longest_fragment_wins_rather_than_the_first_needle_to_match():
+    """`replacements` is ordered by needle LENGTH, which is not match length.
+    Returning on the first needle that matches at all would redact four
+    characters of a coincidence and leave the rest of a genuinely truncated
+    second credential on disk, under the wrong marker."""
+    cut_secret = "B" * 30
+    long_secret = "BBBB" + "z" * 40  # sorts first: the longest needle
+    scrubber = Scrubber.for_secrets([("LONG_KEY", long_secret), ("CUT_KEY", cut_secret)])
+    # The cut left 20 characters of CUT_KEY on the line; their last four also
+    # happen to be LONG_KEY's first four, which is all a first-match-wins scan
+    # would redact -- leaving 16 characters of a live credential behind it.
+    line = "trailing " + cut_secret[:20]
+    assert scrubber.scrub_partial(line) == "trailing [REDACTED:CUT_KEY]"
+
+    # And the ordinary case: the longer of two genuine fragments is taken.
+    other = "B" * 10 + "y" * 20
+    scrubber = Scrubber.for_secrets([("OTHER", other), ("CUT_KEY", cut_secret)])
+    assert scrubber.scrub_partial("trailing " + cut_secret[:20]) == ("trailing [REDACTED:CUT_KEY]")
+
+
+def test_a_fragment_shorter_than_the_minimum_is_left_alone():
+    scrubber = Scrubber.for_secrets([("ANTHROPIC_API_KEY", SECRET)])
+    short = "trailing text ending in " + SECRET[: transcript_mod.MIN_FRAGMENT - 1]
+    assert scrubber.scrub_partial(short) == short
+
+
+def test_a_line_with_a_newline_never_takes_the_truncated_pass(monkeypatch):
+    """Only the last line a pipe yields can lack its newline, so the extra pass
+    costs at most one line per run."""
+    calls = []
+    transcript, sink = _transcript([("ANTHROPIC_API_KEY", SECRET)])
+    monkeypatch.setattr(
+        transcript_mod.Scrubber, "scrub_partial", lambda self, text: calls.append(text) or text
+    )
+    transcript.write('{"a": 1}\n')
+    assert calls == []
+    transcript.write('{"a": 1')
+    assert calls == ['{"a": 1']
+
+
+def test_a_timeout_kill_that_cuts_a_credential_leaves_no_fragment_on_disk(tmp_path):
+    """#251's acceptance, driven through the real kill path: the harness is
+    killed while a credential is half-written, and nothing of it reaches disk."""
+    events = [{"type": "assistant", "n": index} for index in range(3)]
+    straddle = '{"type":"user","content":"export TOKEN=' + SECRET[:20]
+    assert _feed_script(
+        tmp_path,
+        events,
+        tail=f"sys.stdout.write({straddle!r})\nsys.stdout.flush()\ntime.sleep(60)\n",
+    ).exists()
+    transcript = open_transcript(
+        [("GITHUB_APP_TOKEN", SECRET)], directory=str(tmp_path / "transcripts")
+    )
+    result = run_review(
+        "p",
+        tmp_path,
+        cwd=tmp_path,
+        model="m",
+        env={**os.environ, "PATH": str(tmp_path)},
+        timeout=2,
+        transcript=transcript,
+    )
+    assert result.timed_out is True
+    written = (tmp_path / "transcripts" / f"{transcript.key}.ndjson").read_text()
+    assert SECRET[: transcript_mod.MIN_FRAGMENT] not in written
+    assert "[REDACTED:GITHUB_APP_TOKEN]" in written
+    # Everything that streamed before the cut still survives (#236).
+    assert [json.loads(line) for line in written.splitlines()[:3]] == events
+
+
+def test_a_clean_run_keeps_a_final_event_that_ends_without_a_newline(tmp_path):
+    """The companion #251 asks for: the guard must not cost a complete final
+    event, which is why the line is kept and only the fragment removed."""
+    assert _feed_script(
+        tmp_path,
+        [{"type": "assistant", "n": 0}],
+        tail=f"sys.stdout.write(json.dumps({RESULT_EVENT!r}))\n",
+    ).exists()
+    transcript = open_transcript(
+        [("GITHUB_APP_TOKEN", SECRET)], directory=str(tmp_path / "transcripts")
+    )
+    result = run_review(
+        "p",
+        tmp_path,
+        cwd=tmp_path,
+        model="m",
+        env={**os.environ, "PATH": str(tmp_path)},
+        timeout=30,
+        transcript=transcript,
+    )
+    assert result.timed_out is False
+    written = (tmp_path / "transcripts" / f"{transcript.key}.ndjson").read_text().splitlines()
+    assert json.loads(written[-1]) == RESULT_EVENT
+
+
+# --- shipping the finished file off the runner (#238) ----------------------
+
+
+def test_the_finished_file_is_shipped_on_close_and_only_then(tmp_path):
+    shipped = []
+    inner = FileTranscriptSink(tmp_path / "t.ndjson")
+    sink = ShippingTranscriptSink(
+        inner, "k", lambda key, path: shipped.append((key, path.read_bytes()))
+    )
+    sink.write('{"a": 1}')
+    assert shipped == []
+    sink.close()
+    assert shipped == [("k", b'{"a": 1}\n')]
+
+
+def test_a_run_that_wrote_nothing_ships_nothing(tmp_path):
+    shipped = []
+    inner = FileTranscriptSink(tmp_path / "t.ndjson")
+    ShippingTranscriptSink(inner, "k", lambda key, path: shipped.append(key)).close()
+    assert shipped == []
+    assert not (tmp_path / "t.ndjson").exists()
+
+
+def test_closing_twice_ships_once(tmp_path):
+    """`TranscriptSink.close` promises repeat calls are safe, and the key is
+    write-once -- a second ship would answer 409 and turn a harmless repeat
+    call into a reported capture failure."""
+    shipped = []
+    inner = FileTranscriptSink(tmp_path / "t.ndjson")
+    sink = ShippingTranscriptSink(inner, "k", lambda key, path: shipped.append(key))
+    sink.write('{"a": 1}')
+    sink.close()
+    sink.close()
+    assert shipped == ["k"]
+
+
+def test_a_close_after_a_failed_ship_does_not_retry_it(tmp_path):
+    """One attempt is the decision this module already made: the blob is
+    write-once, so a retry races an upload that may already have landed."""
+    calls = []
+
+    def _boom(key, path):
+        calls.append(key)
+        raise RuntimeError("sidecar unreachable")
+
+    inner = FileTranscriptSink(tmp_path / "t.ndjson")
+    sink = ShippingTranscriptSink(inner, "k", _boom)
+    sink.write('{"a": 1}')
+    with pytest.raises(RuntimeError):
+        sink.close()
+    sink.close()
+    assert calls == ["k"]
+
+
+def test_a_first_write_that_fails_ships_nothing(tmp_path, monkeypatch):
+    """`opened` has to mean a line LANDED, not that the file was created:
+    otherwise a failure on the very first write ships an empty blob under a
+    write-once key, contradicting "a run that wrote nothing ships nothing"."""
+    shipped = []
+    inner = FileTranscriptSink(tmp_path / "t.ndjson")
+    sink = ShippingTranscriptSink(inner, "k", lambda key, path: shipped.append(key))
+    transcript = Transcript("k", sink, Scrubber())
+
+    monkeypatch.setattr(FileTranscriptSink, "write", lambda self, line: _fail_after_create(self))
+    transcript.write('{"a": 1}')
+    monkeypatch.undo()
+    transcript.close()
+    assert shipped == []
+
+
+def _fail_after_create(sink):
+    """Create the file the way `write` does, then fail before any line lands."""
+    sink.path.parent.mkdir(mode=sink.DIR_MODE, parents=True, exist_ok=True)
+    sink.path.touch(mode=sink.FILE_MODE)
+    raise OSError("no space left on device")
+
+
+def test_a_transcript_that_went_inert_is_still_shipped(tmp_path):
+    """What is on disk is a clean PREFIX -- capture goes inert on the first
+    failure rather than skipping a line and resuming -- which is the shape #236
+    keeps."""
+    shipped = []
+    inner = FileTranscriptSink(tmp_path / "t.ndjson")
+    sink = ShippingTranscriptSink(inner, "k", lambda key, path: shipped.append(key))
+    transcript = Transcript("k", sink, Scrubber())
+    transcript.write('{"a": 1}')
+    transcript._fail(OSError("no space left on device"))
+    transcript.write('{"a": 2}')
+    transcript.close()
+    assert shipped == ["k"]
+    assert (tmp_path / "t.ndjson").read_text() == '{"a": 1}\n'
+
+
+def test_a_failed_upload_is_one_stderr_line_and_never_a_fault(tmp_path, capsys):
+    def _boom(key, path):
+        raise httpx.ConnectError("sidecar unreachable")
+
+    inner = FileTranscriptSink(tmp_path / "t.ndjson")
+    transcript = Transcript("k", ShippingTranscriptSink(inner, "k", _boom), Scrubber())
+    transcript.write('{"a": 1}')
+    transcript.close()
+    err = capsys.readouterr().err
+    assert err.count("fuko: transcript k capture failed") == 1
+    assert "sidecar unreachable" in err
+
+
+def test_capture_only_deployments_never_wrap_the_sink(tmp_path, monkeypatch):
+    """With nowhere to ship, #237's behaviour is unchanged -- a local file and
+    no attempt, rather than a failure reported once a run."""
+    monkeypatch.setattr(transcript_mod, "upload_target", lambda: "")
+    transcript = open_transcript([], directory=str(tmp_path))
+    assert isinstance(transcript._sink, FileTranscriptSink)
+
+
+def test_a_reachable_destination_wraps_the_sink_and_is_announced(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(transcript_mod, "upload_target", lambda: "sidecar")
+    transcript = open_transcript([], directory=str(tmp_path))
+    assert isinstance(transcript._sink, ShippingTranscriptSink)
+    assert "-> sidecar" in capsys.readouterr().err

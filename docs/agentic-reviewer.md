@@ -25,6 +25,7 @@ sidecar/reviewer/            the reviewer (harness-agnostic core)
   harness.py                 agent runtimes (headless Claude Code today)
   ledger.py                  per-seat findings + coverage policy (carry in / settle)
   transcript.py              scrubbed, streaming capture of the harness event feed
+  transcript_client.py       how a finished transcript leaves the runner
 sidecar/backends/agentic.py  the fuko driver (ReviewBackend protocol)
 ```
 
@@ -492,6 +493,16 @@ Properties worth knowing before turning it on:
   the driver does not hold are written verbatim: nothing is inferred from a
   string's shape, because an over-broad rule silently corrupts the corpus and
   cannot be undone.
+
+  Exact-value replacement is per **whole line**, and there is exactly one line
+  that may not be whole: when `tool_timeout` kills the harness (or the child
+  dies mid-write) the pipe yields a trailing line with no newline, which can
+  hold a *prefix* of a credential that no exact rule matches (#251). That line
+  gets a second pass which redacts a trailing suffix of it that is a proper
+  prefix of a known value. It is a no-op on a clean run: a complete NDJSON
+  event ends in `}` and no credential begins with one, so the guard costs no
+  corpus fidelity and, unlike dropping the line, does not throw away a complete
+  final `result` event.
 - **Streamed, never buffered.** One line at a time, line-buffered, so peak
   memory does not track transcript size and a run killed at `tool_timeout`
   keeps everything that arrived before the cut.
@@ -533,9 +544,71 @@ Properties worth knowing before turning it on:
   inserted afterwards and never returns its id), so later work can key a stored
   blob and an index row on it.
 
-Nothing reads these files yet — a workflow can upload one as a run artifact.
-Shipping them off the runner (#238), the derived per-tool metrics (#239), and
-the readers (#240, #241) are the rest of the epic.
+### Shipping them off the runner (`FUKO_TRANSCRIPT_STORE_*`)
+
+A transcript on one runner's disk is only reachable from that runner. Point the
+**sidecar** at object storage and every runner's transcript lands in one place,
+keyed by the same key capture minted (#238):
+
+```bash
+# On the sidecar, not the runner.
+FUKO_TRANSCRIPT_STORE_BACKEND=s3          # unset/empty = no store, transcripts stay local
+FUKO_TRANSCRIPT_STORE_BUCKET=fuko-transcripts
+FUKO_TRANSCRIPT_STORE_PREFIX=transcripts  # optional, inside the bucket
+FUKO_TRANSCRIPT_STORE_ENDPOINT_URL=https://<accountid>.r2.cloudflarestorage.com   # R2
+FUKO_TRANSCRIPT_STORE_CREDS_ENV_PREFIX=FUKO_S3   # reads FUKO_S3_ACCESS_KEY_ID / _SECRET_ACCESS_KEY / _REGION
+```
+
+`backend = file` with `FUKO_TRANSCRIPT_STORE_ROOT=/var/lib/fuko/blobs` is the
+serverless variant — one directory of blobs, useful for a single-host fleet and
+for trying the path out before there is a bucket.
+
+- **The runner holds no storage credentials.** It ships to the sidecar it
+  already has (`FUKO_URL` + `FUKO_TOKEN`) over a dedicated `POST
+  /transcripts/<key>`, and the sidecar writes the blob. Nothing new goes into a
+  consuming repo's workflow secrets. On a host with no `FUKO_URL` (a laptop
+  `fuko review`) the same `FUKO_TRANSCRIPT_STORE_*` variables are read locally
+  and the write goes straight to the store.
+- **Environment, not `.fuko.toml`.** The deployed sidecar image carries no repo
+  checkout, so it has no config file to read — the same reason the embedding
+  endpoint is environment-only (#216).
+- **Blobs are write-once.** A key is created or refused (`409`), never
+  overwritten, so a re-delivery cannot clobber a stored session. Capture keeps
+  the local file too — the deployed copy is a second home, not a move — so a
+  workflow artifact upload still works.
+- **Unconfigured stays working.** No `FUKO_TRANSCRIPT_STORE_BACKEND` means the
+  sidecar starts, reviews run, and transcripts are simply absent from storage.
+  A runner with no destination at all (no `FUKO_URL`, no local store) does not
+  even wrap the sink, so it never attempts an upload. A runner that ships to a
+  sidecar whose store is unconfigured attempts once, gets a `503`, and treats
+  that as the off state — silently, so staging capture ahead of storage does
+  not print a line per run. Any *other* rejection is one stderr line and a
+  review identical to one with no capture at all.
+- **It costs the review at most one timeout.** The upload happens once, at
+  close, on the finished file, streamed off disk in 64 KiB chunks under an
+  absolute 120-second body deadline — an order of magnitude above
+  `/metrics/run`'s 10 seconds, which is why it is not that endpoint. `httpx`
+  has no request lifetime, only per-phase timeouts, so the deadline rides on
+  the body stream itself; the phases it cannot interleave with (connect, the
+  one write already in flight, the response) are bounded separately, and the
+  true worst case is `transcript_client.UPLOAD_CEILING_S` — 160 seconds, which
+  holds because the response body is never read (a read to completion is
+  bounded per chunk, not in total). There
+  is no retry: the blob is write-once, so a retry after a client-side timeout
+  would race an upload that may already have landed.
+- **A local blob store is denied to the agent.** With the `file` backend on the
+  host that runs the harness, the store root is a second, longer-lived copy of
+  the transcript corpus, so it goes into the reviewer's read denylist beside
+  `FUKO_TRANSCRIPT_DIR` — same reasoning, same rule. The rule is built from the
+  **runner process's own** `FUKO_TRANSCRIPT_STORE_*`, because that is the only
+  configuration it can see. In the containerized deployment the sidecar's store
+  lives behind a container boundary and the question does not arise; but if you
+  run a `file`-backend sidecar as a plain process **on the runner host**, export
+  the same `FUKO_TRANSCRIPT_STORE_BACKEND` / `_ROOT` to the runner too, or the
+  corpus is written where no deny rule reaches it.
+
+The derived per-tool metrics (#239) and the readers (#240, #241) are the rest of
+the epic; nothing reads the blobs yet.
 
 ## Configuration
 

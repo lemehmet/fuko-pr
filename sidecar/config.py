@@ -67,5 +67,44 @@ class Settings(BaseSettings):
     # the file as a run artifact).
     transcript_dir: str = ""
 
+    # Where the SIDECAR puts the transcripts runners ship it (#238). Empty
+    # backend means no transcript store, which is the off state and not an
+    # error: object storage becomes newly relevant to Postgres deployments with
+    # this feature, and one that never configures it has to keep starting and
+    # reviewing exactly as before, with transcripts simply absent.
+    #
+    # Environment rather than `.fuko.toml` because the deployed sidecar has no
+    # checkout to read one from -- `docker/Dockerfile.sidecar` copies only
+    # `sidecar/` and `migrations/` into `/app`, so `load_config()` finds no file
+    # there and `docker/runner-compose.yml` configures the service entirely
+    # through FUKO_*. Same argument #216 made for the embedding endpoint.
+    #
+    # The RUNNER reads these too, but only on the path where no `FUKO_URL` is
+    # set (a laptop `fuko review`); a runner pointed at a sidecar ships through
+    # it and needs no storage credentials of its own.
+    transcript_store_backend: str = ""  # "" (off) | file | s3 | r2
+    transcript_store_root: str = ""  # file backend: the directory holding blobs
+    transcript_store_bucket: str = ""  # s3/r2
+    transcript_store_prefix: str = ""  # s3/r2: key prefix inside the bucket
+    transcript_store_endpoint_url: str = ""  # s3/r2: set for R2 and S3-compatibles
+    # Names the two credential variables read for s3/r2:
+    # <prefix>_ACCESS_KEY_ID and <prefix>_SECRET_ACCESS_KEY (plus <prefix>_REGION).
+    # Renaming it needs no source edit: `agentic._store_credential_vars()`
+    # derives the two names from THIS setting at run time and feeds them to
+    # both the harness-environment strip and the transcript scrub list. That
+    # derivation is the mechanism -- `agentic._FUKO_SECRET_VARS`' literal
+    # `FUKO_S3_*` entries only cover the default when settings are absent, and
+    # deleting the derivation as redundant with them would reopen the leak.
+    transcript_store_creds_env_prefix: str = "FUKO_S3"
+    # Largest transcript the sidecar will accept in one upload. A ceiling on
+    # what a single request can make the process hold, not a policy about
+    # transcript size: the epic keeps everything and truncates nothing, so this
+    # sits far above any real session (a long agentic review with megabytes of
+    # tool results is tens of MB) and exists so a runaway or malformed body
+    # cannot exhaust the sidecar's memory. An upload over it is refused whole
+    # (413) rather than stored truncated -- a partial blob under a write-once
+    # key could never be corrected.
+    transcript_max_bytes: int = Field(default=256 * 1024 * 1024, gt=0)
+
 
 settings = Settings()

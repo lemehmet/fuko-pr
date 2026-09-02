@@ -104,6 +104,93 @@ FUKO_EMBED_QUERY_PREFIX=          # empty unless the model is asymmetric
 changing it re-embeds the knowledge base. Embeddings are cheap (pennies), and the
 file is small, so each run's download/query/upload is fast.
 
+## Session transcripts in object storage (optional)
+
+Two object stores, and they are unrelated. The one above holds **the knowledge
+base** as a single mutable sqlite file and only exists in the server-free
+deployment. This one holds **agentic session transcripts** as many write-once
+blobs, and it is newly relevant to a **Postgres** deployment, which has never
+needed object storage before (#238).
+
+It is entirely optional. Leave `FUKO_TRANSCRIPT_STORE_BACKEND` unset and the
+sidecar starts, reviews run and no transcript is ever stored *here* — no error,
+no change from before. Note what that does **not** mean: a runner with
+`FUKO_TRANSCRIPT_DIR` set still writes its own local transcript, exactly as it
+did before this feature existed. Unset means shared-store persistence is off,
+not that capture is; the runner-resident copy of the reviewed repository is
+governed by `FUKO_TRANSCRIPT_DIR` alone. Turn shipping on only if you have also
+turned capture on there (see [`agentic-reviewer.md`](agentic-reviewer.md), which
+is where the whole feature and its privacy properties are documented).
+
+Configure it **on the sidecar**, through the environment — the deployed sidecar
+image has no repo checkout and therefore no `.fuko.toml` to read (the same
+reason the embedding endpoint is environment-only, #216):
+
+```bash
+FUKO_TRANSCRIPT_STORE_BACKEND=r2          # "" (off) | file | s3 | r2
+FUKO_TRANSCRIPT_STORE_BUCKET=fuko-transcripts
+FUKO_TRANSCRIPT_STORE_PREFIX=transcripts               # optional
+FUKO_TRANSCRIPT_STORE_ENDPOINT_URL=https://<accountid>.r2.cloudflarestorage.com
+FUKO_TRANSCRIPT_STORE_CREDS_ENV_PREFIX=FUKO_S3         # reads <prefix>_ACCESS_KEY_ID / _SECRET_ACCESS_KEY / _REGION
+```
+
+or, for a single host with no bucket:
+
+```bash
+FUKO_TRANSCRIPT_STORE_BACKEND=file
+FUKO_TRANSCRIPT_STORE_ROOT=/var/lib/fuko/transcript-blobs   # absolute, no newline
+```
+
+The `file` root must be **absolute** and must not contain a newline. Both are
+refused at startup of the first upload rather than silently accepted: a relative
+root resolves against whichever process reads it, and the reviewer's read
+denylist is built in a different process from the store; a newline cannot be
+represented in the deny-path hand-off. Either would leave the corpus written
+where no rule covers it.
+
+The **`s3`/`r2` backends need `boto3`**, which `docker/Dockerfile.sidecar`
+installs via the `s3` extra (`pip install ".[s3]"`). Running the sidecar from a
+plain `pip install fuko-pr` instead? Install `fuko-pr[s3]` or the bucket
+backends answer `503 transcript store unusable: No module named 'boto3'` on
+every upload, and log the same line on the sidecar. The `file` backend and the
+unconfigured default need nothing.
+
+One exception to configuring it on the sidecar alone: if you run a
+`file`-backend sidecar as a plain process **on a host that also runs agentic
+reviews**, export `FUKO_TRANSCRIPT_STORE_BACKEND` / `_ROOT` to the runner as
+well. The reviewer's read denylist is built from the runner process's own
+settings, so otherwise the blob corpus sits on the harness's filesystem with no
+rule covering it (see [`agentic-reviewer.md`](agentic-reviewer.md)). The
+containerized deployment below is insulated by the container boundary.
+
+**Runners need nothing.** They ship what they captured to the sidecar they
+already talk to, over `POST /transcripts/<key>` with the `FUKO_TOKEN` they
+already hold; no storage credentials are added to any workflow. An IAM user
+limited to `s3:PutObject`/`s3:GetObject` on the bucket is enough, and the bucket
+should be private: a transcript holds the reviewed repository as the agent read
+it.
+
+`FUKO_TRANSCRIPT_MAX_BYTES` (default 256 MiB) bounds what one upload can make
+the sidecar hold; an upload over it is refused whole (`413`) rather than stored
+truncated, since a partial blob under a write-once key could never be corrected.
+It is a memory ceiling, not a retention policy — real sessions are tens of MB.
+
+**Growth is unbounded by design** — every agentic seat, every push, kept
+forever (epic #236). Budget for it.
+
+Renaming `FUKO_TRANSCRIPT_STORE_CREDS_ENV_PREFIX` needs no source edit: the
+driver derives `<prefix>_ACCESS_KEY_ID` / `<prefix>_SECRET_ACCESS_KEY` from the
+setting at run time and both strips them from the agent's environment and
+scrubs them by value from transcripts.
+
+**Turning capture on before storage is a supported order.** A runner that ships
+to a sidecar with `FUKO_TRANSCRIPT_STORE_BACKEND` unset gets a `503` marked
+`X-Fuko-Transcript-Store: unconfigured`, treats it as the off state, and says
+nothing — you do not get a failure line per run while you stage the rollout. A
+store that was *meant* to work and does not (unknown backend, missing bucket,
+absent `boto3`) is a different `503`: the sidecar logs it and the runner reports
+it, once, on stderr. Neither ever faults the review.
+
 ## Ollama in Docker
 
 PR-Agent runs in a container; for a host Ollama, set the review model's
