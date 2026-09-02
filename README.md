@@ -227,7 +227,9 @@ fuko kb forget owner/name --id <uuid>
 - **`FUKO_*` env** (runtime/server settings): `FUKO_DATABASE_URL`, `FUKO_AUTH_TOKEN`,
   and **the entire embedding endpoint** (`FUKO_EMBED_BASE_URL`, `FUKO_EMBED_MODEL`,
   `FUKO_EMBED_API_KEY`, `FUKO_EMBED_QUERY_PREFIX`) — there is no file-based way to
-  set it. See `.env.example`.
+  set it. `FUKO_TRANSCRIPT_DIR` turns on agentic session transcripts (off when
+  unset; see [`docs/agentic-reviewer.md`](docs/agentic-reviewer.md)). See
+  `.env.example`.
 
 Design and contracts: [`docs/design.md`](docs/design.md).
 

@@ -16,8 +16,10 @@ from sidecar.backends.agentic import AgenticBackend
 from sidecar.backends.base import PRRef
 from sidecar.fukoconfig import ModelConfig, ReviewConfig
 from sidecar.presets import PRESETS, ProviderPreset, get_preset
+from sidecar.config import settings
 from sidecar.reviewer.checkout import PRContext
 from sidecar.reviewer.harness import HarnessResult
+from sidecar.reviewer.transcript import Transcript
 from sidecar.signals import extract_markers
 
 PR = PRRef(repo="o/r", number=9, url="https://github.com/o/r/pull/9")
@@ -76,7 +78,7 @@ def _invoke(monkeypatch, backend: AgenticBackend, harness_result: HarnessResult,
     monkeypatch.setattr(agentic_mod, "check_auth", lambda *a, **k: {"loggedIn": True})
     captured = {}
 
-    def fake_run_review(prompt, checkout, *, cwd, model, env, timeout, max_turns):
+    def fake_run_review(prompt, checkout, *, cwd, model, env, timeout, max_turns, transcript=None):
         captured.update(
             prompt=prompt,
             checkout=checkout,
@@ -85,6 +87,7 @@ def _invoke(monkeypatch, backend: AgenticBackend, harness_result: HarnessResult,
             env=env,
             timeout=timeout,
             max_turns=max_turns,
+            transcript=transcript,
         )
         return harness_result
 
@@ -578,6 +581,14 @@ def test_invoke_strips_the_whole_fuko_namespace_from_the_harness_env(monkeypatch
     }
     for k, v in secrets.items():
         monkeypatch.setenv(k, v)
+    # `settings` is built from the process environment at IMPORT time, so a
+    # runner that exports FUKO_TRANSCRIPT_DIR -- which is exactly what this
+    # feature's docs tell a deployment to do -- would otherwise put the
+    # legitimate `FUKO_TRANSCRIPT_DENY_DIR` hand-off in this assertion's way and
+    # fail the suite on the fleet it documents. Pin it rather than exempt the
+    # name: the assertion is over the NAMESPACE on purpose (see the docstring),
+    # and an exemption list is how that reopens one variable at a time.
+    monkeypatch.setattr(settings, "transcript_dir", "", raising=False)
     backend = AgenticBackend()
     _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
 
@@ -2098,6 +2109,63 @@ def test_api_key_branch_still_denies_the_ambient_claude_config_dir(monkeypatch):
     _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON), env=env)
     assert captured["env"]["CLAUDE_CONFIG_DIR"] != "/runner/ambient-claude"
     assert captured["env"]["FUKO_AMBIENT_CLAUDE_CONFIG_DIR"] == "/runner/ambient-claude"
+
+
+def test_the_transcript_destination_reaches_the_harness_for_the_deny_rule(monkeypatch, tmp_path):
+    """`FUKO_TRANSCRIPT_DIR` is stripped with the rest of the namespace, so the
+    destination has to be handed over under its own name or the read denylist
+    cannot cover the corpus (`_permission_settings` builds its rules from this
+    environment)."""
+    corpus = (tmp_path / "corpus").resolve()
+    # A sibling seat's provider key: ambient, stripped from the harness env, and
+    # distinct from the checkout token so the assertion names one source only.
+    ambient_key = "sk-other-seats-provider-key"
+    monkeypatch.setenv("ZAI_KEY", ambient_key)
+    monkeypatch.setattr(settings, "transcript_dir", str(corpus), raising=False)
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert "FUKO_TRANSCRIPT_DIR" not in captured["env"]
+    assert captured["env"]["FUKO_TRANSCRIPT_DENY_DIR"] == str(corpus)
+    # The hand-off and the capture are separate wirings; asserting only the
+    # environment would stay green with the `transcript=` kwarg dropped, and
+    # capture would silently be off on every deployment.
+    assert isinstance(captured["transcript"], Transcript)
+    assert captured["transcript"].key
+    # The scrubber's CONTENTS, not just the object: a regression to
+    # `open_transcript([], ...)` or to the wrong environment would persist
+    # unscrubbed credentials on every deployment with the suite still green,
+    # and scrubbing-at-capture is this PR's whole security property.
+    assert (
+        captured["transcript"]._scrubber.scrub(f"key={ambient_key} here")
+        == "key=[REDACTED:ZAI_KEY] here"
+    )
+
+
+def test_no_transcript_destination_hands_over_no_deny_dir(monkeypatch):
+    """Capture off must not put an empty value in the environment: an empty
+    deny path would render a rule matching nothing, or everything."""
+    monkeypatch.setattr(settings, "transcript_dir", "", raising=False)
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert "FUKO_TRANSCRIPT_DENY_DIR" not in captured["env"]
+    assert captured["transcript"] is None
+
+
+def test_a_refused_destination_leaves_no_deny_var_and_no_capture(monkeypatch, capsys):
+    """A destination `transcript_dir()` rejects must take BOTH sides down. The
+    root is the case that matters: `_permission_settings` rstrips it to the
+    empty string and drops the candidate silently, so a capture that opened
+    against it would be written where no rule reaches."""
+    monkeypatch.setattr(settings, "transcript_dir", "/", raising=False)
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert "FUKO_TRANSCRIPT_DENY_DIR" not in captured["env"]
+    assert captured["transcript"] is None
+    # ONE diagnostic, not two: `open_transcript` would resolve the same setting
+    # and reject it again, and one capture failure reporting twice is the
+    # log-flood shape `Transcript._fail` avoids one level down.
+    err = capsys.readouterr().err
+    assert err.count("transcript capture unavailable") == 1
 
 
 def test_failure_prints_full_stderr_and_leads_the_detail_with_the_verdict(monkeypatch, capsys):

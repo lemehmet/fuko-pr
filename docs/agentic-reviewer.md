@@ -24,6 +24,7 @@ sidecar/reviewer/            the reviewer (harness-agnostic core)
   prompt.py                  review strategy + JSON output contract   <- the value
   harness.py                 agent runtimes (headless Claude Code today)
   ledger.py                  per-seat findings + coverage policy (carry in / settle)
+  transcript.py              scrubbed, streaming capture of the harness event feed
 sidecar/backends/agentic.py  the fuko driver (ReviewBackend protocol)
 ```
 
@@ -465,6 +466,76 @@ model serves the harness's background haiku-class and subagent calls too. The
 vendor presets name a cheap tier there to keep those calls off an expensive
 model; a single-model deployment has no cheap tier, and naming a second slug
 would make the gateway swap models mid-review.
+
+## Session transcripts (`FUKO_TRANSCRIPT_DIR`)
+
+The harness reads the CLI's whole NDJSON event feed and folds it away, keeping
+only `assistant` and `result` events — so the `user` events, where tool
+**results** live (~91% of a review's token spend), were read and discarded in
+the same pass. Setting `FUKO_TRANSCRIPT_DIR` tees that feed to
+`<dir>/<key>.ndjson` as it streams (#237, epic #236):
+
+```bash
+FUKO_TRANSCRIPT_DIR=/var/lib/fuko/transcripts   # unset = capture off
+```
+
+Properties worth knowing before turning it on:
+
+- **Off by default, and off means free.** With the variable unset the feed is
+  iterated exactly as before — no tee, no per-event cost. There is deliberately
+  no default path: this writes a file per agentic branch per push and keeps it.
+- **Credentials are scrubbed at capture, irreversibly.** The driver hands the
+  transcript the exact values it holds — the checkout's GitHub App token, the
+  seat's injected provider credential, and the ambient secrets it strips from
+  the harness environment — and each is replaced by `[REDACTED:<VAR>]` before
+  any byte reaches disk, including inside a tool result that echoed it. Values
+  the driver does not hold are written verbatim: nothing is inferred from a
+  string's shape, because an over-broad rule silently corrupts the corpus and
+  cannot be undone.
+- **Streamed, never buffered.** One line at a time, line-buffered, so peak
+  memory does not track transcript size and a run killed at `tool_timeout`
+  keeps everything that arrived before the cut.
+- **Denied to the reviewing agent.** The destination is added to the harness
+  read denylist whenever it is configured — including on runs that do not
+  capture, since the archive earlier rounds left behind is the part worth
+  reading. The path is canonicalized first (`expanduser().resolve()`), so a
+  relative or symlinked destination cannot render a rule that misses what is
+  actually written; `/var/lib/fuko/transcripts` becomes the rule
+  `Read(//var/lib/fuko/transcripts/**)` in the absolute-rule spelling described
+  above. This is not covered by the file mode: the agent is spawned
+  as the same uid, so `0600` stops other *users*, not this reader. Without the
+  rule a transcript is a durable, cross-repo record of everything past runs
+  read, sitting where `Glob` can find it, reachable by an agent whose findings
+  are published verbatim to an untrusted PR author. `FUKO_TRANSCRIPT_DIR` is
+  stripped with the rest of the `FUKO_` namespace before the spawn, so the path
+  is handed over under its own name (`FUKO_TRANSCRIPT_DENY_DIR`) purely to be
+  denied.
+
+  **The rule follows the setting, not the files.** It is emitted for whatever
+  `FUKO_TRANSCRIPT_DIR` names *right now*, so **unsetting the variable or
+  pointing it at a new directory un-denies the corpus already on disk** — the
+  files stay where they are, and from the next run on nothing stops the agent
+  reading them. Turning capture off for privacy, or moving the destination to a
+  bigger disk, is therefore not a retreat: **delete the old directory**, or keep
+  its path denied by other means. There is deliberately no memory of previously
+  configured destinations — a deny list that accumulated paths nobody could see
+  or clear would be its own hazard — so this one is on the operator.
+- **Owner-only on disk.** The directory is created `0700` and each file `0600`,
+  set as the file is created rather than chmod'ed after. What survives the
+  scrub is the reviewed repository as the agent read it — the same content the
+  checkout gets a `0700` temp dir for, except a transcript is kept rather than
+  deleted, so on a shared runner the durable copy must not be the readable one.
+- **Capture never fails a review.** An unwritable destination, a full disk, a
+  misconfigured path: one stderr line, an inert transcript, and a review whose
+  text, `usage`, `cost_usd`, `turns` and `subtype` are identical to a run with
+  no capture at all.
+- **The key is the transcript's own.** Minted at run start (`review_runs` is
+  inserted afterwards and never returns its id), so later work can key a stored
+  blob and an index row on it.
+
+Nothing reads these files yet — a workflow can upload one as a run artifact.
+Shipping them off the runner (#238), the derived per-tool metrics (#239), and
+the readers (#240, #241) are the rest of the epic.
 
 ## Configuration
 

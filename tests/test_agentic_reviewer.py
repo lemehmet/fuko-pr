@@ -973,9 +973,15 @@ def test_run_review_missing_binary(monkeypatch, tmp_path):
 
 
 def _fake_drive(seen, text='{"findings": []}', returncode=0, timed_out=False, **outcome):
-    def fake(cmd, *, prompt, cwd, env, timeout, emit):
+    def fake(cmd, *, prompt, cwd, env, timeout, emit, transcript=None):
         seen["cmd"] = cmd
-        seen["kwargs"] = {"prompt": prompt, "cwd": cwd, "env": env, "timeout": timeout}
+        seen["kwargs"] = {
+            "prompt": prompt,
+            "cwd": cwd,
+            "env": env,
+            "timeout": timeout,
+            "transcript": transcript,
+        }
         return (
             returncode,
             harness_mod._StreamOutcome(text=text, saw_result=True, **outcome),
@@ -1627,6 +1633,31 @@ def test_permission_settings_denies_both_effective_and_ambient_config_dirs():
     deny = payload["permissions"]["deny"]
     assert "Read(//tmp/branch-cfg/**)" in deny
     assert "Read(//runner/ambient-claude/**)" in deny
+
+
+def test_permission_settings_denies_the_transcript_corpus():
+    """A transcript holds every file a PAST run's agent read, plus that run's
+    prompt and knowledge base, kept forever and across repositories. The agent
+    is spawned as the same uid, so the files' 0600 mode does not stop it, and
+    `Glob` finds the directory without being told where it is."""
+    payload = json.loads(
+        harness_mod._permission_settings(
+            {
+                "HOME": "/home/runner",
+                harness_mod._ENV_TRANSCRIPT_DENY_DIR: "/var/lib/fuko/transcripts/",
+            }
+        )
+    )
+    assert "Read(//var/lib/fuko/transcripts/**)" in payload["permissions"]["deny"]
+
+
+def test_permission_settings_without_a_transcript_dir_adds_no_rule():
+    """Capture off is the default; it must not emit a rule denying `/**`."""
+    deny = json.loads(harness_mod._permission_settings({"HOME": "/home/runner"}))["permissions"][
+        "deny"
+    ]
+    assert not any("transcript" in rule for rule in deny)
+    assert "Read(//**)" not in deny
 
 
 def test_flatten_covers_every_character_splitlines_breaks_on():
