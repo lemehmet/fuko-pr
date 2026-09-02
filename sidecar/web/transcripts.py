@@ -255,7 +255,7 @@ def _result_text(content: object) -> str:
     if isinstance(content, str):
         return content
     if not isinstance(content, list):
-        return json.dumps(content, indent=2, default=str)
+        return _json_text(content)
     parts: list[str] = []
     for block in content:
         if isinstance(block, dict) and isinstance(block.get("text"), str):
@@ -266,10 +266,27 @@ def _result_text(content: object) -> str:
     return "\n".join(parts)
 
 
+def _json_text(value: object) -> str:
+    """Render stored JSON as indented text, degrading rather than raising.
+
+    One door, like :func:`_esc`, because every caller has the same hazard.
+    ``indent`` puts :mod:`json` on its pure-Python encoder, which recurses once
+    per level, so a line nested deeply enough to exhaust the encoder's stack
+    reaches here having DECODED cleanly -- the parse-side guard in
+    :func:`read_session` cannot catch it, and it is a 500 on a page whose
+    contract is that it always draws. The corpus is contributor-controlled, so
+    the nesting is chosen, not stumbled into.
+    """
+    try:
+        return json.dumps(value, indent=2, default=str)
+    except (RecursionError, ValueError, TypeError):
+        return "[unrenderable event: nested or malformed beyond what this page will decode]"
+
+
 def _block_html(block: object) -> str:
     """Render one content block of an ``assistant`` or ``user`` event."""
     if not isinstance(block, dict):
-        return _fold("block", json.dumps(block, indent=2, default=str))
+        return _fold("block", _json_text(block))
     kind = block.get("type")
     if kind == "text":
         return _fold("assistant", str(block.get("text", "")), css="")
@@ -280,7 +297,7 @@ def _block_html(block: object) -> str:
         # lone-surrogate string as its `\ud800` escape rather than as an
         # unencodable character, which is one fewer way for stored bytes to
         # reach the response encoder intact.
-        return _fold(label, json.dumps(block.get("input"), indent=2, default=str))
+        return _fold(label, _json_text(block.get("input")))
     if kind == "tool_result":
         label = "tool result · error" if block.get("is_error") else "tool result"
         return _fold(
@@ -288,9 +305,7 @@ def _block_html(block: object) -> str:
             _result_text(block.get("content")),
             css="bad" if block.get("is_error") else "muted",
         )
-    return _fold(
-        f"{kind if isinstance(kind, str) else 'block'}", json.dumps(block, indent=2, default=str)
-    )
+    return _fold(f"{kind if isinstance(kind, str) else 'block'}", _json_text(block))
 
 
 def _line_html(line: SessionLine) -> str:
@@ -309,7 +324,7 @@ def _line_html(line: SessionLine) -> str:
     if isinstance(blocks, list):
         body = "".join(_block_html(block) for block in blocks) or '<p class="muted">no content</p>'
     else:
-        body = _fold(title, json.dumps(line.event, indent=2, default=str))
+        body = _fold(title, _json_text(line.event))
     return f"<h3>{line.number}. {_esc(title)}</h3>{body}"
 
 

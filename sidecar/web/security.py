@@ -58,7 +58,15 @@ def issue(now: float | None = None) -> str | None:
 
 def is_valid(value: str | None, now: float | None = None) -> bool:
     """Return whether ``value`` is an unexpired session this server signed."""
-    if not value:
+    # ASCII is tested ONCE, on the whole value, rather than per field: a session
+    # this server minted is `v1.<digits>.<hex>` and so ASCII by construction, so
+    # a value carrying anything else cannot be ours and is rejected before it
+    # can reach a stdlib call that raises on it. Two such calls are downstream
+    # -- `int()` refuses `²`, which `str.isdigit` calls a digit, and
+    # `hmac.compare_digest` raises TypeError comparing non-ASCII strs -- and
+    # neither is caught anywhere above `nav_extra`, which reads this cookie on
+    # every page render, the open ones included.
+    if not value or not value.isascii():
         return False
     parts = value.split(".")
     if len(parts) != 3 or parts[0] != "v1":
@@ -67,10 +75,7 @@ def is_valid(value: str | None, now: float | None = None) -> bool:
     # The length test runs before ``int()``, for the reason
     # :func:`sidecar.web.components.form_int` states: CPython refuses a
     # conversion past ``sys.get_int_max_str_digits()`` with a ValueError, and
-    # nothing here would catch it. This value comes off a cookie, and
-    # :func:`nav_extra` reads the cookie on EVERY page render -- including the
-    # open ones -- so an unbounded conversion here is a 500 on the whole UI for
-    # anyone who can set a header. Twenty digits is far past any epoch second a
+    # nothing here would catch it. Twenty digits is far past any epoch second a
     # signature of ours will ever carry.
     if not expires.isdigit() or len(expires) > 20:
         return False

@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sidecar import main
-from sidecar.web import kb, security
+from sidecar.web import kb, security, transcripts
 
 from .fakes import FakeStore
 
@@ -60,17 +60,34 @@ def test_forged_and_malformed_sessions_are_rejected(client):
     assert security.is_valid("") is False
 
 
-def test_an_absurdly_long_expiry_is_rejected_not_raised(client):
-    """`int()` refuses a digit string past CPython's limit, and nothing here catches it."""
+@pytest.mark.parametrize("expires", ["9" * 5000, "²", "٧"])
+def test_an_expiry_int_would_refuse_is_rejected_not_raised(client, expires):
+    """Past CPython's digit limit, and the non-ASCII digits `str` calls digits."""
     value = security.issue()
     signature = value.split(".")[2]
-    assert security.is_valid(f"v1.{'9' * 5000}.{signature}") is False
+    assert security.is_valid(f"v1.{expires}.{signature}") is False
+
+
+def test_the_login_page_names_the_transcript_read_it_now_gates(client):
+    """The one READ behind this sign-in, so the copy must say so (#241)."""
+    text = client.get(security.LOGIN_PATH).text
+    assert "reading a captured session" in text
 
 
 def test_a_crafted_cookie_cannot_500_an_open_page(client):
-    """`nav_extra` reads the cookie on every render, so this reaches the open pages too."""
+    """`nav_extra` reads the cookie on every render, so this reaches the open pages too.
+
+    Asserted against the transcripts LISTING, not the login page: `render_login`
+    passes no ``extra_nav``, so ``/ui/login`` never calls ``nav_extra`` and this
+    same assertion pointed there would pass whether or not the guard exists.
+
+    Only the long-digit value is exercised end to end. The non-ASCII digits are
+    unit-tested above instead, because the test client encodes headers as ASCII
+    and cannot send them at all -- a raw HTTP client can, since Starlette
+    decodes the header bytes as latin-1.
+    """
     client.cookies.set(security.COOKIE, f"v1.{'9' * 5000}.x")
-    assert client.get(security.LOGIN_PATH).status_code == 200
+    assert client.get(transcripts.PAGE.path).status_code == 200
 
 
 def test_a_session_signed_by_another_token_is_rejected(client, monkeypatch):

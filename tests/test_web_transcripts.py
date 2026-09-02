@@ -383,6 +383,25 @@ def test_a_configured_but_broken_store_is_a_fault_not_a_bad_key(wire, client):
     assert "not a well-formed transcript key" not in text
 
 
+def test_a_line_that_decodes_but_will_not_re_encode_still_draws(wire, client):
+    """`json.dumps(indent=…)` recurses too, from a deeper stack than `json.loads` did.
+
+    So a line can parse cleanly and then exhaust the encoder mid-render — the
+    parse-side guard cannot see this one.
+    """
+    nested: dict = {}
+    cur = nested
+    for _ in range(3000):
+        cur["a"] = {}
+        cur = cur["a"]
+    wire(blob=_feed({"type": "custom", "deep": nested}, _assistant("still here")))
+    _sign_in(client)
+    resp = client.get(f"{page.PAGE.path}?key=k")
+    assert resp.status_code == 200
+    assert "unrenderable event" in resp.text
+    assert "still here" in resp.text
+
+
 def test_a_deeply_nested_line_is_drawn_raw_not_a_500(wire, client):
     """`json.loads` raises RecursionError, a RuntimeError, on a deeply nested line."""
     wire(blob=_feed("[" * 100000 + "]" * 100000, _assistant("still here")))
