@@ -368,6 +368,57 @@ def test_a_partial_file_that_cannot_be_removed_still_reports_the_transfer(monkey
     assert "failed mid-body" in str(e.value)
 
 
+def test_a_local_write_failure_blames_the_disk_not_the_sidecar(monkeypatch, tmp_path):
+    # Both raise OSError, and this command writes multi-megabyte files onto
+    # boxes chosen for having less memory than the sidecar -- so ENOSPC here
+    # must not send the operator to look at the network.
+    monkeypatch.setattr(
+        transcriptscli.urllib.request,
+        "urlopen",
+        lambda req, timeout=None: _FakeResponse(b'{"type":"assistant"}\n'),
+    )
+    out = tmp_path / "session.ndjson"
+    real_open = open
+
+    def full_disk(path, mode="r", *a, **kw):
+        handle = real_open(path, mode, *a, **kw)
+        if "w" in mode:
+            handle.write = lambda data: (_ for _ in ()).throw(OSError(28, "No space left"))
+        return handle
+
+    monkeypatch.setattr("builtins.open", full_disk)
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._get(argparse.Namespace(key="abc123", out=str(out)))
+    message = str(e.value)
+    assert "cannot write" in message and "No space left" in message
+    assert "failed mid-body" not in message
+    assert not out.exists()
+
+
+def test_a_flush_failure_when_the_file_closes_also_blames_the_disk(monkeypatch, tmp_path):
+    # Where ENOSPC most often actually lands: every `write` sat in the buffer
+    # and the whole thing fails at close.
+    class _FullOnClose:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            raise OSError(28, "No space left on device")
+
+        def write(self, data):
+            return len(data)
+
+    monkeypatch.setattr(
+        transcriptscli.urllib.request,
+        "urlopen",
+        lambda req, timeout=None: _FakeResponse(b'{"type":"result"}\n'),
+    )
+    monkeypatch.setattr("builtins.open", lambda *a, **kw: _FullOnClose())
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._get(argparse.Namespace(key="abc123", out=str(tmp_path / "s.ndjson")))
+    assert "cannot write" in str(e.value)
+
+
 def test_get_names_an_out_path_it_cannot_open(monkeypatch, tmp_path):
     monkeypatch.setattr(
         transcriptscli.urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(b"{}")
@@ -468,6 +519,42 @@ def test_a_200_object_without_the_expected_field_is_fatal(monkeypatch):
     with pytest.raises(SystemExit) as e:
         transcriptscli._list(_ns())
     assert "'transcripts'" in str(e.value)
+
+
+@pytest.mark.parametrize("value", [None, {"a": 1}, "rows", 3])
+def test_a_transcripts_field_that_is_not_a_list_is_fatal(monkeypatch, value):
+    # `null` matters most: `or []` would have turned it into the healthy-empty
+    # page, which is the answer this endpoint must never fake.
+    body = json.dumps({"transcripts": value, "count": 0}).encode()
+    monkeypatch.setattr(
+        transcriptscli.urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(body)
+    )
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._list(_ns())
+    assert "not a list" in str(e.value)
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        None,
+        "a string",
+        7,
+        [],
+        {"no": "key"},
+        {"key": "k", "tool_calls": ["Read"]},
+        {"key": "k", "tool_result_bytes": "big"},
+        {"key": "k", "outcome": "ok", "duration_s": "long"},
+    ],
+)
+def test_a_row_the_reader_cannot_read_is_named_not_a_traceback(monkeypatch, row):
+    body = json.dumps({"transcripts": [row], "count": 1}).encode()
+    monkeypatch.setattr(
+        transcriptscli.urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(body)
+    )
+    with pytest.raises(SystemExit) as e:
+        transcriptscli._list(_ns(full=True))
+    assert "cannot read" in str(e.value)
 
 
 def test_a_closed_pipe_on_the_listing_exits_zero_like_the_fetch_path(monkeypatch):

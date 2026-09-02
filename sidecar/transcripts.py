@@ -189,10 +189,22 @@ def _calls(value) -> dict[str, int]:
     guard rather than a decode: a row written before the column's contract was
     enforced -- or by anything but this repo -- must cost a figure, never the
     listing it appears in.
+
+    The entries this admits are exactly the ones
+    :func:`sidecar.run_metrics._tool_calls` will write, restated because the
+    column carries no CHECK and these two guards are its only enforcement. That
+    includes excluding ``bool``: ``isinstance(True, int)`` holds, so a stored
+    ``{"Read": true}`` would otherwise be read back as a fabricated one call and
+    summed into the totals -- and the write side documents the same spelling as
+    a shape error rather than a count.
     """
     if not isinstance(value, dict):
         return {}
-    return {str(name): int(count) for name, count in value.items() if isinstance(count, int)}
+    return {
+        str(name): int(count)
+        for name, count in value.items()
+        if isinstance(count, int) and not isinstance(count, bool) and count >= 0
+    }
 
 
 def list_transcripts(

@@ -131,6 +131,21 @@ def _body_failed(base: str, error: Exception) -> None:
     sys.exit(f"fuko transcripts: transfer from {base} failed mid-body ({error})")
 
 
+def _partial_gone(path: str) -> None:
+    """Remove a half-written ``--out`` file, best effort.
+
+    A truncated transcript is the one failure here that outlives the command:
+    every other one is a message on the way out, but a short file stays on disk
+    reading like a whole session, and the operator greps it a week later and
+    concludes the run did less than it did. Whatever stops the unlink, the
+    fault the caller is about to report is the one worth seeing.
+    """
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
 def _exit_closed_pipe() -> None:
     """Exit 0 after stdout's reader went away, with no second error on the way out.
 
@@ -265,8 +280,15 @@ def _list(args) -> None:
     # something other than this sidecar answering -- and "0 shown · 0 total" is
     # exactly the rendering #240 exists to keep faults out of. Checked before
     # anything is printed, so the operator never sees a listing at all.
+    # A body with no `transcripts` key at all -- or one holding anything but a
+    # list -- is not an empty corpus, it is something other than this sidecar
+    # answering, and "0 shown · 0 total" is exactly the rendering #240 exists to
+    # keep faults out of. `null` is called out separately because `or []` would
+    # otherwise turn it into the healthy-empty page rather than a fault.
     if "transcripts" not in resp:
         sys.exit("fuko transcripts: the listing response carried no 'transcripts' field")
+    if not isinstance(resp["transcripts"], list):
+        sys.exit("fuko transcripts: the listing response's 'transcripts' field is not a list")
     # The same closed-pipe contract `get` has: `list | head` and
     # `list --json | jq -e ... | head` are documented uses, and a reader that
     # walked away is not a fault to report.
@@ -278,13 +300,22 @@ def _list(args) -> None:
             print()
             sys.stdout.flush()
             return
-        items = resp.get("transcripts") or []
+        items = resp["transcripts"]
         print(_color(f"{len(items)} shown · {resp.get('count', 0)} total\n", _BOLD))
         for item in items:
             _print_run(item, args.full)
         sys.stdout.flush()
     except BrokenPipeError:
         _exit_closed_pipe()
+    except (AttributeError, KeyError, TypeError, ValueError) as e:
+        # The render itself, rather than each field it touches. A row is read
+        # through a dozen accessors and coercions, and enumerating the shapes
+        # each one rejects would be a schema validator that still missed the
+        # next one. Whatever a row turns out not to be, the operator gets the
+        # named exit this module promises instead of a traceback -- and this is
+        # the last layer where that can still go wrong, since everything below
+        # is `.get(...)` with a default.
+        sys.exit(f"fuko transcripts: the listing carried a row this reader cannot read ({e})")
 
 
 def _get(args) -> None:
@@ -301,19 +332,34 @@ def _get(args) -> None:
                     # Copied in chunks rather than read whole: a long session is
                     # megabytes, and this command exists to make one greppable
                     # on a box that may have far less memory than the sidecar.
-                    while chunk := resp.read(1 << 20):
-                        handle.write(chunk)
+                    #
+                    # The read and the write are caught SEPARATELY even though
+                    # both raise `OSError`: this command writes multi-megabyte
+                    # files onto boxes chosen for having less memory than the
+                    # sidecar, so ENOSPC/EDQUOT is a plausible failure here, and
+                    # blaming the transfer for a full local disk sends the
+                    # operator to look at the network for a fault on their own
+                    # machine.
+                    while True:
+                        try:
+                            chunk = resp.read(1 << 20)
+                        except _BODY_FAILURES as e:
+                            _partial_gone(args.out)
+                            _body_failed(base, e)
+                        if not chunk:
+                            break
+                        try:
+                            handle.write(chunk)
+                        except OSError as e:
+                            _partial_gone(args.out)
+                            sys.exit(f"fuko transcripts: cannot write {args.out} ({e})")
                         written += len(chunk)
-            except _BODY_FAILURES as e:
-                # The partial file goes, rather than staying as a shorter
-                # session that reads as a whole one. A truncated transcript is
-                # the one failure here that survives the command: the operator
-                # greps it later and concludes the run did less than it did.
-                try:
-                    os.unlink(args.out)
-                except OSError:
-                    pass
-                _body_failed(base, e)
+            except OSError as e:
+                # The buffered flush `with handle:` performs on the way out --
+                # a local write like any other, and the one place ENOSPC most
+                # often actually surfaces.
+                _partial_gone(args.out)
+                sys.exit(f"fuko transcripts: cannot write {args.out} ({e})")
             print(f"wrote {written} bytes to {args.out}", file=sys.stderr)
             return
         out = sys.stdout.buffer

@@ -247,6 +247,17 @@ def test_tool_calls_of_an_unexpected_shape_cost_only_that_figure(pg):
     assert transcripts.list_transcripts().rows[0].tool_calls == {}
 
 
+def test_a_tool_call_entry_the_write_side_refuses_is_dropped_on_read_too(pg):
+    # `isinstance(True, int)` holds, so a stored `true` would otherwise be read
+    # back as one fabricated call and summed into the total. The write side
+    # (run_metrics._tool_calls) refuses the same spellings; the column carries
+    # no CHECK, so these two guards are the only thing enforcing the contract.
+    pg([_row(tool_calls={"Read": 4, "Grep": True, "Edit": False, "Bash": -1})])
+    run = transcripts.list_transcripts().rows[0]
+    assert run.tool_calls == {"Read": 4}
+    assert run.tool_calls_total == 4
+
+
 def test_as_dict_carries_every_declared_field(pg):
     pg([_row()])
     payload = transcripts.list_transcripts().rows[0].as_dict()
@@ -335,6 +346,18 @@ def test_list_endpoint_rejects_a_non_numeric_pr_with_400(monkeypatch, pg):
     resp = _client(monkeypatch).get("/transcripts", params={"pr": "twelve"})
     assert resp.status_code == 400
     assert "twelve" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("pr", ["3000000000", "9" * 40])
+def test_list_endpoint_rejects_a_pr_past_the_integer_column_with_400(monkeypatch, pg, pr):
+    # `%s::integer` would fail the cast SERVER-side, which is not a ValueError
+    # and would therefore be reported as "index unreachable" -- a typo rendered
+    # as an outage, the one confusion this endpoint exists to prevent.
+    monkeypatch.setattr(main.settings, "database_url", "postgresql://x/y")
+    pg([])
+    resp = _client(monkeypatch).get("/transcripts", params={"pr": pr})
+    assert resp.status_code == 400
+    assert "not an empty corpus" not in resp.json()["detail"]
 
 
 def test_list_endpoint_without_a_database_is_503_not_an_empty_list(monkeypatch):

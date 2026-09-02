@@ -71,6 +71,11 @@ app.include_router(web.router)
 # The sidecar serves one store, selected by .fuko.toml (defaults to Postgres).
 _store = current_store()
 
+#: Largest pull-request number a filter may name. `review_runs.pr` is INTEGER
+#: (migrations/004), so anything above this cannot identify a row and is a
+#: malformed identifier rather than a query that matches nothing.
+_MAX_PR = 2**31 - 1
+
 
 def _auth(authorization: str | None = Header(default=None)) -> None:
     """Bearer-token dependency, fail-closed.
@@ -520,7 +525,16 @@ def transcripts_list_endpoint(
     # handed every PR and no indication of it.
     number: int | None = None
     if pr:
-        if not (pr.isascii() and pr.isdigit()):
+        # The upper bound is not cosmetic. `review_runs.pr` is INTEGER, the
+        # filter binds `%s::integer`, and a digit string past 2^31-1 therefore
+        # fails the cast SERVER-side -- which is not a ValueError, so it would
+        # land in the catch-all below and be reported as "index unreachable;
+        # this is a fault, not an empty corpus". A typo would then read as an
+        # outage, which is the one confusion this endpoint exists to prevent.
+        # The length test runs first so `int()` never sees an unbounded string:
+        # CPython refuses a conversion past `sys.get_int_max_str_digits()` with
+        # a ValueError of its own, which would escape this guard as a 500.
+        if not (pr.isascii() and pr.isdigit()) or len(pr) > 10 or int(pr) > _MAX_PR:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"pr is not a number: {pr!r}")
         number = int(pr)
     try:
