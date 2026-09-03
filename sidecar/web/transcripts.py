@@ -788,22 +788,12 @@ def view(
     the filter submits an untouched PR box as ``pr=``, which an ``int | None``
     parameter answers with a 422 rather than treating as absent.
     """
-    # `Vary: Cookie` on BOTH branches, because both bodies differ by cookie:
-    # `nav_extra` renders a sign-out form carrying the viewer's CSRF token to a
-    # signed-in operator and a sign-in link to everyone else. Without it a
-    # shared cache may serve one viewer's rendered page -- token included -- to
-    # the next, and that is true of the open listing too, which is otherwise
-    # left cacheable because its content is index-row figures published by
-    # design.
-    response.headers["Vary"] = "Cookie"
+    # Both branches vary by cookie; only the gated one refuses storage. The two
+    # rules and the reasons for them live in `security` (#266), which is where
+    # every other page now reads them from too.
+    security.vary_by_cookie(response)
     if key:
-        # The session view alone renders stored repository content, and a 200
-        # carrying no freshness information is heuristically cacheable by a
-        # shared cache (RFC 9111 §4.2.2). A LAN forward proxy in front of the
-        # sidecar could therefore hold this response and later hand it to a
-        # request with no session -- serving the very bytes `security.require`
-        # stands in front of.
-        response.headers["Cache-Control"] = "no-store"
+        security.no_store(response)
         return _session_view(request, key=key, offset=offset, limit=limit)
     number = c.form_int(pr)
     limit = min(max(1, limit or PAGE_SIZE), corpus.MAX_ROWS)
