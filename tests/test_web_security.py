@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sidecar import main
-from sidecar.web import kb, security
+from sidecar.web import kb, security, transcripts
 
 from .fakes import FakeStore
 
@@ -58,6 +58,49 @@ def test_forged_and_malformed_sessions_are_rejected(client):
     assert security.is_valid(f"v1.notanumber.{signature}") is False
     assert security.is_valid(None) is False
     assert security.is_valid("") is False
+
+
+@pytest.mark.parametrize("expires", ["9" * 5000, "²", "٧"])
+def test_an_expiry_int_would_refuse_is_rejected_not_raised(client, expires):
+    """Past CPython's digit limit, and the non-ASCII digits `str` calls digits."""
+    value = security.issue()
+    signature = value.split(".")[2]
+    assert security.is_valid(f"v1.{expires}.{signature}") is False
+
+
+def test_the_login_page_names_the_transcript_read_it_now_gates(client):
+    """The one READ behind this sign-in, so the copy must say so (#241)."""
+    text = client.get(security.LOGIN_PATH).text
+    assert "reading a captured session" in text
+
+
+def test_a_crafted_cookie_cannot_500_an_open_page(client):
+    """`nav_extra` reads the cookie on every render, so this reaches the open pages too.
+
+    Asserted against the transcripts LISTING, not the login page: `render_login`
+    passes no ``extra_nav``, so ``/ui/login`` never calls ``nav_extra`` and this
+    same assertion pointed there would pass whether or not the guard exists.
+
+    Only the long-digit value goes through the cookie jar, which encodes as
+    ASCII. A non-ASCII field still reaches the server over a pure-ASCII wire
+    header -- see the octal-escape test below.
+    """
+    client.cookies.set(security.COOKIE, f"v1.{'9' * 5000}.x")
+    assert client.get(transcripts.PAGE.path).status_code == 200
+
+
+def test_an_octal_escaped_cookie_cannot_500_an_open_page(client):
+    """A pure-ASCII wire header still delivers a non-ASCII cookie value.
+
+    ``http.cookies`` unquotes ``\\351`` to ``é`` before the app sees it, so
+    ``hmac.compare_digest`` would be handed a non-ASCII ``str`` and raise
+    ``TypeError`` -- reachable with any in-range expiry, independent of the
+    expiry's own contents.
+    """
+    resp = client.get(
+        transcripts.PAGE.path, headers={"Cookie": f'{security.COOKIE}="v1.9999999999.\\351"'}
+    )
+    assert resp.status_code == 200
 
 
 def test_a_session_signed_by_another_token_is_rejected(client, monkeypatch):

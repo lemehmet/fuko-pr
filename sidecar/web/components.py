@@ -95,6 +95,18 @@ def badge(text: object, *, css: str = "") -> str:
     return f'<span class="badge {escape(css, quote=True)}">{esc(text)}</span>'
 
 
+def disclosure(summary: str, body: str) -> str:
+    """Render a collapsible block: ``summary`` over ``body`` in a preformatted box.
+
+    Both arguments are already-escaped markup, for :func:`raw_cell`'s reason --
+    a caller folds a mixture of its own chrome and escaped text, and only it
+    knows which is which. Every page that folds long stored text shares this
+    shape, so a change to how a folded block looks is one edit rather than one
+    per page.
+    """
+    return f"<details><summary>{summary}</summary><pre>{body}</pre></details>"
+
+
 def table(headers: list[Column], rows: list[str], empty: str) -> str:
     """Render a table, or a muted notice in its place when there are no rows.
 
@@ -153,7 +165,13 @@ def form_int(value: object) -> int | None:
     response.
     """
     text = form_value(value).strip()
-    if not (text.isascii() and text.isdigit()):
+    # The length test runs BEFORE ``int()``: CPython refuses a conversion past
+    # ``sys.get_int_max_str_digits()`` (4300 by default) with a ValueError of
+    # its own, which would escape a helper whose whole contract is that
+    # unusable input answers like an empty field -- reaching the page as a 500
+    # instead. Ten digits is the widest a Postgres ``integer`` can hold, so
+    # nothing the range check would have accepted is lost.
+    if not (text.isascii() and text.isdigit()) or len(text) > 10:
         return None
     number = int(text)
     return number if 0 < number <= 2**31 - 1 else None

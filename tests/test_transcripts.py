@@ -168,17 +168,40 @@ def test_filters_are_all_anded_and_bound_as_parameters(pg):
     )
     sql, params = conn.statements[0]
     # Each filter is a `%s IS NULL OR col = %s` pair, so combining them narrows.
-    assert sql.count("IS NULL OR") == 5
-    assert params[:6] == ("lemehmet/mepro", "lemehmet/mepro", 42, 42, "dorian", "dorian")
-    assert params[6] == params[7] == datetime(2026, 8, 30, tzinfo=UTC)
-    assert params[8] == params[9] == datetime(2026, 9, 1, tzinfo=UTC)
+    # Six pairs: the five run/date filters, plus the `key` predicate `describe`
+    # narrows on.
+    assert sql.count("IS NULL OR") == 6
+    assert params[:2] == (None, None)
+    assert params[2:8] == ("lemehmet/mepro", "lemehmet/mepro", 42, 42, "dorian", "dorian")
+    assert params[8] == params[9] == datetime(2026, 8, 30, tzinfo=UTC)
+    assert params[10] == params[11] == datetime(2026, 9, 1, tzinfo=UTC)
+
+
+def test_describe_narrows_on_the_key_and_returns_the_one_row(pg):
+    conn = pg([_row()])
+    run = transcripts.describe("20260901T120000Z-a1b2c3d4e5f6")
+    assert run is not None and run.key == "20260901T120000Z-a1b2c3d4e5f6"
+    params = conn.statements[0][1]
+    assert params[:2] == ("20260901T120000Z-a1b2c3d4e5f6",) * 2
+    assert params[-2:] == (1, 0)
+
+
+def test_describe_is_none_for_a_blob_no_index_row_names(pg):
+    """A blob can be stored without being indexed (#258); that is not an error."""
+    pg([])
+    assert transcripts.describe("20260901T120000Z-a1b2c3d4e5f6") is None
+
+
+def test_describe_raises_when_the_index_is_unreachable(dead_pg):
+    with pytest.raises(RuntimeError):
+        transcripts.describe("20260901T120000Z-a1b2c3d4e5f6")
 
 
 def test_absent_filters_bind_null(pg):
     conn = pg([])
     transcripts.list_transcripts()
     _, params = conn.statements[0]
-    assert params[:10] == (None,) * 10
+    assert params[:12] == (None,) * 12
 
 
 def test_limit_is_clamped_and_offset_floored(pg):
@@ -221,13 +244,13 @@ def test_a_naive_since_is_read_as_utc(pg):
     """TIMESTAMPTZ + a naive bind would resolve through the server's session TZ."""
     conn = pg([])
     transcripts.list_transcripts(since=datetime(2026, 8, 30, 6, 0))
-    assert conn.statements[0][1][6] == datetime(2026, 8, 30, 6, 0, tzinfo=UTC)
+    assert conn.statements[0][1][8] == datetime(2026, 8, 30, 6, 0, tzinfo=UTC)
 
 
 def test_an_aware_since_keeps_its_own_offset(pg):
     conn = pg([])
     transcripts.list_transcripts(since="2026-08-30T06:00:00+02:00")
-    assert conn.statements[0][1][6].utcoffset().total_seconds() == 7200
+    assert conn.statements[0][1][8].utcoffset().total_seconds() == 7200
 
 
 def test_a_malformed_date_is_a_value_error(pg):
@@ -239,7 +262,7 @@ def test_a_malformed_date_is_a_value_error(pg):
 def test_a_blank_date_is_no_filter(pg):
     conn = pg([])
     transcripts.list_transcripts(since="", until=None)
-    assert conn.statements[0][1][6] is None
+    assert conn.statements[0][1][8] is None
 
 
 def test_tool_calls_of_an_unexpected_shape_cost_only_that_figure(pg):
@@ -336,7 +359,7 @@ def test_list_endpoint_passes_every_filter_through(monkeypatch, pg):
         },
     )
     _, params = conn.statements[0]
-    assert params[0] == "o/r" and params[2] == 7 and params[4] == "gray"
+    assert params[2] == "o/r" and params[4] == 7 and params[6] == "gray"
     assert params[-2:] == (5, 10)
 
 

@@ -16,6 +16,7 @@ sidecar/web/
   metrics.py     # the review-metrics page
   kb.py          # the knowledge-base console
   ledger.py      # the review-state ledgers (read-only)
+  transcripts.py # captured agentic sessions: the listing, and one session
 ```
 
 ## Adding a page
@@ -30,6 +31,7 @@ PAGES: tuple[Page, ...] = (
     Page(slug="metrics", title="Metrics", path=f"{PREFIX}/metrics", order=10),
     Page(slug="kb", title="Knowledge base", path=f"{PREFIX}/kb", order=20),
     Page(slug="ledger", title="Ledger", path=f"{PREFIX}/ledger", order=30),
+    Page(slug="transcripts", title="Transcripts", path=f"{PREFIX}/transcripts", order=40),
 )
 ```
 
@@ -90,11 +92,23 @@ one deliberate exception, for markup the page already assembled and escaped.
 stylesheet in `layout._STYLE`; pages work with plain forms and links. A page that
 wants progressive enhancement can add it, but it must not be load-bearing.
 
-**Read is open, mutation is not.** `/ui/metrics`, `/ui/ledger` and the
-knowledge-base browsing and preview views are deliberately unauthenticated —
-read-only on a LAN-only deployment, following the precedent `/healthz` set.
-Every API endpoint keeps its bearer auth. Anything that writes goes through
-`security.py`.
+**Read is open, mutation is not — with one read that is not.** `/ui/metrics`,
+`/ui/ledger`, the knowledge-base browsing and preview views, and the
+`/ui/transcripts` **listing** are deliberately unauthenticated — read-only on a
+LAN-only deployment, following the precedent `/healthz` set. Every API endpoint
+keeps its bearer auth. Anything that writes goes through `security.py`.
+
+The exception is `/ui/transcripts?key=…`, the single-session view, which calls
+`security.require` even though it mutates nothing. What it renders is not an
+aggregate over a review: it is the reviewed repository's own file contents,
+verbatim, as the agent read them out of a contributor-controlled checkout (#236's
+risk section, #240's note that this corpus is the first read path onto full
+reviewed-repo content). Publishing counts to anyone who can reach the port is a
+decision the LAN argument covers; publishing a repository's source is not the
+same decision, so the session view takes the browser session `security.py`
+already mints from `FUKO_AUTH_TOKEN` and the listing beside it stays open. A
+future page that renders stored *content* rather than figures about it should
+land on the same side of that line.
 
 **A degraded store has more than two states.** `metrics.render` distinguishes
 "no database configured" from "configured but unreachable"; `ledger` keeps the

@@ -256,11 +256,18 @@ The sidecar serves utility pages under `/ui`:
   upload design docs (same chunking as `fuko ingest-docs`), purge in bulk, and
   **preview retrieval** — the query a review would run, so you can check a
   learning will actually reach the reviewer.
+- **`/ui/transcripts`** — captured agentic sessions: which runs left a
+  transcript, what each spent its turns on (per-tool call counts, tool-result
+  bytes, files re-read), and one session rendered turn by turn.
 
 Browsing is unauthenticated, for a LAN-only deployment. Editing needs the
 sidecar's `FUKO_AUTH_TOKEN`, exchanged once at `/ui/login` for a signed
 `HttpOnly`, `SameSite=Strict` session cookie; with no token configured, every
-editing action is refused. Adding a page: [`docs/web-ui.md`](docs/web-ui.md).
+editing action is refused. The one READ behind that same sign-in is a single
+transcript's session view: it renders the reviewed repository's file contents
+verbatim, which is a different exposure from the aggregates the LAN argument
+covers — the transcript listing beside it stays open. Adding a page:
+[`docs/web-ui.md`](docs/web-ui.md).
 
 ## Contributing
 

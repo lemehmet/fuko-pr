@@ -1,9 +1,14 @@
-"""Browser sessions for the mutating UI routes: signed cookie, CSRF, login page.
+"""Browser sessions for the gated UI routes: signed cookie, CSRF, login page.
 
 The read-only pages stay open -- that was the deliberate call for the metrics
 view on a LAN-only deployment. Anything that *writes* needs proof the caller
 holds ``FUKO_AUTH_TOKEN``, and a browser cannot send a bearer header on a plain
 navigation, so the token is exchanged once at a login form for a signed cookie.
+
+One READ takes the same session (#241): the single-session transcript view
+renders a reviewed repository's own file contents rather than figures about a
+review, which is a different exposure from the aggregates the LAN argument
+covers. See ``docs/web-ui.md``.
 
 No new secret and no new configuration: the cookie is an HMAC over the same
 ``FUKO_AUTH_TOKEN`` the API already requires, so a deployment that can serve the
@@ -53,13 +58,28 @@ def issue(now: float | None = None) -> str | None:
 
 def is_valid(value: str | None, now: float | None = None) -> bool:
     """Return whether ``value`` is an unexpired session this server signed."""
-    if not value:
+    # ASCII is tested ONCE, on the whole value, rather than per field: a session
+    # this server minted is `v1.<digits>.<hex>` and so ASCII by construction, so
+    # a value carrying anything else cannot be ours and is rejected before it
+    # can reach a stdlib call that raises on it. Two such calls are downstream
+    # -- `int()` refuses `²`, which `str.isdigit` calls a digit, and
+    # `hmac.compare_digest` raises TypeError comparing non-ASCII strs -- and
+    # neither is caught anywhere above `nav_extra`, which reads this cookie on
+    # every page render, the open ones included.
+    if not value or not value.isascii():
         return False
     parts = value.split(".")
     if len(parts) != 3 or parts[0] != "v1":
         return False
     _, expires, signature = parts
-    if not expires.isdigit() or int(expires) <= (now if now is not None else time.time()):
+    # The length test runs before ``int()``, for the reason
+    # :func:`sidecar.web.components.form_int` states: CPython refuses a
+    # conversion past ``sys.get_int_max_str_digits()`` with a ValueError, and
+    # nothing here would catch it. Twenty digits is far past any epoch second a
+    # signature of ours will ever carry.
+    if not expires.isdigit() or len(expires) > 20:
+        return False
+    if int(expires) <= (now if now is not None else time.time()):
         return False
     expected = _sign(expires)
     return bool(expected) and hmac.compare_digest(expected, signature)
@@ -171,8 +191,9 @@ def render_login(*, next_path: str, error: str = "") -> str:
     else:
         body.append(
             c.notice(
-                "Editing the knowledge base needs the sidecar's FUKO_AUTH_TOKEN. "
-                "Browsing does not.",
+                "Editing the knowledge base, and reading a captured session "
+                "transcript, need the sidecar's FUKO_AUTH_TOKEN. Browsing the "
+                "other pages does not.",
             )
         )
     body.append(
