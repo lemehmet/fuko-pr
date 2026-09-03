@@ -84,8 +84,17 @@ def _url(path: str, **params: object) -> str:
 
 
 def _redirect(path: str, **params: object) -> RedirectResponse:
-    """Post/redirect/get back to a page, carrying a flash message in the query."""
-    return RedirectResponse(_url(path, **params), status_code=status.HTTP_303_SEE_OTHER)
+    """Post/redirect/get back to a page, carrying a flash message in the query.
+
+    Stamped ``no-store`` here rather than at each of the seven writes: every
+    caller is a route behind :func:`~sidecar.web.security.require`, and one rule
+    applied in one place is what #266 asked for. A 303 is not heuristically
+    cacheable in the first place -- this is the cheap end of making "anything
+    behind ``require`` is ``no-store``" true of every response, not most of them.
+    """
+    return security.no_store(
+        RedirectResponse(_url(path, **params), status_code=status.HTTP_303_SEE_OTHER)
+    )
 
 
 def render_picker(repos: list[dict], *, error: str = "") -> str:
@@ -361,6 +370,7 @@ def render_preview(
 @router.get(_BROWSE, response_class=HTMLResponse, include_in_schema=False)
 def browse(
     request: Request,
+    response: Response,
     repo: str | None = None,
     source: str | None = None,
     q: str | None = None,
@@ -370,6 +380,7 @@ def browse(
     err: str | None = None,
 ) -> str:
     """Serve the repository picker, or one repository's learnings."""
+    security.vary_by_cookie(response)
     store = current_store()
     if not repo:
         repos, error = _read(store.repos, [])
@@ -406,9 +417,10 @@ def browse(
 
 
 @router.get(_EDIT, response_class=HTMLResponse, include_in_schema=False)
-def edit_form(request: Request, repo: str, id: str | None = None) -> str:
+def edit_form(request: Request, response: Response, repo: str, id: str | None = None) -> str:
     """Serve the add form (no ``id``) or the edit form for one learning."""
     session = security.require(request)
+    security.no_store(response)
     learning = None
     if id:
         learning = current_store().get_learning(repo, id)
@@ -461,28 +473,34 @@ def edit_submit(
         return _redirect(_BROWSE, repo=repo, msg=note)
     except (DuplicateLearningError, UnknownSourceError) as e:
         draft = {**fields, "id": id or None}
-        return HTMLResponse(
-            _shell(
-                request,
-                "fuko knowledge base · edit",
-                render_edit(
-                    repo=repo,
-                    learning={"id": id} if id else None,
-                    session=session,
-                    error=str(e),
-                    draft=draft,
+        # Stamped like the redirects around it: this body carries the viewer's
+        # CSRF token and their unsaved draft, so it is the one write response
+        # that would actually hurt in a shared cache.
+        return security.no_store(
+            HTMLResponse(
+                _shell(
+                    request,
+                    "fuko knowledge base · edit",
+                    render_edit(
+                        repo=repo,
+                        learning={"id": id} if id else None,
+                        session=session,
+                        error=str(e),
+                        draft=draft,
+                    ),
                 ),
-            ),
-            status_code=status.HTTP_409_CONFLICT
-            if isinstance(e, DuplicateLearningError)
-            else status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_409_CONFLICT
+                if isinstance(e, DuplicateLearningError)
+                else status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
         )
 
 
 @router.get(_DELETE, response_class=HTMLResponse, include_in_schema=False)
-def delete_form(request: Request, repo: str, id: str) -> str:
+def delete_form(request: Request, response: Response, repo: str, id: str) -> str:
     """Serve the delete confirmation for one learning."""
     session = security.require(request)
+    security.no_store(response)
     learning = current_store().get_learning(repo, id)
     if learning is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no such learning in that repo")
@@ -509,9 +527,16 @@ def delete_submit(
 
 
 @router.get(_TOOLS, response_class=HTMLResponse, include_in_schema=False)
-def tools_form(request: Request, repo: str, msg: str | None = None, err: str | None = None) -> str:
+def tools_form(
+    request: Request,
+    response: Response,
+    repo: str,
+    msg: str | None = None,
+    err: str | None = None,
+) -> str:
     """Serve the doc-upload and purge forms for one repository."""
     session = security.require(request)
+    security.no_store(response)
     return _shell(
         request,
         f"fuko knowledge base · {repo} tools",
@@ -586,8 +611,11 @@ def purge_submit(
 
 
 @router.get(_PREVIEW, response_class=HTMLResponse, include_in_schema=False)
-def preview(request: Request, repo: str, text: str = "", files: str = "") -> str:
+def preview(
+    request: Request, response: Response, repo: str, text: str = "", files: str = ""
+) -> str:
     """Show what retrieval would return for a hypothetical PR (read-only, open)."""
+    security.vary_by_cookie(response)
     paths = _split_files(files)
     results: list[dict] = []
     error = ""

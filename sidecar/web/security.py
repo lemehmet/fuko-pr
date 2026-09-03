@@ -15,6 +15,12 @@ No new secret and no new configuration: the cookie is an HMAC over the same
 API can serve the console. With no token configured, login is impossible and
 every mutating route refuses -- the same fail-closed stance as
 :func:`sidecar.main._auth`, rather than serving writes unauthenticated.
+
+Two rules this module owns for every page, not just its own routes (#266, #267):
+the caching headers a gated response needs (:func:`no_store`,
+:func:`vary_by_cookie`), and the one constant-time comparison every token check
+goes through (:func:`_same`). Both exist because the per-call-site version of
+them was got right in one place and missed in the next.
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import time
+from typing import TypeVar
 from urllib.parse import quote
 
 from fastapi import APIRouter, Form, HTTPException, Request, Response, status
@@ -30,6 +37,10 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from ..config import settings
 from . import components as c
 from .layout import PREFIX, document
+
+#: Any response class, so the header helpers can stamp an injected ``Response``
+#: and a returned ``RedirectResponse`` alike without widening either's type.
+ResponseT = TypeVar("ResponseT", bound=Response)
 
 COOKIE = "fuko_session"
 
@@ -40,6 +51,59 @@ LOGIN_PATH = f"{PREFIX}/login"
 LOGOUT_PATH = f"{PREFIX}/logout"
 
 router = APIRouter()
+
+
+def no_store(response: ResponseT) -> ResponseT:
+    """Forbid every cache from keeping a response that sits behind :func:`require`.
+
+    A 200 carrying no freshness information is heuristically cacheable by a
+    shared cache (RFC 9111 4.2.2), so a LAN forward proxy in front of the sidecar
+    may store an authenticated page and later hand it to a request with no
+    session -- serving the very bytes ``require`` stands in front of, which is
+    per-request and never sees a cache hit. ``Vary`` rides along because a gated
+    body is session-derived by definition.
+
+    Returns the response so a route can stamp one it built
+    (``return no_store(RedirectResponse(...))``) as readily as the one FastAPI
+    injected.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Vary"] = "Cookie"
+    return response
+
+
+def vary_by_cookie(response: ResponseT) -> ResponseT:
+    """Key a cacheable response on the session cookie.
+
+    Wider than :func:`no_store` and it reaches the OPEN pages: :func:`nav_extra`
+    renders a sign-out form carrying the viewer's CSRF token to a signed-in
+    operator and a sign-in link to everyone else, so every page passing
+    ``extra_nav`` has a body that differs by cookie whether or not the page is
+    gated. Without this a shared cache may serve one viewer's copy -- token
+    included -- to the next. The page itself stays cacheable, which is the point:
+    its content is published by design.
+    """
+    response.headers["Vary"] = "Cookie"
+    return response
+
+
+def _same(expected: str, submitted: str) -> bool:
+    """Compare two strings in constant time, whatever characters they carry.
+
+    ``hmac.compare_digest`` raises TypeError on non-ASCII ``str``s, and two of
+    this module's three comparisons are handed a raw form field. Comparing the
+    encoded bytes keeps the constant-time property -- it is the same routine --
+    where pre-screening for ASCII would answer a non-ASCII token faster than a
+    wrong ASCII one, which is the timing signal these call sites exist to avoid.
+
+    ``surrogatepass`` so that this cannot raise either: a lone surrogate has no
+    UTF-8 encoding and would trade one uncaught exception for another, while
+    ``replace`` would map distinct surrogates onto one byte string and call two
+    different tokens equal.
+    """
+    return hmac.compare_digest(
+        expected.encode("utf-8", "surrogatepass"), submitted.encode("utf-8", "surrogatepass")
+    )
 
 
 def _sign(payload: str) -> str | None:
@@ -61,11 +125,10 @@ def is_valid(value: str | None, now: float | None = None) -> bool:
     # ASCII is tested ONCE, on the whole value, rather than per field: a session
     # this server minted is `v1.<digits>.<hex>` and so ASCII by construction, so
     # a value carrying anything else cannot be ours and is rejected before it
-    # can reach a stdlib call that raises on it. Two such calls are downstream
-    # -- `int()` refuses `²`, which `str.isdigit` calls a digit, and
-    # `hmac.compare_digest` raises TypeError comparing non-ASCII strs -- and
-    # neither is caught anywhere above `nav_extra`, which reads this cookie on
-    # every page render, the open ones included.
+    # can reach `int()`, which refuses `²` -- a character `str.isdigit` calls a
+    # digit -- and which nothing catches above `nav_extra`, the cookie reader on
+    # every page render, the open ones included. The signature comparison below
+    # no longer needs this guard (`_same` carries its own), but `int()` does.
     if not value or not value.isascii():
         return False
     parts = value.split(".")
@@ -82,7 +145,7 @@ def is_valid(value: str | None, now: float | None = None) -> bool:
     if int(expires) <= (now if now is not None else time.time()):
         return False
     expected = _sign(expires)
-    return bool(expected) and hmac.compare_digest(expected, signature)
+    return bool(expected) and _same(expected, signature)
 
 
 def csrf_token(session: str) -> str:
@@ -141,7 +204,7 @@ def require(request: Request) -> str:
 def check_csrf(session: str, submitted: str | None) -> None:
     """Reject a form post whose CSRF token is missing or not bound to ``session``."""
     expected = csrf_token(session)
-    if not submitted or not hmac.compare_digest(expected, submitted):
+    if not submitted or not _same(expected, submitted):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid or missing CSRF token")
 
 
@@ -226,7 +289,7 @@ def login_submit(
     a ``Secure`` cookie there would simply never be stored.
     """
     destination = _safe_next(next)
-    if not settings.auth_token or not hmac.compare_digest(token, settings.auth_token):
+    if not settings.auth_token or not _same(token, settings.auth_token):
         return HTMLResponse(
             render_login(next_path=destination, error="That token was not accepted."),
             status_code=status.HTTP_401_UNAUTHORIZED,

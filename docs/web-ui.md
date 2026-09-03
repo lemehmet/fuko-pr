@@ -123,13 +123,19 @@ is the fail-unsafe direction for a page a human is reading.
 ## Writing routes that mutate
 
 `security.py` exchanges the existing `FUKO_AUTH_TOKEN` for a signed cookie at
-`/ui/login`, so there is no second secret and no new configuration. Three calls
+`/ui/login`, so there is no second secret and no new configuration. Four calls
 are all a page needs:
 
 ```python
+@router.get(MY_PATH, response_class=HTMLResponse)
+def form(request: Request, response: Response, ...) -> str:
+    session = security.require(request)      # 303 to login, or 503 with no token set
+    security.no_store(response)              # nothing behind require may be cached
+    ...
+
 @router.post(MY_PATH)
 def submit(request: Request, csrf: str = Form(default=""), ...):
-    session = security.require(request)      # 303 to login, or 503 with no token set
+    session = security.require(request)
     security.check_csrf(session, csrf)       # 400 on a missing or forged token
     ...
     return RedirectResponse(..., status_code=303)   # post/redirect/get
@@ -153,7 +159,24 @@ Details worth knowing before you touch it:
   browser and a bare 401 is a dead end. With `FUKO_AUTH_TOKEN` unset it raises
   503 instead: no login could ever succeed, so a redirect would loop.
 - Pass `extra_nav=security.nav_extra(request)` to `document()` so the page shows
-  a sign-in link or a sign-out button.
+  a sign-in link or a sign-out button — and then take `response: Response` and
+  call `security.vary_by_cookie(response)`, because that nav makes the body
+  differ by cookie even on an open page. `security.no_store` sets `Vary` too, so
+  a gated page needs only the one call. `/ui/metrics` and `/ui/ledger` pass no
+  `extra_nav` today and so need neither.
+- **Anything behind `require` is `no-store`** (#266). A 200 carrying no
+  freshness information is heuristically cacheable by a shared cache (RFC 9111
+  §4.2.2), and a LAN forward proxy in front of the sidecar can hand a stored
+  authenticated page to a request with no cookie at all — `require` is
+  per-request and never sees the hit. FastAPI merges the injected `response`'s
+  headers only when the handler returns data rather than a `Response`, so a
+  handler that builds its own stamps it directly: `return
+  security.no_store(HTMLResponse(...))`. The route sweep in
+  `tests/test_web_security.py` is what keeps this true of a *new* page.
+- Comparisons against the token or a CSRF value go through `security._same`, not
+  `hmac.compare_digest` directly: form fields are not ASCII, and `compare_digest`
+  raises `TypeError` on a non-ASCII `str` (#267). It is still constant time — the
+  fix is comparing encoded bytes, not screening the input first.
 - Rejected writes should re-render the form with the submitted values, not
   redirect. Losing a long edit to a unique collision is its own bug; see
   `kb.edit_submit`.

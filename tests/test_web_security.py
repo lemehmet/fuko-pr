@@ -3,6 +3,7 @@
 import time
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from sidecar import main
@@ -223,3 +224,124 @@ def test_forwarded_proto_reads_only_the_first_hop(client):
         follow_redirects=False,
     )
     assert "Secure" not in plain.headers["set-cookie"]
+
+
+def test_a_non_ascii_token_is_refused_not_500(client):
+    """The open form's field reaches `compare_digest`, which raises on non-ASCII strs.
+
+    An unauthenticated POST that answers 500 instead of the 401 every other
+    rejected token gets (#267). Asserted through the route, not the helper: the
+    bug was that nothing between the form and the comparison catches it.
+    """
+    resp = client.post(
+        security.LOGIN_PATH, data={"token": "é", "next": "/ui"}, follow_redirects=False
+    )
+    assert resp.status_code == 401
+    assert security.COOKIE not in resp.cookies
+
+
+def test_a_non_ascii_csrf_field_is_refused_not_500(client):
+    """Same hazard behind a valid session: `check_csrf` compares a raw form field."""
+    _sign_in(client)
+    resp = client.post(security.LOGOUT_PATH, data={"csrf": "é"}, follow_redirects=False)
+    assert resp.status_code == 400
+
+
+def test_a_non_ascii_auth_token_can_now_sign_in(monkeypatch):
+    """The other half of the same bug: no operator could hold a non-ASCII token."""
+    monkeypatch.setattr(main.settings, "auth_token", "tökén-π")
+    signed_in = TestClient(main.app)
+    resp = signed_in.post(security.LOGIN_PATH, data={"token": "tökén-π"}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert security.COOKIE in signed_in.cookies
+
+
+def test_the_comparison_survives_a_lone_surrogate(client):
+    """A character with no UTF-8 encoding must answer False, not raise.
+
+    `surrogatepass` rather than plain `.encode()` for the raise, and rather than
+    `errors="replace"`, which would map two different surrogates onto one byte
+    string and call two different tokens equal.
+    """
+    assert security._same("a", "\ud800") is False
+    assert security._same("\ud800", "\ud800") is True
+    assert security._same("\ud800", "\udc00") is False
+    with pytest.raises(HTTPException) as raised:
+        security.check_csrf(security.issue() or "", "\ud800")
+    assert raised.value.status_code == 400
+
+
+#: Gated pages, as ``(path, params)``. The sweep below is the enforcement of
+#: "anything behind `require` is `no-store`" (#266) -- a new gated page that
+#: forgets the header fails here rather than at the next audit.
+_GATED = [
+    (kb.PAGE.path + "/edit", {"repo": "o/r"}),
+    (kb.PAGE.path + "/edit", {"repo": "o/r", "id": "id-1"}),
+    (kb.PAGE.path + "/delete", {"repo": "o/r", "id": "id-1"}),
+    (kb.PAGE.path + "/tools", {"repo": "o/r"}),
+    (transcripts.PAGE.path, {"key": "not a key"}),
+]
+
+#: Open pages that still render `nav_extra`, so their bodies differ by cookie.
+_OPEN_WITH_NAV = [
+    (kb.PAGE.path, {}),
+    (kb.PAGE.path, {"repo": "o/r"}),
+    (kb.PAGE.path + "/preview", {"repo": "o/r"}),
+    (transcripts.PAGE.path, {}),
+]
+
+
+@pytest.fixture
+def stocked(monkeypatch):
+    """A store holding the one learning the edit and delete pages need."""
+    monkeypatch.setattr(
+        kb,
+        "current_store",
+        lambda: FakeStore(
+            [
+                {
+                    "id": "id-1",
+                    "repo": "o/r",
+                    "text": "Keep migrations idempotent.",
+                    "source": "docs",
+                    "source_url": None,
+                    "file_globs": [],
+                    "topic": None,
+                    "created_at": None,
+                    "expires_at": None,
+                }
+            ]
+        ),
+    )
+
+
+@pytest.mark.parametrize(("path", "params"), _GATED)
+def test_every_gated_page_refuses_to_be_stored(client, stocked, path, params):
+    # Signed out first, so the table cannot quietly list a page that stopped
+    # being gated -- the headers would then be asserted on an open page.
+    assert client.get(path, params=params, follow_redirects=False).status_code == 303
+    _sign_in(client)
+    resp = client.get(path, params=params)
+    assert resp.status_code == 200
+    assert resp.headers["cache-control"] == "no-store"
+    assert resp.headers["vary"] == "Cookie"
+
+
+@pytest.mark.parametrize(("path", "params"), _OPEN_WITH_NAV)
+def test_every_open_page_with_a_nav_varies_on_the_cookie(client, stocked, path, params):
+    """Cacheable as before, but keyed on the cookie: the nav carries a CSRF token."""
+    resp = client.get(path, params=params)
+    assert resp.status_code == 200
+    assert "cache-control" not in resp.headers
+    assert resp.headers["vary"] == "Cookie"
+
+
+def test_a_write_that_redirects_is_not_stored(client, stocked):
+    session = _sign_in(client)
+    resp = client.post(
+        kb.PAGE.path + "/delete",
+        data={"repo": "o/r", "id": "id-1", "csrf": security.csrf_token(session)},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["cache-control"] == "no-store"
