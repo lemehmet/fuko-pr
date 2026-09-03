@@ -20,10 +20,14 @@ a minute after one unrelated blip.
 
 The listing is over ``review_transcripts``, so a run that produced no transcript
 -- every pr-agent run, everything predating capture -- is absent by
-construction rather than shown with empty figures. The converse gap is #258's:
-a throttled failover leg ships its blob but never indexes it, so that blob is
-fetchable by key and invisible to the listing until #258 lands. :func:`fetch`
-deliberately does not consult the index for that reason.
+construction rather than shown with empty figures. The converse gap was #258's:
+a throttled failover leg shipped its blob and never indexed it, leaving that
+blob fetchable by key and invisible to the listing. It is indexed as it is
+abandoned now (:func:`sidecar.runner._record_transcript`), so it lists -- with no
+repo, PR or seat, because nothing bills it a ``review_runs`` row. :func:`fetch`
+still does not consult the index: a blob is fetchable on its key alone, and a
+reader chasing one should not be told it does not exist because its row is
+missing.
 """
 
 from __future__ import annotations
@@ -77,9 +81,9 @@ class TranscriptRun:
 
     Everything from ``review_runs`` is optional, because the reference is
     written in a SEPARATE transaction after this row lands. A transcript whose
-    run row never followed -- the metrics post lost, or #258's un-indexed
-    failover legs once they are indexed -- is still a real stored transcript,
-    and appears here with no repo, PR or seat rather than not at all.
+    run row never followed -- the metrics post lost, or an abandoned failover leg
+    that a chain deliberately never bills (#258) -- is still a real stored
+    transcript, and appears here with no repo, PR or seat rather than not at all.
     """
 
     key: str

@@ -212,6 +212,13 @@ could not be metered, so there are no figures that honestly describe it; or the
 `review_transcripts` insert itself did not land, which by design costs the
 reference and never the run row beside it.
 
+The mirror case is a `review_transcripts` row with no run row to reference it. A
+provider pool that throttles and fails over ships the abandoned attempt's
+transcript, then writes its one `review_runs` row for the entry that answered —
+so that attempt's transcript is indexed on its own (`POST /metrics/transcript`,
+#258) and stays visible to `fuko transcripts` and the `/ui` page, minus the repo,
+PR and seat that only a run row carries.
+
 Without `FUKO_DATABASE_URL` there are no rows at all — the blob is stored and
 nothing records it.
 

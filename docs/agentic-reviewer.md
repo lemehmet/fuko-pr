@@ -646,6 +646,17 @@ column — `transcript_key` — pointing at it:
   a runner with no destination at all (a `fuko review` laptop), whose transcript
   is a local file. Those runs still get their `review_runs` row — they get a
   NULL `transcript_key`.
+- **The reverse also happens: an index row with no run row.** A provider pool
+  that throttles and fails over ships the abandoned leg's transcript before the
+  pool decides to abandon it, and the chain writes **one** `review_runs` row,
+  attributed to the entry that answered — deliberately, so a throttled attempt's
+  spend never rides a row whose provider says something else. That leg's
+  transcript is therefore indexed on its own (`POST /metrics/transcript`, #258)
+  and referenced by nothing: `review_transcripts` is keyed by the transcript, not
+  by a run, and the listing LEFT-JOINs `review_runs` so such a row appears with
+  no repo, PR or seat rather than not at all. It also means the `--repo`,
+  `--pr` and `--seat` filters cannot reach it — those columns live on the run
+  row it does not have.
 
 ### Reading the corpus (`fuko transcripts`)
 
@@ -679,8 +690,9 @@ Three properties worth knowing before you trust an empty answer:
 - **The listing is over `review_transcripts`**, so a run that produced no
   transcript (every pr-agent run, everything predating capture) is absent rather
   than shown with empty figures. The converse — a blob stored under a key the
-  index never recorded (#258) — is fetchable by key and simply not listed;
-  `get` deliberately does not consult the index.
+  index never recorded — is fetchable by key and simply not listed; `get`
+  deliberately does not consult the index, so a reader chasing a key is never
+  told the bytes are gone because a row is.
 
 Filters are AND-ed, so combining them narrows. `--since` is inclusive and
 `--until` exclusive, both UTC when given as a bare date, so adjacent windows

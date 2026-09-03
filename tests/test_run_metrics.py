@@ -10,6 +10,7 @@ from sidecar.fukoconfig import ModelConfig, ReviewModel
 _TOKEN = "test-token"
 
 _REAL_RECORD_RUN = runner._record_run
+_REAL_RECORD_TRANSCRIPT = runner._record_transcript
 
 
 def _client(monkeypatch):
@@ -454,12 +455,12 @@ def test_review_records_metrics_with_failover(monkeypatch, tmp_path):
 def test_review_records_the_last_throttled_attempts_transcript_when_the_pool_exhausts(
     monkeypatch, tmp_path
 ):
-    """The exhaustion branch is the ONLY path on which a throttled agentic
-    attempt's index reaches `record()` -- when the killed attempt is last in the
-    pool. Everywhere else it is discarded with the rest of that attempt's
-    metrics (#258), so this row is the recorded half of that residue and is
-    worth pinning: nothing else would catch the argument being dropped, or the
-    branch recording the wrong attempt's index."""
+    """The exhaustion branch is the only path on which a throttled attempt's
+    index reaches `record()` and becomes a REFERENCE on a run row -- when the
+    killed attempt is last in the pool. (Every abandoned leg is indexed on its
+    own since #258, this one included; what is unique here is the row that names
+    it.) Worth pinning: nothing else would catch the argument being dropped, or
+    the branch recording the wrong attempt's index."""
     cfg = tmp_path / ".fuko.toml"
     cfg.write_text(
         "[[review.models]]\n"
@@ -497,6 +498,8 @@ def test_review_records_the_last_throttled_attempts_transcript_when_the_pool_exh
     monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
     recorded = []
     monkeypatch.setattr(runner, "_record_run", lambda pr, model, **kw: recorded.append((model, kw)))
+    indexed = []
+    monkeypatch.setattr(runner, "_record_transcript", indexed.append)
 
     runner.review("https://github.com/o/r/pull/7", str(cfg))
 
@@ -507,6 +510,72 @@ def test_review_records_the_last_throttled_attempts_transcript_when_the_pool_exh
     # same rule the failover golden above states for costs.
     assert model.provider == "anthropic"
     assert kw["transcript"] == last
+    # Both legs were abandoned, so both were indexed on their way past (#258);
+    # the last one is then indexed AGAIN by the row that references it, which the
+    # `ON CONFLICT (key) DO NOTHING` insert makes free.
+    assert indexed == [first, last]
+
+
+def test_failover_indexes_the_abandoned_legs_transcript(monkeypatch, tmp_path):
+    """#258: the throttled leg gets an index row and NO metrics row.
+
+    The chain still writes exactly one `review_runs` row, attributed to the entry
+    that answered and carrying only its spend -- the golden decision
+    `test_review_records_metrics_with_failover` pins, which this must not
+    disturb. What changes is that the abandoned leg's already-shipped transcript
+    stops being a blob nothing describes: it is indexed on its own, referenced by
+    nothing, which is the direction `migrations/013` holds by write order."""
+    cfg = tmp_path / ".fuko.toml"
+    cfg.write_text(
+        "[[review.models]]\n"
+        'provider = "zai-coding"\nname = "glm-5.2"\ntoken_env = "FUKO_GITHUB_TOKEN_DORIAN"\n'
+        "[[review.models]]\n"
+        'provider = "anthropic"\nname = "claude-sonnet-4-6"\nrole = "backup"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ZAI_KEY", "k")
+    monkeypatch.setenv("ANTHROPIC_KEY", "k")
+    monkeypatch.setattr(runner, "build_knowledge", lambda *a: "")
+    monkeypatch.setattr(runner, "_cb_cooldowns", lambda: set())
+    monkeypatch.setattr(runner, "_cb_trip", lambda *a: None)
+    monkeypatch.setattr(runner, "_estimate_required_context", lambda *a: None)
+
+    abandoned = {"key": _INDEX["key"], "complete": False, "tool_calls": {"Read": 88}}
+    winner = {"key": "0199bbbb-cccc-7ddd-8eee-ffffffffffff", "complete": True}
+    results = iter(
+        [
+            InvokeResult(
+                returncode=124, detail="tool_timeout", throttled=True, transcript=abandoned
+            ),
+            InvokeResult(returncode=0, transcript=winner),
+        ]
+    )
+
+    class FakeBackend:
+        def build_env(self, preset, model, knowledge, tools):
+            return {}
+
+        def invoke(self, pr, env, tools):
+            return next(results)
+
+        def normalize_output(self, pr, model="", *, compare_label=None, **_kw):
+            return []
+
+    monkeypatch.setattr(runner, "get_backend", lambda name, config=None: FakeBackend())
+    recorded = []
+    monkeypatch.setattr(runner, "_record_run", lambda pr, model, **kw: recorded.append((model, kw)))
+    indexed = []
+    monkeypatch.setattr(runner, "_record_transcript", indexed.append)
+
+    assert runner.review("https://github.com/o/r/pull/7", str(cfg)).returncode == 0
+
+    # ONE run row, the winner's, with the winner's transcript as its reference.
+    assert len(recorded) == 1
+    model, kw = recorded[0]
+    assert model.provider == "anthropic" and kw["attempts"] == 2 and kw["outcome"] == "ok"
+    assert kw["transcript"] == winner
+    # And the abandoned leg's index, alone, with no row billing it.
+    assert indexed == [abandoned]
 
 
 def test_sequential_compare_records_per_branch_slots(monkeypatch, tmp_path):
@@ -857,6 +926,130 @@ def test_record_run_posts_the_transcript_it_was_given(monkeypatch):
         transcript=dict(_INDEX),
     )
     assert posted["transcript"] == _INDEX
+
+
+def test_index_transcript_no_ops_without_a_database(monkeypatch, capsys):
+    """#258 made this reachable on its own, from a runner with no Postgres at
+    all -- the `fuko review` laptop case. It must be silent there, not one
+    connection failure per abandoned leg."""
+    monkeypatch.setattr(run_metrics.settings, "database_url", "")
+    assert run_metrics.index_transcript(dict(_INDEX)) is None
+    assert capsys.readouterr().err == ""
+
+
+def test_index_transcript_writes_only_the_index_row(monkeypatch):
+    """The standalone write touches `review_transcripts` and nothing else: an
+    abandoned leg gets no `review_runs` row, which is the decision #258 turns on
+    (the chain bills the entry that answered)."""
+    conn, blocks = _pg(monkeypatch)
+    assert run_metrics.index_transcript(dict(_INDEX)) == _INDEX["key"]
+    assert len(conn.statements) == 1 and len(blocks) == 1
+    sql, params = conn.statements[0]
+    assert "INSERT INTO review_transcripts" in sql and "ON CONFLICT (key) DO NOTHING" in sql
+    assert params[0] == _INDEX["key"]
+
+
+def test_metrics_transcript_endpoint(monkeypatch):
+    """#258: the abandoned-leg hop carries the same index body `/metrics/run`
+    nests, and reports whether a row was written."""
+    monkeypatch.setattr(main.settings, "database_url", "")
+    seen = []
+    monkeypatch.setattr(
+        run_metrics, "index_transcript", lambda t: (seen.append(t), _INDEX["key"])[1]
+    )
+    resp = _client(monkeypatch).post("/metrics/transcript", json=_INDEX)
+    assert resp.status_code == 200
+    assert resp.json() == {"indexed": True, "persisted": False}
+    assert seen[0].key == _INDEX["key"] and seen[0].tool_calls == {"Read": 182, "Grep": 9}
+
+
+def test_metrics_transcript_endpoint_reports_a_row_that_did_not_land(monkeypatch):
+    """A key the store could never have held, or a write that failed, indexes
+    nothing -- and the caller is told so rather than being told it worked."""
+    monkeypatch.setattr(main.settings, "database_url", "")
+    monkeypatch.setattr(run_metrics, "index_transcript", lambda t: None)
+    resp = _client(monkeypatch).post("/metrics/transcript", json=_INDEX)
+    assert resp.status_code == 200 and resp.json()["indexed"] is False
+
+
+def test_metrics_transcript_endpoint_requires_auth(monkeypatch):
+    monkeypatch.setattr(main.settings, "auth_token", _TOKEN)
+    resp = TestClient(main.app).post("/metrics/transcript", json=_INDEX)
+    assert resp.status_code == 401
+
+
+def test_record_transcript_posts_over_http_when_a_sidecar_is_configured(monkeypatch):
+    """The runner holds no database of its own in the deployed shape, so the
+    abandoned leg's index goes over the same hop `_record_run` uses."""
+    monkeypatch.setenv("FUKO_URL", "http://fuko.internal:8000")
+    posted = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+    def _post(url, **kw):
+        posted.update(url=url, body=kw["json"])
+        return _Resp()
+
+    monkeypatch.setattr(runner.httpx, "post", _post)
+    _REAL_RECORD_TRANSCRIPT(dict(_INDEX))
+    assert posted["url"] == "http://fuko.internal:8000/metrics/transcript"
+    assert posted["body"] == _INDEX
+
+
+def test_record_transcript_authenticates_like_every_other_sidecar_hop(monkeypatch):
+    """The sidecar gates `/metrics/transcript` behind the same bearer token the
+    rest of its API uses, so the hop has to carry it."""
+    monkeypatch.setenv("FUKO_URL", "http://fuko.internal:8000")
+    monkeypatch.setenv("FUKO_TOKEN", "s3cret")
+    seen = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(
+        runner.httpx, "post", lambda url, **kw: (seen.update(kw["headers"]), _Resp())[1]
+    )
+    _REAL_RECORD_TRANSCRIPT(dict(_INDEX))
+    assert seen["Authorization"] == "Bearer s3cret"
+
+
+def test_record_transcript_writes_directly_without_a_sidecar(monkeypatch):
+    """No `FUKO_URL` is the in-process shape (`fuko review` on a box that holds
+    the Postgres itself), and it must reach the same writer."""
+    monkeypatch.delenv("FUKO_URL", raising=False)
+    seen = []
+    monkeypatch.setattr(run_metrics, "index_transcript", seen.append)
+    _REAL_RECORD_TRANSCRIPT(dict(_INDEX))
+    assert seen == [_INDEX]
+
+
+def test_record_transcript_skips_a_result_that_captured_nothing(monkeypatch):
+    """Most runs have no transcript -- every pr-agent one -- so the common path
+    must not open a transport at all."""
+    monkeypatch.setenv("FUKO_URL", "http://fuko.internal:8000")
+
+    def boom(*a, **k):
+        raise AssertionError("posted for a run with no transcript")
+
+    monkeypatch.setattr(runner.httpx, "post", boom)
+    _REAL_RECORD_TRANSCRIPT(None)
+    _REAL_RECORD_TRANSCRIPT({})
+
+
+def test_record_transcript_swallows_http_errors(monkeypatch, capsys):
+    """Observability must never fail the review that produced it -- the same
+    contract `_record_run` holds."""
+    monkeypatch.setenv("FUKO_URL", "http://fuko.internal:8000")
+
+    def boom(*a, **k):
+        raise RuntimeError("sidecar down")
+
+    monkeypatch.setattr(runner.httpx, "post", boom)
+    _REAL_RECORD_TRANSCRIPT(dict(_INDEX))
+    assert "transcript index record failed" in capsys.readouterr().err
 
 
 def test_transcript_of_reads_an_agentic_result_and_tolerates_every_other(monkeypatch):

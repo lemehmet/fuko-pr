@@ -1092,23 +1092,19 @@ class AgenticBackend:
         transcript: Transcript | None = None
         # Lifted off the transcript in the `finally` below, because every return
         # path past that point needs it and the object it comes from is closed
-        # there. The two returns INSIDE the try (no harness on PATH, a sandbox
-        # that could not be prepared) carry none, because on every realistic
-        # shape of those two failures nothing has streamed yet and `index()`
-        # answers `None` anyway. The exception is a failure raised while
-        # ITERATING the harness pipe rather than while spawning it: `_drive`'s
-        # own `finally` has closed -- and with a shipping sink, shipped -- the
-        # transcript by then, so the store holds a blob with no index row.
-        #
-        # That surface is wider than the `OSError` caught here, and deliberately
-        # not enumerated: the pipe is a strict-decoding text stream, so a kill
-        # landing mid multibyte character raises `UnicodeDecodeError`, which
-        # reaches the runner's branch-level handler instead and costs the whole
-        # metrics row rather than only the reference. Both land on the direction
-        # this design accepts -- an orphan blob, never a reference naming
-        # nothing -- which is why the block is not restructured for either. #258
-        # tracks the residue.
+        # there.
         transcript_index: dict | None = None
+        # The two failures raised INSIDE the try -- no harness on PATH, a sandbox
+        # that could not be prepared -- are carried out as text and returned
+        # AFTER the `finally` rather than from the handler (#258). For a
+        # spawn-time failure that costs nothing: nothing streamed, so `index()`
+        # answers `None` either way. It is the other shape of the same handler
+        # that made returning early wrong -- an `OSError` raised while ITERATING
+        # the harness pipe, by which point `_drive`'s own `finally` has closed
+        # and (with a shipping sink) SHIPPED the transcript. Returning before the
+        # index was lifted left that blob in the store with nothing describing
+        # it.
+        harness_failure: str | None = None
         try:
             workdir = Path(mkdtemp(prefix="fuko-agentic-cwd-"))
             # PER-BRANCH CLAUDE STATE DIRECTORY.
@@ -1212,9 +1208,9 @@ class AgenticBackend:
                 transcript=transcript,
             )
         except HarnessNotAvailableError as e:
-            return _failure_result("failed:exit 1", str(e))
+            harness_failure = str(e)
         except OSError as e:
-            return _failure_result("failed:exit 1", f"could not prepare the review sandbox: {e}")
+            harness_failure = f"could not prepare the review sandbox: {e}"
         finally:
             if transcript is not None:
                 transcript.close()
@@ -1226,6 +1222,12 @@ class AgenticBackend:
             rmtree(checkout, ignore_errors=True)
             if workdir is not None:
                 rmtree(workdir, ignore_errors=True)
+
+        # FIRST, before anything reads `result` -- which the handlers above left
+        # unbound. No `costs` for the same reason: the run that would have
+        # reported them never returned one.
+        if harness_failure is not None:
+            return _failure_result("failed:exit 1", harness_failure, transcript=transcript_index)
 
         if result.returncode != 0:
             output = result.stderr + "\n" + result.text

@@ -18,7 +18,11 @@ from sidecar.fukoconfig import ModelConfig, ReviewConfig
 from sidecar.presets import PRESETS, ProviderPreset, get_preset
 from sidecar.config import settings
 from sidecar.reviewer.checkout import PRContext
-from sidecar.reviewer.harness import HarnessResult, _permission_settings
+from sidecar.reviewer.harness import (
+    HarnessNotAvailableError,
+    HarnessResult,
+    _permission_settings,
+)
 from sidecar.reviewer.transcript import Transcript
 from sidecar.signals import extract_markers
 
@@ -2728,3 +2732,52 @@ def test_invoke_records_no_reference_when_capture_is_off(monkeypatch):
     result, captured = _invoke(monkeypatch, AgenticBackend(), HarnessResult(0, REVIEW_JSON))
     assert captured["transcript"] is None
     assert result.transcript is None
+
+
+def _invoke_raising(monkeypatch, error, feed=()):
+    """`invoke` with a harness that streams ``feed`` and then RAISES.
+
+    The shape #258 is about: an `OSError` out of `run_review` reaches the
+    driver's handler AFTER `_drive`'s own `finally` has closed -- and with a
+    shipping sink, shipped -- the transcript, so the blob is already in the store
+    by the time the failure is turned into a result.
+    """
+    monkeypatch.setattr(agentic_mod, "fetch_pr_context", lambda *a, **k: _ctx())
+    monkeypatch.setattr(agentic_mod, "checkout_pr_head", lambda *a, **k: "/tmp/nowhere")
+    monkeypatch.setattr(agentic_mod, "rmtree", lambda *a, **k: None)
+    monkeypatch.setattr(agentic_mod, "strip_agent_config", lambda *a, **k: [])
+    monkeypatch.setattr(agentic_mod, "check_auth", lambda *a, **k: {"loggedIn": True})
+
+    def fake_run_review(prompt, checkout, *, cwd, model, env, timeout, max_turns, transcript=None):
+        for line in feed:
+            transcript.write(line)
+        if transcript is not None:
+            transcript.close()  # `_drive`'s own `finally`, which ships the bytes
+        raise error
+
+    monkeypatch.setattr(agentic_mod, "run_review", fake_run_review)
+    return AgenticBackend().invoke(PR, {"FUKO_AGENTIC_MODEL": "claude-x"}, ["review"])
+
+
+def test_invoke_attaches_the_index_when_the_run_raises_after_shipping(monkeypatch, tmp_path):
+    """#258: the `OSError` handler used to return BEFORE the `finally` lifted the
+    index off the transcript, so a failure raised while iterating the harness
+    pipe left a shipped blob with nothing describing it. The return now happens
+    after that `finally` and carries the reference."""
+    _capture_with_a_store(monkeypatch, tmp_path)
+    result = _invoke_raising(monkeypatch, OSError("pipe died"), feed=_FEED[:2])
+    assert result.returncode == 1
+    assert result.detail.startswith("failed:exit 1: could not prepare the review sandbox")
+    assert result.transcript["tool_calls"] == {"Read": 1}
+    assert result.transcript["complete"] is False
+
+
+def test_invoke_reports_a_missing_harness_with_no_index(monkeypatch, tmp_path):
+    """The spawn-time half of the same handler is unchanged in what it reports,
+    and honestly carries no reference: nothing streamed, so nothing shipped."""
+    _capture_with_a_store(monkeypatch, tmp_path)
+    result = _invoke_raising(monkeypatch, HarnessNotAvailableError("claude not on PATH"))
+    assert result.returncode == 1
+    assert result.detail == "failed:exit 1: claude not on PATH"
+    assert result.transcript is None
+    assert result.channels == {"agentic-review": "failed:exit 1"}
