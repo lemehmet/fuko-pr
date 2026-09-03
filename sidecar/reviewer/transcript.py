@@ -719,6 +719,29 @@ def transcript_dir(directory: str | None = None) -> Path | None:
             "transcript_dir contains a newline, which the read-denylist "
             "hand-off cannot represent; rename the directory"
         )
+    if str(resolved) != str(resolved).strip():
+        # FIFTH spelling (#256), and the same failure again: the consumer
+        # normalizes each candidate with `entry.strip()`, so a name whose
+        # leading or trailing character is whitespace is denied under its
+        # TRIMMED name while the transcript lands at the padded one. Refused
+        # here rather than tolerated there, because trusting the consumer to
+        # round-trip it is exactly the assumption the other refusals drop.
+        raise ValueError(
+            "transcript_dir has leading or trailing whitespace, which the "
+            "read-denylist hand-off strips off; set FUKO_TRANSCRIPT_DIR to a "
+            "directory whose name has neither"
+        )
+    if os.name == "posix" and "\\" in str(resolved):
+        # SIXTH, and POSIX-only on purpose: `_permission_settings` rewrites
+        # backslashes to `/` so a Windows-shaped path renders at all, but on
+        # POSIX a backslash is an ordinary filename character, so that rewrite
+        # names a different directory. Gated on the platform rather than
+        # unconditional because `str(WindowsPath)` is all backslashes -- an
+        # ungated check would refuse every Windows destination.
+        raise ValueError(
+            "transcript_dir contains a backslash, which the read-denylist "
+            "hand-off rewrites to a forward slash; rename the directory"
+        )
     return resolved
 
 

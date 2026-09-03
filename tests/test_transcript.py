@@ -538,6 +538,34 @@ def test_a_destination_holding_a_newline_is_refused(monkeypatch, tmp_path):
         local_blob_root(BlobStoreConfig(backend="file", root=str(bad)))
 
 
+def test_a_destination_padded_with_whitespace_is_refused(tmp_path):
+    """`_permission_settings` strips each deny candidate, so a directory whose
+    name ends in whitespace is denied under its TRIMMED name while the
+    transcript lands at the padded one -- undenied, and nothing says so."""
+    from sidecar.objectstore import BlobStoreConfig, local_blob_root
+
+    bad = tmp_path / "corpus "
+    assert str(bad).endswith(" ")
+    with pytest.raises(ValueError, match="whitespace"):
+        transcript_mod.transcript_dir(str(bad))
+    with pytest.raises(ValueError, match="whitespace"):
+        local_blob_root(BlobStoreConfig(backend="file", root=str(bad)))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a backslash is a path separator off POSIX")
+def test_a_destination_holding_a_backslash_is_refused_on_posix(tmp_path):
+    """`_permission_settings` rewrites backslashes to `/` so a Windows-shaped
+    path renders at all; on POSIX, where a backslash is an ordinary filename
+    character, that rewrite names a different directory."""
+    from sidecar.objectstore import BlobStoreConfig, local_blob_root
+
+    bad = tmp_path / "cor\\pus"
+    with pytest.raises(ValueError, match="backslash"):
+        transcript_mod.transcript_dir(str(bad))
+    with pytest.raises(ValueError, match="backslash"):
+        local_blob_root(BlobStoreConfig(backend="file", root=str(bad)))
+
+
 def test_an_unset_store_credential_prefix_names_nothing(monkeypatch):
     """An empty prefix must not resolve to bare `_ACCESS_KEY_ID`."""
     monkeypatch.setattr(agentic_settings, "transcript_store_creds_env_prefix", "")
