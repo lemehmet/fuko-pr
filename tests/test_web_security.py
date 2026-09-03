@@ -256,6 +256,29 @@ def test_a_non_ascii_auth_token_can_now_sign_in(monkeypatch):
     assert security.COOKIE in signed_in.cookies
 
 
+def test_a_surrogate_bearing_auth_token_signs_rather_than_500s(monkeypatch):
+    """A ``FUKO_AUTH_TOKEN`` whose bytes are not UTF-8 must not break every page.
+
+    ``os.environ`` decodes undecodable bytes with ``surrogateescape``, so the
+    token can reach ``settings`` carrying a lone surrogate. ``_same`` was taught
+    to survive that; ``_sign`` is the call right behind it, and its key encoding
+    is reached on every render through ``nav_extra`` -> ``is_valid``, not only
+    at login. Asserted through the routes, since nothing under ``sidecar/``
+    catches a ``UnicodeEncodeError``.
+    """
+    monkeypatch.setattr(main.settings, "auth_token", "t\udcffken")
+    odd = TestClient(main.app)
+    # An open page, whose nav reads the cookie and so signs on every render.
+    assert odd.get("/ui/kb").status_code == 200
+    # A syntactically well-formed cookie from any visitor reaches `_sign` too.
+    odd.cookies.set(security.COOKIE, "v1.99999999999.deadbeef", path="/ui")
+    assert odd.get("/ui/kb").status_code == 200
+    # And a session this server minted still verifies, so the token is usable
+    # rather than merely non-fatal.
+    session = security.issue()
+    assert session is not None and security.is_valid(session)
+
+
 def test_the_comparison_survives_a_lone_surrogate(client):
     """A character with no UTF-8 encoding must answer False, not raise.
 

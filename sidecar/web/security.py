@@ -107,10 +107,21 @@ def _same(expected: str, submitted: str) -> bool:
 
 
 def _sign(payload: str) -> str | None:
-    """HMAC ``payload`` with the configured token, or ``None`` when there is none."""
+    """HMAC ``payload`` with the configured token, or ``None`` when there is none.
+
+    The key is encoded the same way :func:`_same` compares, and for the same
+    reason: a ``FUKO_AUTH_TOKEN`` whose bytes are not valid UTF-8 reaches
+    ``settings`` as a str carrying lone surrogates (``os.environ`` decodes with
+    ``surrogateescape``), which a strict ``.encode()`` refuses. That raise is
+    reached on every page render -- ``nav_extra`` reads the cookie, ``is_valid``
+    signs to check it -- and nothing above it catches, so the whole console
+    answers 500 rather than the operator merely being unable to sign in. The
+    payload is this module's own ``str(int)`` and needs no such handling.
+    """
     if not settings.auth_token:
         return None
-    return hmac.new(settings.auth_token.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    key = settings.auth_token.encode("utf-8", "surrogatepass")
+    return hmac.new(key, payload.encode(), hashlib.sha256).hexdigest()
 
 
 def issue(now: float | None = None) -> str | None:

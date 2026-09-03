@@ -138,7 +138,8 @@ def submit(request: Request, csrf: str = Form(default=""), ...):
     session = security.require(request)
     security.check_csrf(session, csrf)       # 400 on a missing or forged token
     ...
-    return RedirectResponse(..., status_code=303)   # post/redirect/get
+    # a handler returning its own Response stamps it directly
+    return security.no_store(RedirectResponse(..., status_code=303))
 ```
 
 and every form that posts must embed `security.csrf_field(session)`.
@@ -171,15 +172,19 @@ Details worth knowing before you touch it:
   per-request and never sees the hit. FastAPI merges the injected `response`'s
   headers only when the handler returns data rather than a `Response`, so a
   handler that builds its own stamps it directly: `return
-  security.no_store(HTMLResponse(...))`. The route sweep in
-  `tests/test_web_security.py` is what keeps this true of a *new* page.
+  security.no_store(HTMLResponse(...))` — the write redirects do this in one
+  place, `kb._redirect`. The route sweep in `tests/test_web_security.py` holds
+  the rule for the pages listed in its `_GATED` / `_OPEN_WITH_NAV` tables, which
+  are hand-maintained: a new page is only swept once its author adds it there,
+  so add it in the same commit.
 - Comparisons against the token or a CSRF value go through `security._same`, not
   `hmac.compare_digest` directly: form fields are not ASCII, and `compare_digest`
   raises `TypeError` on a non-ASCII `str` (#267). It is still constant time — the
   fix is comparing encoded bytes, not screening the input first.
 - Rejected writes should re-render the form with the submitted values, not
   redirect. Losing a long edit to a unique collision is its own bug; see
-  `kb.edit_submit`.
+  `kb.edit_submit` — and stamp that re-render too, since it is the one write
+  response carrying both a CSRF token and an unsaved draft.
 
 ## URLs
 
