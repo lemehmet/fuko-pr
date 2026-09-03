@@ -414,6 +414,25 @@ def local_blob_root(cfg: BlobStoreConfig) -> Path | None:
             "transcript store root contains a newline, which the read-denylist "
             "hand-off cannot represent; rename the directory"
         )
+    if str(resolved) != str(resolved).strip():
+        # Same refusal, same reason, as `transcript_dir` (#256): the consumer
+        # strips each deny candidate, so a padded name is denied under its
+        # trimmed spelling while the blobs land at the padded one.
+        raise ValueError(
+            "transcript store root has leading or trailing whitespace, which the "
+            "read-denylist hand-off strips off; set FUKO_TRANSCRIPT_STORE_ROOT to "
+            "a directory whose name has neither"
+        )
+    if os.name == "posix" and "\\" in str(resolved):
+        # POSIX-only, as in `transcript_dir`: the consumer rewrites backslashes
+        # to `/` so a Windows-shaped path renders, which on POSIX -- where a
+        # backslash is an ordinary filename character -- names a different
+        # directory. `str(WindowsPath)` is all backslashes, so an ungated check
+        # would refuse every Windows root.
+        raise ValueError(
+            "transcript store root contains a backslash, which the read-denylist "
+            "hand-off rewrites to a forward slash; rename the directory"
+        )
     return resolved
 
 
