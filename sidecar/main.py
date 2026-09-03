@@ -301,6 +301,31 @@ def metrics_run_endpoint(req: models.RunMetricRequest) -> dict:
     return {"recorded": True, "persisted": bool(settings.database_url)}
 
 
+@app.post("/metrics/transcript", dependencies=[Depends(_auth)])
+def metrics_transcript_endpoint(req: models.TranscriptIndexRequest) -> dict:
+    """Index one stored transcript that has NO ``review_runs`` row (#258).
+
+    The abandoned-leg counterpart to ``/metrics/run``, which indexes a
+    transcript on its way to writing the run row that references it. An
+    intermediate failover leg has already shipped its blob by the time
+    :func:`sidecar.runner._run_pool` throttles past it, and the chain writes one
+    run row for the entry that ANSWERED -- so that leg's index row has nothing to
+    ride with and posts here instead.
+
+    A separate endpoint rather than a nullable-everything ``/metrics/run`` body:
+    the two writes mean different things (one is a run's accounting, one is a
+    transcript's own figures), and a run row with no provider, outcome or
+    duration is not a row this table should learn to accept.
+
+    Idempotent, because :func:`sidecar.run_metrics.index_transcript` is: the blob
+    is write-once and so is its row, so a re-delivered post is success. It never
+    touches ``review_runs``, so it adds no exposure to the double-count that
+    module's missing ``ON CONFLICT`` would allow.
+    """
+    key = run_metrics.index_transcript(req)
+    return {"indexed": key is not None, "persisted": bool(settings.database_url)}
+
+
 @app.get(
     "/metrics/summary", response_model=models.RunSummaryResponse, dependencies=[Depends(_auth)]
 )

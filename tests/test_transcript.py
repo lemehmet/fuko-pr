@@ -628,6 +628,27 @@ def test_a_fragment_shorter_than_the_minimum_is_left_alone():
     assert scrubber.scrub_partial(short) == short
 
 
+def test_a_fragment_cut_inside_a_multibyte_character_is_redacted_with_its_tail():
+    """The harness pipe decodes with ``errors="replace"`` (#258), so a cut inside
+    a multibyte character of a credential yields ``prefix + U+FFFD`` rather than
+    raising out of the iteration. No needle prefix ends in U+FFFD, so an
+    unstripped suffix scan matches nothing and ships the prefix in front of it."""
+    secret = "ghs_" + "é" * 12
+    scrubber = Scrubber.for_secrets([("FUKO_TOKEN", secret)])
+    cut = '{"type":"user","content":"token=' + secret[:10] + transcript_mod.REPLACEMENT_CHAR
+    assert scrubber.scrub(cut) == cut
+    assert scrubber.scrub_partial(cut) == '{"type":"user","content":"token=[REDACTED:FUKO_TOKEN]'
+
+
+def test_a_replacement_character_following_no_credential_leaves_the_line_alone():
+    """Stripping the tail is only a way to SEE the fragment behind it. A line
+    that ends in U+FFFD for any other reason still matches nothing, and keeps
+    the tail it arrived with rather than being silently truncated."""
+    scrubber = Scrubber.for_secrets([("ANTHROPIC_API_KEY", SECRET)])
+    line = '{"type":"user","content":"plain text' + transcript_mod.REPLACEMENT_CHAR
+    assert scrubber.scrub_partial(line) == line
+
+
 def test_a_line_with_a_newline_never_takes_the_truncated_pass(monkeypatch):
     """Only the last line a pipe yields can lack its newline, so the extra pass
     costs at most one line per run."""

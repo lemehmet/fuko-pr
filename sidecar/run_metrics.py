@@ -19,6 +19,12 @@ here: per-tool call counts, tool-result bytes, and how many files a run read
 more than once, keyed by the transcript's own key. ``review_runs`` gains only
 the nullable reference to it, written after that row lands.
 
+Because that table is keyed by the TRANSCRIPT, a stored transcript can be
+indexed without a run row to reference it -- :func:`index_transcript` is public
+for the one caller that has to (#258): an intermediate failover leg, whose blob
+ships before the pool decides to abandon it and whose costs deliberately never
+get a ``review_runs`` row of their own.
+
 Best-effort by design, mirroring :mod:`sidecar.circuit_breaker`: with no
 Postgres configured (``FUKO_DATABASE_URL`` unset) these functions degrade to
 no-ops -- metrics must never block or fail a review.
@@ -135,7 +141,7 @@ def _tool_calls(value) -> dict:
     An entry that does not fit is dropped rather than clamped or rejected: a
     count is not recoverable by guessing, and one unusable entry must not cost
     the rest of the row -- the same reason an unusable key costs only the
-    reference (:func:`_index_transcript`) and an unstorable cost only itself
+    reference (:func:`index_transcript`) and an unstorable cost only itself
     (:func:`_storable_cost`). ``bool`` is excluded despite being an ``int``:
     ``True`` as a call count is a shape error, not one call -- and the request
     model refuses the same spelling on the HTTP hop (``StrictInt``, which lax
@@ -154,15 +160,27 @@ def _tool_calls(value) -> dict:
     }
 
 
-def _index_transcript(transcript) -> str | None:
-    """Write this run's transcript index row and return the key to reference (#239).
+def index_transcript(transcript) -> str | None:
+    """Write this transcript's index row and return the key to reference (#239).
 
     ``None`` on every path that must leave ``review_runs.transcript_key`` NULL:
-    no transcript, a key the blob store could never have stored, or an index
-    write that did not land. A reference is only written for a row that exists,
-    which is the invariant ``migrations/013`` states and holds by WRITE ORDER
-    rather than by a foreign key -- so a transcript-side failure costs the
-    reference and never the metrics row beside it.
+    persistence disabled, no transcript, a key the blob store could never have
+    stored, or an index write that did not land. A reference is only written for
+    a row that exists, which is the invariant ``migrations/013`` states and holds
+    by WRITE ORDER rather than by a foreign key -- so a transcript-side failure
+    costs the reference and never the metrics row beside it.
+
+    PUBLIC because a stored transcript does not always have a ``review_runs``
+    row to ride with (#258). An intermediate failover leg is abandoned by
+    :func:`sidecar.runner._run_pool` after its blob has already shipped, and the
+    chain writes ONE run row for the entry that answered -- a deliberate
+    cost-attribution rule (``tests/test_run_metrics.py::
+    test_review_records_metrics_with_failover``) that indexing must not disturb.
+    So the leg's index row is written on its own, with no reference pointing at
+    it. That is the shape the reader was built for: ``review_transcripts`` is
+    keyed by the transcript's own key, and ``sidecar.transcripts._LIST_SQL``
+    LEFT-JOINs ``review_runs`` precisely so a transcript whose run row never
+    followed still lists, with no repo, PR or seat.
 
     SCOPED to a failure the statement earned -- a column that is not there, a
     constraint, a value the column cannot hold. A CONNECTION-level failure is
@@ -190,7 +208,12 @@ def _index_transcript(transcript) -> str | None:
     can hand over its pydantic model and the direct path its dict without either
     side converting.
     """
-    if not transcript:
+    if not _enabled() or not transcript:
+        # The `_enabled()` guard belongs HERE and not only on :func:`record`'s
+        # side of the call: this is now reachable on its own, from a runner that
+        # has no Postgres configured at all (a `fuko review` laptop run), and
+        # `db_best_effort` would otherwise print a connection failure per
+        # abandoned leg for a store that was never meant to exist.
         return None
     if not isinstance(transcript, dict):
         transcript = {
@@ -293,7 +316,7 @@ def record(
 
     ``transcript`` (#239) is this run's session-transcript index -- its key plus
     the per-tool figures derived from the feed. It is written FIRST, into its own
-    table and its own transaction (:func:`_index_transcript`), and only a row
+    table and its own transaction (:func:`index_transcript`), and only a row
     that landed becomes the reference on this one; anything else records NULL,
     which is what a run with no transcript honestly has.
     """
@@ -301,7 +324,7 @@ def record(
         return
     from .db import db_best_effort
 
-    transcript_key = _index_transcript(transcript)
+    transcript_key = index_transcript(transcript)
     with db_best_effort() as conn:
         conn.execute(
             "INSERT INTO review_runs "

@@ -70,6 +70,13 @@ from .transcript_client import ship, upload_target
 #: number.
 MIN_FRAGMENT = 4
 
+#: What a byte the harness pipe could not decode becomes. ``_drive`` reads that
+#: pipe with ``errors="replace"`` (#258), so a kill landing inside a multibyte
+#: character leaves this at the end of the truncated line instead of raising --
+#: which :meth:`Scrubber.scrub_partial` has to see through to find the
+#: credential fragment it follows.
+REPLACEMENT_CHAR = "\ufffd"
+
 
 def _redaction(name: str) -> str:
     """The marker a scrubbed value is replaced by.
@@ -168,17 +175,31 @@ class Scrubber:
         rest of a different, genuinely truncated secret on disk -- under the
         wrong marker. Scanning all of them costs one pass over a handful of
         registered values, once per run.
+
+        A REPLACEMENT-CHARACTER TAIL is stripped before that scan (#258). The
+        harness pipe decodes with ``errors="replace"``, so a cut landing inside
+        a multibyte character yields a credential PREFIX followed by U+FFFD
+        rather than raising out of the iteration -- and no needle prefix ends in
+        U+FFFD, so every ``endswith`` would fail and the credential prefix in
+        front of it would be written and shipped. Those replacement characters
+        ARE the remains of the credential's next character, so they are redacted
+        with the fragment rather than left dangling after the marker. A trailing
+        U+FFFD that follows no credential still matches nothing, and the line is
+        returned untouched -- tail included.
         """
         text = self.scrub(text)
+        # The suffix scan runs against the line WITHOUT its replacement-character
+        # tail, and redacts that tail along with the fragment it follows.
+        scanned = text.rstrip(REPLACEMENT_CHAR)
         best_size, best_marker = 0, ""
         for needle, marker in self.replacements:
             # A full match was already handled by `scrub`, hence `len(needle) - 1`.
-            for size in range(min(len(text), len(needle) - 1), best_size, -1):
-                if size >= MIN_FRAGMENT and text.endswith(needle[:size]):
+            for size in range(min(len(scanned), len(needle) - 1), best_size, -1):
+                if size >= MIN_FRAGMENT and scanned.endswith(needle[:size]):
                     best_size, best_marker = size, marker
                     break
         if best_size:
-            return text[:-best_size] + best_marker
+            return scanned[:-best_size] + best_marker
         return text
 
 

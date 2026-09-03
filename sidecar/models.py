@@ -311,7 +311,14 @@ only a caller that was never counting.
 
 
 class TranscriptIndexRequest(BaseModel):
-    """One run's session-transcript index row, riding ``POST /metrics/run`` (#239).
+    """One session-transcript index row (#239).
+
+    Nested in ``POST /metrics/run``'s body for a run whose row will reference it,
+    and the WHOLE body of ``POST /metrics/transcript`` for a stored transcript
+    that gets no run row at all -- an intermediate failover leg, abandoned after
+    its blob shipped and deliberately never billed (#258). One model either way,
+    because it is one row in one table: ``review_transcripts`` is keyed by the
+    transcript, not by the run.
 
     Derived by the runner AT CAPTURE, from the feed it was already streaming to
     the transcript sink (:class:`sidecar.reviewer.transcript.TranscriptIndex`),
@@ -319,8 +326,9 @@ class TranscriptIndexRequest(BaseModel):
 
     Nested rather than flattened onto :class:`RunMetricRequest` because these
     figures describe the transcript and land in their own table -- ``review_runs``
-    gains exactly one column, the reference. Absent (``None``) is the normal case:
-    every pr-agent run, and every agentic run whose capture is off or failed.
+    gains exactly one column, the reference. Absent (``None``) there is the normal
+    case: every pr-agent run, and every agentic run whose capture is off or
+    failed.
 
     Every field is REQUIRED except the counts, which default to the empty
     measurement rather than to nothing-measured: this object only exists for a

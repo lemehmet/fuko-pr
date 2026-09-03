@@ -773,6 +773,28 @@ def _drive(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        # The feed is NDJSON, which is UTF-8 by its own definition -- so say so,
+        # rather than letting the runner's locale decide how the child's bytes
+        # are read. And decode TOLERANTLY (#258): the timeout kills the child
+        # outright, and a kill landing mid multibyte character leaves a partial
+        # sequence in the pipe that strict decoding raises `UnicodeDecodeError`
+        # on -- a `ValueError`, so it escapes `invoke`'s `OSError` handler,
+        # reaches the runner's branch-level `except`, and costs that attempt its
+        # whole metrics row while its transcript is already in the store.
+        #
+        # Replacing folds that into the tolerance the feed already has: the
+        # mangled line fails `json.loads` and is skipped by `_consume_stream` and
+        # by the transcript meter alike (both return on a `ValueError` rather
+        # than going inert), so a cut-short run is indexed with `complete=False`
+        # -- which is what it is -- instead of vanishing.
+        #
+        # It applies to stdin too, and that is also an improvement: an
+        # unencodable character in the prompt used to raise `UnicodeEncodeError`
+        # in `_feed`, which catches only `BrokenPipeError`/`OSError`, killing the
+        # feeder thread with stdin never closed and hanging the child until this
+        # timer fires.
+        encoding="utf-8",
+        errors="replace",
         cwd=str(cwd),
         env=env,
     )

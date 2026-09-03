@@ -423,6 +423,53 @@ def _transcript_of(result: InvokeResult) -> dict | None:
     return getattr(result, "transcript", None) or None
 
 
+def _record_transcript(transcript: dict | None) -> None:
+    """Index a stored transcript that will get no metrics row (best-effort, #258).
+
+    ``_run_pool`` throttles PAST an intermediate failover leg: no ``_record_run``
+    is made for it, because the chain attributes its one ``review_runs`` row to
+    the entry that answered and deliberately under-reports the abandoned leg's
+    costs (``tests/test_run_metrics.py::test_review_records_metrics_with_failover``).
+    That leg's transcript, however, was captured, closed and SHIPPED inside
+    ``AgenticBackend.invoke``'s ``finally`` before the pool ever saw the throttle
+    -- so without this the store holds a blob the index cannot describe, which is
+    exactly the corpus gap #240's reader enumerates over.
+
+    Only the index row, never a ``review_runs`` row: a leg that a chain refuses
+    to bill is not a run to bill here either, and ``review_transcripts`` is keyed
+    by the transcript rather than by a run, so it needs no partner row. The write
+    order the whole design turns on is preserved in the strongest direction --
+    this writes a row nothing references, and never a reference naming a row that
+    is not there (``migrations/013``).
+
+    Same two transports and the same never-raises contract as :func:`_record_run`,
+    for the same reason: observability must not affect the review that produced
+    it. It touches no aggregate table, so a re-delivery cannot double-count
+    anything -- ``index_transcript``'s insert is ``ON CONFLICT DO NOTHING``.
+    """
+    if not transcript:
+        return
+    try:
+        fuko_url, fuko_token = _cb_endpoint()
+        if fuko_url:
+            headers = {"Content-Type": "application/json"}
+            if fuko_token:
+                headers["Authorization"] = "Bearer " + fuko_token
+            resp = httpx.post(
+                fuko_url.rstrip("/") + "/metrics/transcript",
+                json=transcript,
+                headers=headers,
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+        else:
+            from .run_metrics import index_transcript
+
+            index_transcript(transcript)
+    except Exception as e:
+        print(f"fuko: transcript index record failed (continuing): {e}", file=sys.stderr)
+
+
 def _record_run(
     pr: PRRef,
     model: ModelConfig,
@@ -1035,6 +1082,17 @@ def _run_pool(
             )
             return result
 
+        # This attempt gets no metrics row -- the chain bills the entry that
+        # answers, and that decision is not this issue's to revisit (#258). Its
+        # transcript still shipped, though, inside `invoke`'s `finally`, so index
+        # it here or the blob is invisible to every reader over the corpus.
+        #
+        # UNCONDITIONAL, including for the last entry, whose index the exhaustion
+        # branch below also passes to `_record_run`. The duplicate is free -- the
+        # insert is `ON CONFLICT (key) DO NOTHING` and the blob is write-once --
+        # and the rule stays one sentence: a leg is indexed as it is abandoned,
+        # rather than indexed only if a later branch happens to run and succeed.
+        _record_transcript(_transcript_of(result))
         _cb_trip(model.provider, review.cooldown_seconds, result.detail)
         print(
             f"fuko: {label} throttled ({result.detail}); breaker tripped, failing over",
