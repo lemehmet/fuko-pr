@@ -101,8 +101,10 @@ def main() -> None:
     p_retrieve.add_argument("--config", default=".fuko.toml", help="path to .fuko.toml")
 
     from . import kbcli
+    from . import transcriptscli
 
     kbcli.add_parser(sub)
+    transcriptscli.add_parser(sub)
 
     args = parser.parse_args()
     {
@@ -116,6 +118,7 @@ def main() -> None:
         "forget": _cmd_forget,
         "retrieve": _cmd_retrieve,
         "kb": kbcli.dispatch,
+        "transcripts": transcriptscli.dispatch,
     }[args.cmd](args)
 
 

@@ -177,3 +177,15 @@ def test_view_renders_dash_for_absent_pr(monkeypatch):
     resp = client.get("/ui/metrics")
     assert resp.status_code == 200
     assert "/pull/" not in resp.text
+
+
+def test_recent_runs_cross_link_to_the_ledger_on_repo_and_pr(monkeypatch):
+    _, client = _wire(monkeypatch, recent=_RECENT)
+    page = client.get("/ui/metrics").text
+    assert 'href="/ui/ledger?repo=lemehmet%2Fshuanda&amp;pr=74"' in page
+
+
+def test_recent_run_without_a_pr_gets_no_ledger_link(monkeypatch):
+    _, client = _wire(monkeypatch, recent=[{**_RECENT[0], "pr": None}])
+    page = client.get("/ui/metrics").text
+    assert "/ui/ledger?" not in page

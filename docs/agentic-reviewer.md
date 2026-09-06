@@ -24,6 +24,8 @@ sidecar/reviewer/            the reviewer (harness-agnostic core)
   prompt.py                  review strategy + JSON output contract   <- the value
   harness.py                 agent runtimes (headless Claude Code today)
   ledger.py                  per-seat findings + coverage policy (carry in / settle)
+  transcript.py              scrubbed, streaming capture of the harness event feed
+  transcript_client.py       how a finished transcript leaves the runner
 sidecar/backends/agentic.py  the fuko driver (ReviewBackend protocol)
 ```
 
@@ -465,6 +467,241 @@ model serves the harness's background haiku-class and subagent calls too. The
 vendor presets name a cheap tier there to keep those calls off an expensive
 model; a single-model deployment has no cheap tier, and naming a second slug
 would make the gateway swap models mid-review.
+
+## Session transcripts (`FUKO_TRANSCRIPT_DIR`)
+
+The harness reads the CLI's whole NDJSON event feed and folds it away, keeping
+only `assistant` and `result` events — so the `user` events, where tool
+**results** live (~91% of a review's token spend), were read and discarded in
+the same pass. Setting `FUKO_TRANSCRIPT_DIR` tees that feed to
+`<dir>/<key>.ndjson` as it streams (#237, epic #236):
+
+```bash
+FUKO_TRANSCRIPT_DIR=/var/lib/fuko/transcripts   # unset = capture off
+```
+
+Properties worth knowing before turning it on:
+
+- **Off by default, and off means free.** With the variable unset the feed is
+  iterated exactly as before — no tee, no per-event cost. There is deliberately
+  no default path: this writes a file per agentic branch per push and keeps it.
+- **Credentials are scrubbed at capture, irreversibly.** The driver hands the
+  transcript the exact values it holds — the checkout's GitHub App token, the
+  seat's injected provider credential, and the ambient secrets it strips from
+  the harness environment — and each is replaced by `[REDACTED:<VAR>]` before
+  any byte reaches disk, including inside a tool result that echoed it. Values
+  the driver does not hold are written verbatim: nothing is inferred from a
+  string's shape, because an over-broad rule silently corrupts the corpus and
+  cannot be undone.
+
+  Exact-value replacement is per **whole line**, and there is exactly one line
+  that may not be whole: when `tool_timeout` kills the harness (or the child
+  dies mid-write) the pipe yields a trailing line with no newline, which can
+  hold a *prefix* of a credential that no exact rule matches (#251). That line
+  gets a second pass which redacts a trailing suffix of it that is a proper
+  prefix of a known value. It is a no-op on a clean run: a complete NDJSON
+  event ends in `}` and no credential begins with one, so the guard costs no
+  corpus fidelity and, unlike dropping the line, does not throw away a complete
+  final `result` event.
+- **Streamed, never buffered.** One line at a time, line-buffered, so peak
+  memory does not track transcript size and a run killed at `tool_timeout`
+  keeps everything that arrived before the cut.
+- **Denied to the reviewing agent.** The destination is added to the harness
+  read denylist whenever it is configured — including on runs that do not
+  capture, since the archive earlier rounds left behind is the part worth
+  reading. The path is canonicalized first (`expanduser().resolve()`), so a
+  relative or symlinked destination cannot render a rule that misses what is
+  actually written; `/var/lib/fuko/transcripts` becomes the rule
+  `Read(//var/lib/fuko/transcripts/**)` in the absolute-rule spelling described
+  above. This is not covered by the file mode: the agent is spawned
+  as the same uid, so `0600` stops other *users*, not this reader. Without the
+  rule a transcript is a durable, cross-repo record of everything past runs
+  read, sitting where `Glob` can find it, reachable by an agent whose findings
+  are published verbatim to an untrusted PR author. `FUKO_TRANSCRIPT_DIR` is
+  stripped with the rest of the `FUKO_` namespace before the spawn, so the path
+  is handed over under its own name (`FUKO_TRANSCRIPT_DENY_DIR`) purely to be
+  denied.
+
+  **The rule follows the setting, not the files.** It is emitted for whatever
+  `FUKO_TRANSCRIPT_DIR` names *right now*, so **unsetting the variable or
+  pointing it at a new directory un-denies the corpus already on disk** — the
+  files stay where they are, and from the next run on nothing stops the agent
+  reading them. Turning capture off for privacy, or moving the destination to a
+  bigger disk, is therefore not a retreat: **delete the old directory**, or keep
+  its path denied by other means. There is deliberately no memory of previously
+  configured destinations — a deny list that accumulated paths nobody could see
+  or clear would be its own hazard — so this one is on the operator.
+- **Owner-only on disk.** The directory is created `0700` and each file `0600`,
+  set as the file is created rather than chmod'ed after. What survives the
+  scrub is the reviewed repository as the agent read it — the same content the
+  checkout gets a `0700` temp dir for, except a transcript is kept rather than
+  deleted, so on a shared runner the durable copy must not be the readable one.
+- **Capture never fails a review.** An unwritable destination, a full disk, a
+  misconfigured path: one stderr line, an inert transcript, and a review whose
+  text, `usage`, `cost_usd`, `turns` and `subtype` are identical to a run with
+  no capture at all.
+- **The key is the transcript's own.** Minted at run start (`review_runs` is
+  inserted afterwards and never returns its id), so later work can key a stored
+  blob and an index row on it.
+
+### Shipping them off the runner (`FUKO_TRANSCRIPT_STORE_*`)
+
+A transcript on one runner's disk is only reachable from that runner. Point the
+**sidecar** at object storage and every runner's transcript lands in one place,
+keyed by the same key capture minted (#238):
+
+```bash
+# On the sidecar, not the runner.
+FUKO_TRANSCRIPT_STORE_BACKEND=s3          # unset/empty = no store, transcripts stay local
+FUKO_TRANSCRIPT_STORE_BUCKET=fuko-transcripts
+FUKO_TRANSCRIPT_STORE_PREFIX=transcripts  # optional, inside the bucket
+FUKO_TRANSCRIPT_STORE_ENDPOINT_URL=https://<accountid>.r2.cloudflarestorage.com   # R2
+FUKO_TRANSCRIPT_STORE_CREDS_ENV_PREFIX=FUKO_S3   # reads FUKO_S3_ACCESS_KEY_ID / _SECRET_ACCESS_KEY / _REGION
+```
+
+`backend = file` with `FUKO_TRANSCRIPT_STORE_ROOT=/var/lib/fuko/blobs` is the
+serverless variant — one directory of blobs, useful for a single-host fleet and
+for trying the path out before there is a bucket.
+
+- **The runner holds no storage credentials.** It ships to the sidecar it
+  already has (`FUKO_URL` + `FUKO_TOKEN`) over a dedicated `POST
+  /transcripts/<key>`, and the sidecar writes the blob. Nothing new goes into a
+  consuming repo's workflow secrets. On a host with no `FUKO_URL` (a laptop
+  `fuko review`) the same `FUKO_TRANSCRIPT_STORE_*` variables are read locally
+  and the write goes straight to the store.
+- **Environment, not `.fuko.toml`.** The deployed sidecar image carries no repo
+  checkout, so it has no config file to read — the same reason the embedding
+  endpoint is environment-only (#216).
+- **Blobs are write-once.** A key is created or refused (`409`), never
+  overwritten, so a re-delivery cannot clobber a stored session. Capture keeps
+  the local file too — the deployed copy is a second home, not a move — so a
+  workflow artifact upload still works.
+- **Unconfigured stays working.** No `FUKO_TRANSCRIPT_STORE_BACKEND` means the
+  sidecar starts, reviews run, and transcripts are simply absent from storage.
+  A runner with no destination at all (no `FUKO_URL`, no local store) does not
+  even wrap the sink, so it never attempts an upload. A runner that ships to a
+  sidecar whose store is unconfigured attempts once, gets a `503`, and treats
+  that as the off state — silently, so staging capture ahead of storage does
+  not print a line per run. Any *other* rejection is one stderr line and a
+  review identical to one with no capture at all.
+- **It costs the review at most one timeout.** The upload happens once, at
+  close, on the finished file, streamed off disk in 64 KiB chunks under an
+  absolute 120-second body deadline — an order of magnitude above
+  `/metrics/run`'s 10 seconds, which is why it is not that endpoint. `httpx`
+  has no request lifetime, only per-phase timeouts, so the deadline rides on
+  the body stream itself; the phases it cannot interleave with (connect, the
+  one write already in flight, the response) are bounded separately, and the
+  true worst case is `transcript_client.UPLOAD_CEILING_S` — 160 seconds, which
+  holds because the response body is never read (a read to completion is
+  bounded per chunk, not in total). There
+  is no retry: the blob is write-once, so a retry after a client-side timeout
+  would race an upload that may already have landed.
+- **A local blob store is denied to the agent.** With the `file` backend on the
+  host that runs the harness, the store root is a second, longer-lived copy of
+  the transcript corpus, so it goes into the reviewer's read denylist beside
+  `FUKO_TRANSCRIPT_DIR` — same reasoning, same rule. The rule is built from the
+  **runner process's own** `FUKO_TRANSCRIPT_STORE_*`, because that is the only
+  configuration it can see. In the containerized deployment the sidecar's store
+  lives behind a container boundary and the question does not arise; but if you
+  run a `file`-backend sidecar as a plain process **on the runner host**, export
+  the same `FUKO_TRANSCRIPT_STORE_BACKEND` / `_ROOT` to the runner too, or the
+  corpus is written where no deny rule reaches it.
+
+### What a run spent its turns on (`review_transcripts`)
+
+Every captured transcript also gets a row in `review_transcripts`
+(`migrations/013`, #239), and the run's `review_runs` row gains one nullable
+column — `transcript_key` — pointing at it:
+
+| column | what it holds |
+| --- | --- |
+| `key` | the transcript's own key; names the blob in the store |
+| `complete` | whether the feed reached its terminal `result` event |
+| `tool_calls` | call counts by tool name, e.g. `{"Read": 182, "Grep": 9}` |
+| `tool_result_bytes` | total UTF-8 bytes of tool-result content the run was fed |
+| `repeated_read_files` | distinct files read more than once — one file read three times counts **once** |
+
+- **Derived at capture, not from the blob.** The figures are folded out of the
+  same lines the tee is already writing, so nothing is re-downloaded and nothing
+  is held: peak memory stays one event plus a counter per tool and per distinct
+  file read. They are metered off the **scrubbed** text, so a reader that
+  recomputes them from the stored object gets the same numbers.
+- **A cut-short feed is still indexed**, with `complete = false`. Dropping it
+  would bias the corpus towards runs that finished.
+- **Nothing is backfilled.** A pr-agent run, and every run predating this, has
+  no row and a NULL reference — `migrations/008`'s reasoning about cost applied
+  to tools, where a 0 would read as "this run used no tools".
+- **The transcript can never cost the metrics row.** The index row is written
+  first, in its own transaction; the reference is written only if it landed.
+  There is no foreign key, deliberately: the invariant is held by write order,
+  and a constraint would let a transcript-side failure reject the run row's
+  duration, outcome, attempts and token counts too. Scoped to a failure the
+  statement earned: a connection-level one latches `db_best_effort` for the
+  whole process, after which the run row's block cannot open either — the same
+  nothing-lands a run with no transcript would have had.
+- **A reference is only ever written for a transcript that reached shared
+  storage**, because the key is what a reader fetches it by. A failed capture or
+  upload records none; so does the off state above, where shipping to a sidecar
+  whose store is unconfigured succeeds silently but stores nothing; and so does
+  a runner with no destination at all (a `fuko review` laptop), whose transcript
+  is a local file. Those runs still get their `review_runs` row — they get a
+  NULL `transcript_key`.
+- **The reverse also happens: an index row with no run row.** A provider pool
+  that throttles and fails over ships the abandoned leg's transcript before the
+  pool decides to abandon it, and the chain writes **one** `review_runs` row,
+  attributed to the entry that answered — deliberately, so a throttled attempt's
+  spend never rides a row whose provider says something else. That leg's
+  transcript is therefore indexed on its own (`POST /metrics/transcript`, #258)
+  and referenced by nothing: `review_transcripts` is keyed by the transcript, not
+  by a run, and the listing LEFT-JOINs `review_runs` so such a row appears with
+  no repo, PR or seat rather than not at all. It also means the `--repo`,
+  `--pr` and `--seat` filters cannot reach it — those columns live on the run
+  row it does not have.
+
+### Reading the corpus (`fuko transcripts`)
+
+The first reader (#240). An HTTP client over the running sidecar — the same
+`FUKO_URL` + `FUKO_AUTH_TOKEN` pair `fuko kb` uses, because the sidecar is what
+holds both the index (Postgres) and the blobs (object storage):
+
+```bash
+fuko transcripts list --repo owner/name --pr 42        # who reviewed this PR, and on what
+fuko transcripts list --seat dorian --since 2026-08-30 # one lane, one window
+fuko transcripts list --full --json                    # every tool, machine-readable
+fuko transcripts get <key> | grep '"tool_use"'         # the session itself
+fuko transcripts get <key> -o session.ndjson
+```
+
+A listing line carries the run's identity (key, `repo#pr`, seat, model, when)
+and what it spent: per-tool call counts, total tool-result bytes, how many files
+it re-read, and — called out in capitals — whether the transcript is
+`INCOMPLETE`, so a session that was cut short is never read as a cheap one.
+
+Three properties worth knowing before you trust an empty answer:
+
+- **An unconfigured or unreachable store is never an empty list.** Both exit
+  non-zero with a message naming which one it was — `FUKO_DATABASE_URL` unset is
+  a deployment that keeps no index, an unreachable Postgres is a fault. Same
+  fail-unsafe direction as the ledger page (#235): "nothing found" and "could
+  not look" must not render identically.
+- **`get` gives you the bytes**, not a rendering, so a pipe to `grep`, `jq` or a
+  pager works on the real feed. That is the epic's answer for content search —
+  nothing is full-text indexed, by decision.
+- **The listing is over `review_transcripts`**, so a run that produced no
+  transcript (every pr-agent run, everything predating capture) is absent rather
+  than shown with empty figures. The converse — a blob stored under a key the
+  index never recorded — is fetchable by key and simply not listed; `get`
+  deliberately does not consult the index, so a reader chasing a key is never
+  told the bytes are gone because a row is.
+
+Filters are AND-ed, so combining them narrows. `--since` is inclusive and
+`--until` exclusive, both UTC when given as a bare date, so adjacent windows
+tile without counting a transcript twice.
+
+Issue #241's `/ui` page shares these query shapes rather than reimplementing them:
+they live in `sidecar/transcripts.py` (`list_transcripts`, `fetch`), which is
+what that page will import, the way `sidecar/web/ledger.py` imports
+`sidecar/review_state.py`.
 
 ## Configuration
 

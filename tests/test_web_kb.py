@@ -271,6 +271,10 @@ def test_a_collision_re_renders_the_form_with_the_submitted_values(user, store):
     assert "another learning already has that" in resp.text
     assert "a long edit worth keeping" in resp.text
     assert 'value="Kept"' in resp.text
+    # The one write response that would actually hurt in a shared cache: it
+    # carries the viewer's CSRF token and their unsaved draft (#266).
+    assert resp.headers["cache-control"] == "no-store"
+    assert resp.headers["vary"] == "Cookie"
 
 
 def test_an_unknown_source_re_renders_the_form(user, store):
@@ -281,6 +285,7 @@ def test_an_unknown_source_re_renders_the_form(user, store):
     )
     assert resp.status_code == 422
     assert "unknown source" in resp.text
+    assert resp.headers["cache-control"] == "no-store"
 
 
 def test_editing_a_vanished_learning_404s(user, store):

@@ -3,6 +3,7 @@
 import pytest
 
 from sidecar import runner
+from sidecar.config import settings
 
 
 @pytest.fixture(autouse=True)
@@ -35,7 +36,18 @@ def _no_ambient_sidecar(monkeypatch):
     a call chain, and the failure is silent on the machine that has no
     ``FUKO_URL`` set (CI) and only fires on the one that does.
 
+    The transcript blob store (#238) is the same hazard one level down, and
+    needs a different lever: ``settings`` is instantiated once at IMPORT, so an
+    ambient ``FUKO_TRANSCRIPT_STORE_BACKEND`` is already baked in by the time
+    any fixture runs and no ``delenv`` can reach it. Since ``open_transcript``
+    wraps the sink whenever a destination exists, leaving it set would make
+    every closing transcript in the suite write a test blob into the operator's
+    real store -- the same "silent on CI, fires only on the machine that has the
+    variable" shape as above. Neutralized on the settings object instead; the
+    shipping tests set it back per test.
+
     Tests that exercise the HTTP branch set these back themselves.
     """
     monkeypatch.delenv("FUKO_URL", raising=False)
     monkeypatch.delenv("FUKO_TOKEN", raising=False)
+    monkeypatch.setattr(settings, "transcript_store_backend", "")

@@ -32,9 +32,12 @@ sqlite-vec deployment therefore reviews statelessly, which is the same
 degradation an unreachable Postgres produces and is already a supported mode.
 
 Retention is a READ WINDOW (:data:`RETENTION_DAYS`), not a sweep: rows outside
-it are invisible to every read here, so a months-dead PR can never be resurrected
-into a prompt. Physically reclaiming them belongs with a PR-closed hook, which
-no code path has yet; it is deliberately not a sweep function nothing calls.
+it are invisible to every PROMPT-PATH read, so a months-dead PR can never be
+resurrected into a prompt. Physically reclaiming them belongs with a PR-closed
+hook, which no code path has yet; it is deliberately not a sweep function
+nothing calls. The operator reads at the end of this module (#235) deliberately
+do NOT apply that window -- a row nobody can see is the complaint they exist to
+answer -- and they carry their own contract, spelled out there.
 """
 
 from __future__ import annotations
@@ -733,3 +736,492 @@ def expire_coverage(repo: str, pr: int, seat: str, files: Sequence[str] | None =
     with db_best_effort() as conn:
         cur = conn.execute(sql, params)
         return cur.rowcount or 0
+
+
+# ---------------------------------------------------------------------------
+# Operator reads (#235).
+#
+# Everything above answers "what does THIS seat carry into its next round" and
+# is shaped for a prompt: keyed by the full (repo, pr, seat), capped for budget,
+# windowed by retention, and wrapped in `_best_effort` so a dead store degrades
+# into a stateless-but-correct review. The reads below answer a different
+# question -- "what is in the ledgers at all" -- for the operator page under
+# `/ui`, and they invert three of those choices deliberately:
+#
+# * NOT `_best_effort`. Its charter is that state must never fail a review, so
+#   it swallows the exception and returns the neutral empty value. A UI read
+#   needs the opposite: the route has to tell "store unreachable" from "the
+#   reviewer found nothing", and an empty table during an outage is the
+#   fail-unsafe direction for a human reading it. These raise; the route
+#   catches (see `sidecar.web.ledger.view`).
+# * NO retention window on which rows are shown. A row outside the window is
+#   invisible to every prompt-path read, which is exactly the row an operator
+#   has no other way to see. The window still decides `offerable`, because that
+#   number is a claim about what `open_findings` would hand a round.
+# * The existing prompt reads are left alone. Their caps and ordering are
+#   load-bearing for prompt budget and for #173's truncation contract, so the
+#   UI gets its own reads rather than a widened `limit` on theirs.
+# ---------------------------------------------------------------------------
+
+STATUS_ORDER: tuple[str, ...] = ("open", "fixed", "rejected", "stale")
+"""Display order for :data:`FINDING_STATUSES`: lifecycle, not alphabetical.
+
+A tuple rather than the frozenset because a page renders one column per status
+and a set has no order -- iterating it would shuffle the columns between
+processes. The two are kept in sync by a test, not by construction, so the
+order stays a deliberate choice rather than a sort's accident.
+"""
+
+MAX_LANES = 200
+"""Cap on lanes one index read returns, before paging."""
+
+MAX_LEDGER_ROWS = 200
+"""Cap on findings or coverage rows one detail read returns, before paging."""
+
+UI_READ_TIMEOUT_S = 5.0
+"""How long an operator read may wait for a connection, in seconds.
+
+These reads do not go through :func:`sidecar.db.db_best_effort`, so they would
+otherwise inherit psycopg_pool's own 30s -- and the page whose whole point is to
+report an unreachable store would take half a minute to say so. Bounds
+ACQUISITION only, exactly as :data:`sidecar.db.BEST_EFFORT_TIMEOUT_S` does --
+which is why the reads that use it also pass ``embed_space=False``. That bound
+covers no work done *before* a connection is handed out, and the embedding-
+provenance pass is exactly such work: on a sidecar whose startup warm deferred
+(``main.lifespan`` catches a database that was not ready yet), the first caller
+to reach the pool runs it, and it can re-embed the whole store synchronously.
+These reads touch neither ``learnings`` nor a vector, so they have nothing to
+gain from waiting on it -- the same reason :func:`sidecar.db.db_best_effort`
+declares it for this module (#217).
+
+Higher than that 2s budget on purpose: nothing here is on a review's critical
+path, so waiting a little longer for a busy-but-live pool is cheaper than
+telling an operator their healthy database is down.
+"""
+
+
+def _iso(value: object) -> str | None:
+    """Render a timestamp column as text, keeping ``None`` distinguishable.
+
+    The page renders already-queried plain data, so the conversion happens here
+    rather than in a template. ``None`` survives as ``None`` because for
+    ``review_coverage.expired_at`` it is not a missing value but the live state.
+    """
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def _rate(numerator: int, denominator: int) -> float | None:
+    """Return ``numerator / denominator``, or ``None`` when nothing is comparable.
+
+    ``None`` rather than ``0.0`` for a zero denominator: a lane with a single
+    round has no finding any later round could have acted on, and rendering that
+    as a 0% settle rate would read as a seat that settles nothing.
+    """
+    return numerator / denominator if denominator else None
+
+
+@dataclass(frozen=True)
+class LaneStat:
+    """One ``(repo, pr, seat)`` lane as the operator index shows it.
+
+    ``counts`` is keyed by status and always carries every key in
+    :data:`STATUS_ORDER`, so a page can render a fixed set of columns without
+    testing for absence.
+
+    ``offerable`` and ``never_offered`` split the open count the way #173's
+    contract does: ``offerable`` is how many open rows are inside the retention
+    window and would therefore be read back, and ``never_offered`` is how many
+    of those exceed :data:`MAX_OPEN_FINDINGS` -- rows that exist, are open, and
+    that no round is ever handed, so no verdict can address them and they can
+    only age out unseen.
+
+    ``eligible``/``carried``/``settled`` are the arithmetic behind the two rates
+    #159 needs, on one shared denominator: findings this seat recorded in a
+    round STRICTLY BEFORE its latest one, which are the findings at least one
+    later round could have acted on. Of those, ``carried`` are the ones still
+    open and ``settled`` are the ones a verdict closed. ``stale`` rows count in
+    neither -- fuko retired them itself, no round decided anything -- so the two
+    rates do not sum to one.
+
+    That denominator is deliberately NOT windowed by :data:`RETENTION_DAYS`,
+    which is the one place it parts company with ``offerable``. An open row
+    whose ``updated_at`` ages past the window leaves :func:`open_findings` and
+    cannot return -- only a round re-asserting a row refreshes its timestamp,
+    and a round is only ever handed rows the window admits -- so it keeps
+    counting as ``eligible`` and ``carried`` while no round is being shown it
+    any more. That is the intended reading rather than an oversight: these rates
+    describe what this lane's HISTORY holds, and a claim that went open and then
+    forgotten is precisely what a carry-forward rate should be counting. The
+    windowed number is ``offerable``, windowed because it alone is a claim about
+    what :func:`open_findings` would hand a round.
+    """
+
+    repo: str
+    pr: int
+    seat: str
+    latest_round: int
+    last_activity: str | None
+    counts: dict[str, int]
+    reopened: int
+    offerable: int
+    never_offered: int
+    coverage_total: int
+    coverage_live: int
+    eligible: int
+    carried: int
+    settled: int
+
+    @property
+    def findings_total(self) -> int:
+        """Every finding row in this lane, whatever state it is in."""
+        return sum(self.counts.values())
+
+    @property
+    def carry_forward_rate(self) -> float | None:
+        """Share of this seat's eligible findings a later round still carries open."""
+        return _rate(self.carried, self.eligible)
+
+    @property
+    def settle_rate(self) -> float | None:
+        """Share of this seat's eligible findings a later round's verdict closed."""
+        return _rate(self.settled, self.eligible)
+
+
+@dataclass(frozen=True)
+class LaneIndex:
+    """One page of :class:`LaneStat` rows, plus how many lanes matched in all."""
+
+    lanes: tuple[LaneStat, ...] = ()
+    total: int = 0
+
+
+@dataclass(frozen=True)
+class LedgerFinding:
+    """One ``review_findings`` row, whole, for an operator rather than a prompt.
+
+    Unlike :class:`StoredFinding` and :class:`SettledFinding` -- projections
+    shaped by what a round or a re-raise needs -- this carries every column,
+    including the ``head_sha`` the prompt path deliberately drops: for a human
+    it is the provenance that makes a file link resolvable.
+    """
+
+    id: str
+    seat: str
+    round: int
+    head_sha: str
+    file: str
+    line: int | None
+    severity: str
+    category: str
+    title: str
+    body: str
+    evidence: str
+    status: str
+    status_reason: str
+    reopened: int
+    created_at: str | None
+    updated_at: str | None
+
+    @property
+    def anomalous(self) -> bool:
+        """Whether a round declared this settled and a later round contradicted it (#177)."""
+        return self.reopened > 0
+
+
+@dataclass(frozen=True)
+class LedgerCoverage:
+    """One ``review_coverage`` row, expired ones included.
+
+    A coverage entry records what a round EXAMINED, and it dies when the delta
+    touches its file -- so ``expired_at`` is shown rather than filtered on, and
+    an expired entry is history about a round, never a standing conclusion.
+    """
+
+    id: str
+    seat: str
+    round: int
+    head_sha: str
+    file: str
+    region: str
+    checked: str
+    conclusion: str
+    evidence: str
+    expired_at: str | None
+    created_at: str | None
+
+    @property
+    def live(self) -> bool:
+        """Whether this assurance is still standing (nothing has expired it)."""
+        return self.expired_at is None
+
+
+@dataclass(frozen=True)
+class FindingPage:
+    """One page of :class:`LedgerFinding` rows, plus how many matched in all."""
+
+    rows: tuple[LedgerFinding, ...] = ()
+    total: int = 0
+
+
+@dataclass(frozen=True)
+class CoveragePage:
+    """One page of :class:`LedgerCoverage` rows, plus how many matched in all."""
+
+    rows: tuple[LedgerCoverage, ...] = ()
+    total: int = 0
+
+
+_LANE_INDEX_SQL = (
+    "WITH activity AS ("
+    " SELECT repo, pr, seat, round, updated_at AS at FROM review_findings"
+    " UNION ALL"
+    " SELECT repo, pr, seat, round, created_at AS at FROM review_coverage"
+    "), lanes AS ("
+    " SELECT repo, pr, seat, max(round) AS latest_round, max(at) AS last_activity"
+    " FROM activity"
+    " WHERE (%s::text IS NULL OR repo = %s::text)"
+    " AND (%s::integer IS NULL OR pr = %s::integer)"
+    " AND (%s::text IS NULL OR seat = %s::text)"
+    " GROUP BY repo, pr, seat"
+    "), tallies AS ("
+    " SELECT l.repo, l.pr, l.seat,"
+    " count(f.id) FILTER (WHERE f.status = 'open') AS n_open,"
+    " count(f.id) FILTER (WHERE f.status = 'fixed') AS n_fixed,"
+    " count(f.id) FILTER (WHERE f.status = 'rejected') AS n_rejected,"
+    " count(f.id) FILTER (WHERE f.status = 'stale') AS n_stale,"
+    " coalesce(sum(f.reopened), 0) AS n_reopened,"
+    " count(f.id) FILTER ("
+    " WHERE f.status = 'open' AND f.updated_at > now() - make_interval(days => %s)"
+    " ) AS n_offerable,"
+    " count(f.id) FILTER (WHERE f.round < l.latest_round) AS n_eligible,"
+    " count(f.id) FILTER (WHERE f.round < l.latest_round AND f.status = 'open') AS n_carried,"
+    " count(f.id) FILTER ("
+    " WHERE f.round < l.latest_round AND f.status IN ('fixed', 'rejected')"
+    " ) AS n_settled"
+    " FROM lanes l"
+    " LEFT JOIN review_findings f"
+    " ON f.repo = l.repo AND f.pr = l.pr AND f.seat = l.seat"
+    " GROUP BY l.repo, l.pr, l.seat"
+    "), examined AS ("
+    " SELECT l.repo, l.pr, l.seat, count(v.id) AS n_total,"
+    " count(v.id) FILTER (WHERE v.expired_at IS NULL) AS n_live"
+    " FROM lanes l"
+    " LEFT JOIN review_coverage v"
+    " ON v.repo = l.repo AND v.pr = l.pr AND v.seat = l.seat"
+    " GROUP BY l.repo, l.pr, l.seat"
+    ") "
+    "SELECT l.repo, l.pr, l.seat, l.latest_round, l.last_activity,"
+    " t.n_open, t.n_fixed, t.n_rejected, t.n_stale, t.n_reopened, t.n_offerable,"
+    " t.n_eligible, t.n_carried, t.n_settled,"
+    " e.n_total, e.n_live, count(*) OVER () "
+    "FROM lanes l"
+    " JOIN tallies t ON t.repo = l.repo AND t.pr = l.pr AND t.seat = l.seat"
+    " JOIN examined e ON e.repo = l.repo AND e.pr = l.pr AND e.seat = l.seat "
+    "ORDER BY l.last_activity DESC, l.repo, l.pr, l.seat LIMIT %s OFFSET %s"
+)
+
+
+def lanes(
+    repo: str | None = None,
+    pr: int | None = None,
+    seat: str | None = None,
+    limit: int = MAX_LANES,
+    offset: int = 0,
+) -> LaneIndex:
+    """Return the ledger lanes, most recently active first, for an operator page.
+
+    The one read that answers "which ``(repo, pr, seat)`` lanes exist" -- every
+    read above it is keyed by a lane the caller already knows. Raises rather
+    than degrading; see this section's header for why.
+
+    Both tables define a lane. A round that found nothing and recorded only
+    what it examined is a real round (:func:`next_round` counts both tables for
+    the same reason), so a coverage-only lane appears here with zero findings
+    rather than vanishing, and ``latest_round`` is the newest round in EITHER
+    ledger -- which is also the round the rates measure "before".
+
+    Ordering is by last activity across both ledgers, so a lane whose pull
+    request was closed or merged months ago still appears and simply sinks: this
+    read asks GitHub nothing about a PR's state, by design.
+
+    Args:
+        repo: Restrict to one ``owner/name``, or ``None`` for every repo.
+        pr: Restrict to one pull request number, or ``None`` for all of them.
+        seat: Restrict to one seat label, or ``None`` for every seat.
+        limit: Lanes per page, clamped to ``[1, MAX_LANES]``.
+        offset: Lanes to skip, clamped at zero.
+
+    Returns:
+        The page of lanes and the total number of lanes that matched. ``total``
+        is ``0`` for an empty page, including an ``offset`` past the end: the
+        window count travels with the rows, so no rows means no count to read.
+    """
+    from .db import db
+
+    with db(timeout=UI_READ_TIMEOUT_S, embed_space=False) as conn:
+        rows = conn.execute(
+            _LANE_INDEX_SQL,
+            (
+                repo,
+                repo,
+                pr,
+                pr,
+                seat,
+                seat,
+                RETENTION_DAYS,
+                min(max(1, limit), MAX_LANES),
+                max(0, offset),
+            ),
+        ).fetchall()
+    stats = tuple(
+        LaneStat(
+            repo=row[0],
+            pr=int(row[1]),
+            seat=row[2],
+            latest_round=int(row[3] or 0),
+            last_activity=_iso(row[4]),
+            counts={
+                "open": int(row[5]),
+                "fixed": int(row[6]),
+                "rejected": int(row[7]),
+                "stale": int(row[8]),
+            },
+            reopened=int(row[9]),
+            offerable=int(row[10]),
+            never_offered=max(0, int(row[10]) - MAX_OPEN_FINDINGS),
+            coverage_total=int(row[14]),
+            coverage_live=int(row[15]),
+            eligible=int(row[11]),
+            carried=int(row[12]),
+            settled=int(row[13]),
+        )
+        for row in rows
+    )
+    return LaneIndex(lanes=stats, total=int(rows[0][16]) if rows else 0)
+
+
+_PR_FINDINGS_SQL = (
+    "SELECT id, seat, round, head_sha, file, line, severity, category, title, body,"
+    " evidence, status, status_reason, reopened, created_at, updated_at, count(*) OVER () "
+    "FROM review_findings "
+    "WHERE repo = %s AND pr = %s AND (%s::text IS NULL OR seat = %s::text) "
+    "ORDER BY round DESC, created_at DESC, id DESC LIMIT %s OFFSET %s"
+)
+
+
+def pr_findings(
+    repo: str,
+    pr: int,
+    seat: str | None = None,
+    limit: int = MAX_LEDGER_ROWS,
+    offset: int = 0,
+) -> FindingPage:
+    """Return one pull request's findings in EVERY status, newest round first.
+
+    Deliberately unlike :func:`open_findings` and :func:`settled_findings`,
+    which each select the statuses their caller can act on: an operator is
+    reading the ledger's history, so a ``stale`` retirement and a ``rejected``
+    verdict are as much a part of it as an open row. Every seat is included
+    unless one is named, since the page's unit is the pull request.
+
+    Args:
+        repo: The ``owner/name`` the rows belong to.
+        pr: The pull request number.
+        seat: Restrict to one seat, or ``None`` for every seat on the PR.
+        limit: Rows per page, clamped to ``[1, MAX_LEDGER_ROWS]``.
+        offset: Rows to skip, clamped at zero.
+
+    Returns:
+        The page of rows and the total that matched (``0`` on an empty page).
+    """
+    from .db import db
+
+    with db(timeout=UI_READ_TIMEOUT_S, embed_space=False) as conn:
+        rows = conn.execute(
+            _PR_FINDINGS_SQL,
+            (repo, pr, seat, seat, min(max(1, limit), MAX_LEDGER_ROWS), max(0, offset)),
+        ).fetchall()
+    found = tuple(
+        LedgerFinding(
+            id=str(row[0]),
+            seat=row[1],
+            round=int(row[2]),
+            head_sha=row[3],
+            file=row[4],
+            line=row[5],
+            severity=row[6],
+            category=row[7],
+            title=row[8],
+            body=row[9],
+            evidence=row[10],
+            status=row[11],
+            status_reason=row[12],
+            reopened=int(row[13]),
+            created_at=_iso(row[14]),
+            updated_at=_iso(row[15]),
+        )
+        for row in rows
+    )
+    return FindingPage(rows=found, total=int(rows[0][16]) if rows else 0)
+
+
+_PR_COVERAGE_SQL = (
+    "SELECT id, seat, round, head_sha, file, region, checked, conclusion, evidence,"
+    " expired_at, created_at, count(*) OVER () "
+    "FROM review_coverage "
+    "WHERE repo = %s AND pr = %s AND (%s::text IS NULL OR seat = %s::text) "
+    "ORDER BY round DESC, created_at DESC, id DESC LIMIT %s OFFSET %s"
+)
+
+
+def pr_coverage(
+    repo: str,
+    pr: int,
+    seat: str | None = None,
+    limit: int = MAX_LEDGER_ROWS,
+    offset: int = 0,
+) -> CoveragePage:
+    """Return one pull request's coverage, EXPIRED entries included, newest round first.
+
+    :func:`live_coverage` filters expired rows out because a round must never be
+    handed an assurance the delta already killed. An operator needs the opposite
+    view: what a round examined and when that stopped being true is the audit
+    trail, so ``expired_at`` is projected instead of filtered on and the page
+    marks the difference.
+
+    Args:
+        repo: The ``owner/name`` the rows belong to.
+        pr: The pull request number.
+        seat: Restrict to one seat, or ``None`` for every seat on the PR.
+        limit: Rows per page, clamped to ``[1, MAX_LEDGER_ROWS]``.
+        offset: Rows to skip, clamped at zero.
+
+    Returns:
+        The page of rows and the total that matched (``0`` on an empty page).
+    """
+    from .db import db
+
+    with db(timeout=UI_READ_TIMEOUT_S, embed_space=False) as conn:
+        rows = conn.execute(
+            _PR_COVERAGE_SQL,
+            (repo, pr, seat, seat, min(max(1, limit), MAX_LEDGER_ROWS), max(0, offset)),
+        ).fetchall()
+    examined = tuple(
+        LedgerCoverage(
+            id=str(row[0]),
+            seat=row[1],
+            round=int(row[2]),
+            head_sha=row[3],
+            file=row[4],
+            region=row[5],
+            checked=row[6],
+            conclusion=row[7],
+            evidence=row[8],
+            expired_at=_iso(row[9]),
+            created_at=_iso(row[10]),
+        )
+        for row in rows
+    )
+    return CoveragePage(rows=examined, total=int(rows[0][11]) if rows else 0)

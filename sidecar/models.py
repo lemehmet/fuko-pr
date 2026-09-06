@@ -7,9 +7,9 @@ from "leave it alone", and :class:`DuplicateLearningError`. It imports nothing
 from the rest of the package, so every layer can depend on it.
 """
 
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool, StrictInt
 
 SOURCES: tuple[str, ...] = ("remember", "review_thread", "docs", "digest")
 """Where a learning came from.
@@ -290,6 +290,79 @@ class ReviewerHealthResponse(BaseModel):
     reviewers: list[ReviewerHealthRow] = Field(default_factory=list)
 
 
+NonNegativeCount = Annotated[StrictInt, Field(ge=0)]
+"""A count: a non-negative integer, and an integer as SPELLED.
+
+Used for every count on :class:`TranscriptIndexRequest`, not only the mapping's
+values, so one spelling cannot be strict while the field beside it is lax.
+
+The constraint has to live on the annotation rather than on the ``Field`` when
+the count is a dict *value*: ``ge`` given to the field constrains the mapping,
+not what is in it.
+
+``StrictInt`` rather than ``int`` because lax coercion turns JSON ``true`` into
+``1``, which would store a shape error as a real measurement -- and would make
+the two metrics transports disagree, since the direct path's own filter
+(:func:`sidecar.run_metrics._tool_calls`) drops a ``bool``. Every producer in
+this repo posts figures :class:`sidecar.reviewer.transcript.TranscriptIndex`
+derived, which are already ``int``; strictness costs them nothing and refuses
+only a caller that was never counting.
+"""
+
+
+class TranscriptIndexRequest(BaseModel):
+    """One session-transcript index row (#239).
+
+    Nested in ``POST /metrics/run``'s body for a run whose row will reference it,
+    and the WHOLE body of ``POST /metrics/transcript`` for a stored transcript
+    that gets no run row at all -- an intermediate failover leg, abandoned after
+    its blob shipped and deliberately never billed (#258). One model either way,
+    because it is one row in one table: ``review_transcripts`` is keyed by the
+    transcript, not by the run.
+
+    Derived by the runner AT CAPTURE, from the feed it was already streaming to
+    the transcript sink (:class:`sidecar.reviewer.transcript.TranscriptIndex`),
+    so nothing re-downloads a blob to count what was in it.
+
+    Nested rather than flattened onto :class:`RunMetricRequest` because these
+    figures describe the transcript and land in their own table -- ``review_runs``
+    gains exactly one column, the reference. Absent (``None``) there is the normal
+    case: every pr-agent run, and every agentic run whose capture is off or
+    failed.
+
+    Every field is REQUIRED except the counts, which default to the empty
+    measurement rather than to nothing-measured: this object only exists for a
+    transcript that was captured, so a run that genuinely called no tools is a
+    real zero -- unlike ``review_runs``' token columns, where a zero would claim
+    an unmeasured run was free.
+    """
+
+    key: str = Field(
+        description=(
+            "The transcript's own key, minted at run start and naming its blob in "
+            "the store. Not validated as a blob key here: a malformed one must cost "
+            "the reference, never the metrics row it rides with."
+        )
+    )
+    complete: StrictBool = Field(
+        description="Whether the feed reached its terminal `result` event."
+    )
+    tool_calls: dict[str, NonNegativeCount] = Field(
+        default_factory=dict,
+        description="Call counts keyed by tool name.",
+    )
+    tool_result_bytes: NonNegativeCount = Field(
+        default=0, description="Total UTF-8 bytes of tool-result content the run was fed."
+    )
+    repeated_read_files: NonNegativeCount = Field(
+        default=0,
+        description=(
+            "Distinct files read more than once in this run -- one file read three "
+            "times counts once."
+        ),
+    )
+
+
 class RunMetricRequest(BaseModel):
     """Body of ``POST /metrics/run``: one review-run row from the runner.
 
@@ -329,6 +402,16 @@ class RunMetricRequest(BaseModel):
     )
     cost_usd: float | None = Field(default=None, ge=0)
     turns: int | None = Field(default=None, ge=0)
+    transcript: TranscriptIndexRequest | None = Field(
+        default=None,
+        description=(
+            "This run's session transcript, if one was captured (#239). Defaults to "
+            "None so a runner older than this change -- or any backend with no "
+            "capture path -- posts a valid body that records no reference, which is "
+            "the truth for those runs rather than a key naming a blob that does not "
+            "exist."
+        ),
+    )
 
 
 class RunSummaryRow(BaseModel):
@@ -359,3 +442,61 @@ class RunSummaryResponse(BaseModel):
     """Body returned by ``GET /metrics/summary``."""
 
     summary: list[RunSummaryRow] = Field(default_factory=list)
+
+
+class TranscriptRunRow(BaseModel):
+    """One captured transcript returned by ``GET /transcripts`` (#240).
+
+    Mirrors :class:`sidecar.transcripts.TranscriptRun` field for field, because
+    a ``response_model`` silently DROPS undeclared keys -- a figure missing from
+    this class is a figure the listing cannot show, and it would look exactly
+    like a figure the run did not produce.
+
+    The transcript's own five values are required: the index row exists only for
+    a transcript that reached storage and every column behind them is NOT NULL.
+    Everything from the run row is optional, because that row is written in a
+    separate transaction afterwards and may never have followed.
+    """
+
+    key: str = Field(description="The transcript's own key; names its blob in the store.")
+    created_at: str | None = None
+    complete: bool = Field(
+        description=(
+            "Whether the captured feed reached its terminal `result` event. False means "
+            "the stored bytes are a prefix of a run that was cut short -- a short "
+            "session, not a cheap one."
+        )
+    )
+    tool_calls: dict[str, int] = Field(
+        default_factory=dict, description="Call counts keyed by tool name."
+    )
+    tool_result_bytes: int = 0
+    repeated_read_files: int = Field(
+        default=0,
+        description="Distinct files read more than once; one file read three times counts once.",
+    )
+    repo: str | None = None
+    pr: int | None = None
+    seat: str | None = Field(
+        default=None, description="The run's slot -- the lane label a model occupied."
+    )
+    provider: str | None = None
+    model: str | None = None
+    backend: str | None = None
+    outcome: str | None = None
+    started_at: str | None = None
+    duration_s: float | None = None
+
+
+class TranscriptListResponse(BaseModel):
+    """Body returned by ``GET /transcripts``: one page, plus how many matched."""
+
+    transcripts: list[TranscriptRunRow] = Field(default_factory=list)
+    count: int = Field(
+        default=0,
+        description=(
+            "Transcripts matching the filters across every page, carried by the rows "
+            "on this one -- so it is 0 for any empty page, including an offset past "
+            "the end of the window."
+        ),
+    )

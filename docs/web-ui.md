@@ -15,6 +15,8 @@ sidecar/web/
   security.py    # session cookie + CSRF for the routes that write
   metrics.py     # the review-metrics page
   kb.py          # the knowledge-base console
+  ledger.py      # the review-state ledgers (read-only)
+  transcripts.py # captured agentic sessions: the listing, and one session
 ```
 
 ## Adding a page
@@ -28,6 +30,8 @@ place a page's title, path, and nav order are written down:
 PAGES: tuple[Page, ...] = (
     Page(slug="metrics", title="Metrics", path=f"{PREFIX}/metrics", order=10),
     Page(slug="kb", title="Knowledge base", path=f"{PREFIX}/kb", order=20),
+    Page(slug="ledger", title="Ledger", path=f"{PREFIX}/ledger", order=30),
+    Page(slug="transcripts", title="Transcripts", path=f"{PREFIX}/transcripts", order=40),
 )
 ```
 
@@ -88,24 +92,54 @@ one deliberate exception, for markup the page already assembled and escaped.
 stylesheet in `layout._STYLE`; pages work with plain forms and links. A page that
 wants progressive enhancement can add it, but it must not be load-bearing.
 
-**Read is open, mutation is not.** `/ui/metrics` and the knowledge-base browsing
-and preview views are deliberately unauthenticated — read-only on a LAN-only
-deployment, following the precedent `/healthz` set. Every API endpoint keeps its
-bearer auth. Anything that writes goes through `security.py`.
+**Read is open, mutation is not — with one read that is not.** `/ui/metrics`,
+`/ui/ledger`, the knowledge-base browsing and preview views, and the
+`/ui/transcripts` **listing** are deliberately unauthenticated — read-only on a
+LAN-only deployment, following the precedent `/healthz` set. Every API endpoint
+keeps its bearer auth. Anything that writes goes through `security.py`.
+
+The exception is `/ui/transcripts?key=…`, the single-session view, which calls
+`security.require` even though it mutates nothing. What it renders is not an
+aggregate over a review: it is the reviewed repository's own file contents,
+verbatim, as the agent read them out of a contributor-controlled checkout (#236's
+risk section, #240's note that this corpus is the first read path onto full
+reviewed-repo content). Publishing counts to anyone who can reach the port is a
+decision the LAN argument covers; publishing a repository's source is not the
+same decision, so the session view takes the browser session `security.py`
+already mints from `FUKO_AUTH_TOKEN` and the listing beside it stays open. A
+future page that renders stored *content* rather than figures about it should
+land on the same side of that line.
+
+**A degraded store has more than two states.** `metrics.render` distinguishes
+"no database configured" from "configured but unreachable"; `ledger` keeps the
+same split and it is load-bearing there, since a sqlite-vec deployment holds no
+review-state tables at all. The configuration test belongs in the route, before
+the read: a read that raises on an unset `database_url` would report an
+unconfigured deployment as a broken one. Note also that `ledger`'s reads
+deliberately do *not* go through `review_state._best_effort` — a swallowed
+exception renders exactly the empty table a healthy-but-idle store does, which
+is the fail-unsafe direction for a page a human is reading.
 
 ## Writing routes that mutate
 
 `security.py` exchanges the existing `FUKO_AUTH_TOKEN` for a signed cookie at
-`/ui/login`, so there is no second secret and no new configuration. Three calls
+`/ui/login`, so there is no second secret and no new configuration. Four calls
 are all a page needs:
 
 ```python
+@router.get(MY_PATH, response_class=HTMLResponse)
+def form(request: Request, response: Response, ...) -> str:
+    session = security.require(request)      # 303 to login, or 503 with no token set
+    security.no_store(response)              # nothing behind require may be cached
+    ...
+
 @router.post(MY_PATH)
 def submit(request: Request, csrf: str = Form(default=""), ...):
-    session = security.require(request)      # 303 to login, or 503 with no token set
+    session = security.require(request)
     security.check_csrf(session, csrf)       # 400 on a missing or forged token
     ...
-    return RedirectResponse(..., status_code=303)   # post/redirect/get
+    # a handler returning its own Response stamps it directly
+    return security.no_store(RedirectResponse(..., status_code=303))
 ```
 
 and every form that posts must embed `security.csrf_field(session)`.
@@ -126,10 +160,31 @@ Details worth knowing before you touch it:
   browser and a bare 401 is a dead end. With `FUKO_AUTH_TOKEN` unset it raises
   503 instead: no login could ever succeed, so a redirect would loop.
 - Pass `extra_nav=security.nav_extra(request)` to `document()` so the page shows
-  a sign-in link or a sign-out button.
+  a sign-in link or a sign-out button — and then take `response: Response` and
+  call `security.vary_by_cookie(response)`, because that nav makes the body
+  differ by cookie even on an open page. `security.no_store` sets `Vary` too, so
+  a gated page needs only the one call. `/ui/metrics` and `/ui/ledger` pass no
+  `extra_nav` today and so need neither.
+- **Anything behind `require` is `no-store`** (#266). A 200 carrying no
+  freshness information is heuristically cacheable by a shared cache (RFC 9111
+  §4.2.2), and a LAN forward proxy in front of the sidecar can hand a stored
+  authenticated page to a request with no cookie at all — `require` is
+  per-request and never sees the hit. FastAPI merges the injected `response`'s
+  headers only when the handler returns data rather than a `Response`, so a
+  handler that builds its own stamps it directly: `return
+  security.no_store(HTMLResponse(...))` — the write redirects do this in one
+  place, `kb._redirect`. The route sweep in `tests/test_web_security.py` holds
+  the rule for the pages listed in its `_GATED` / `_OPEN_WITH_NAV` tables, which
+  are hand-maintained: a new page is only swept once its author adds it there,
+  so add it in the same commit.
+- Comparisons against the token or a CSRF value go through `security._same`, not
+  `hmac.compare_digest` directly: form fields are not ASCII, and `compare_digest`
+  raises `TypeError` on a non-ASCII `str` (#267). It is still constant time — the
+  fix is comparing encoded bytes, not screening the input first.
 - Rejected writes should re-render the form with the submitted values, not
   redirect. Losing a long edit to a unique collision is its own bug; see
-  `kb.edit_submit`.
+  `kb.edit_submit` — and stamp that re-render too, since it is the one write
+  response carrying both a CSRF token and an unsaved draft.
 
 ## URLs
 

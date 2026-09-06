@@ -6,7 +6,12 @@ COPY pyproject.toml README.md ./
 COPY sidecar ./sidecar
 COPY migrations ./migrations
 
-RUN pip install --no-cache-dir .
+# `.[s3]` rather than the bare project: the s3/r2 transcript store (#238) is
+# the headline configuration in docs/deployment.md, and boto3 is imported
+# lazily inside the request path -- so without the extra the documented
+# deployment fails per upload with a ModuleNotFoundError rather than at start.
+# The `file` backend and the unconfigured default need nothing extra.
+RUN pip install --no-cache-dir ".[s3]"
 
 EXPOSE 8000
 

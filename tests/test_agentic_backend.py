@@ -16,8 +16,14 @@ from sidecar.backends.agentic import AgenticBackend
 from sidecar.backends.base import PRRef
 from sidecar.fukoconfig import ModelConfig, ReviewConfig
 from sidecar.presets import PRESETS, ProviderPreset, get_preset
+from sidecar.config import settings
 from sidecar.reviewer.checkout import PRContext
-from sidecar.reviewer.harness import HarnessResult
+from sidecar.reviewer.harness import (
+    HarnessNotAvailableError,
+    HarnessResult,
+    _permission_settings,
+)
+from sidecar.reviewer.transcript import Transcript
 from sidecar.signals import extract_markers
 
 PR = PRRef(repo="o/r", number=9, url="https://github.com/o/r/pull/9")
@@ -68,7 +74,7 @@ def _ctx() -> PRContext:
     )
 
 
-def _invoke(monkeypatch, backend: AgenticBackend, harness_result: HarnessResult, env=None):
+def _invoke(monkeypatch, backend: AgenticBackend, harness_result: HarnessResult, env=None, feed=()):
     monkeypatch.setattr(agentic_mod, "fetch_pr_context", lambda *a, **k: _ctx())
     monkeypatch.setattr(agentic_mod, "checkout_pr_head", lambda *a, **k: "/tmp/nowhere")
     monkeypatch.setattr(agentic_mod, "rmtree", lambda *a, **k: None)
@@ -76,7 +82,7 @@ def _invoke(monkeypatch, backend: AgenticBackend, harness_result: HarnessResult,
     monkeypatch.setattr(agentic_mod, "check_auth", lambda *a, **k: {"loggedIn": True})
     captured = {}
 
-    def fake_run_review(prompt, checkout, *, cwd, model, env, timeout, max_turns):
+    def fake_run_review(prompt, checkout, *, cwd, model, env, timeout, max_turns, transcript=None):
         captured.update(
             prompt=prompt,
             checkout=checkout,
@@ -85,7 +91,10 @@ def _invoke(monkeypatch, backend: AgenticBackend, harness_result: HarnessResult,
             env=env,
             timeout=timeout,
             max_turns=max_turns,
+            transcript=transcript,
         )
+        for line in feed:
+            transcript.write(line)
         return harness_result
 
     monkeypatch.setattr(agentic_mod, "run_review", fake_run_review)
@@ -578,6 +587,14 @@ def test_invoke_strips_the_whole_fuko_namespace_from_the_harness_env(monkeypatch
     }
     for k, v in secrets.items():
         monkeypatch.setenv(k, v)
+    # `settings` is built from the process environment at IMPORT time, so a
+    # runner that exports FUKO_TRANSCRIPT_DIR -- which is exactly what this
+    # feature's docs tell a deployment to do -- would otherwise put the
+    # legitimate `FUKO_TRANSCRIPT_DENY_DIR` hand-off in this assertion's way and
+    # fail the suite on the fleet it documents. Pin it rather than exempt the
+    # name: the assertion is over the NAMESPACE on purpose (see the docstring),
+    # and an exemption list is how that reopens one variable at a time.
+    monkeypatch.setattr(settings, "transcript_dir", "", raising=False)
     backend = AgenticBackend()
     _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
 
@@ -2100,6 +2117,176 @@ def test_api_key_branch_still_denies_the_ambient_claude_config_dir(monkeypatch):
     assert captured["env"]["FUKO_AMBIENT_CLAUDE_CONFIG_DIR"] == "/runner/ambient-claude"
 
 
+def test_the_transcript_destination_reaches_the_harness_for_the_deny_rule(monkeypatch, tmp_path):
+    """`FUKO_TRANSCRIPT_DIR` is stripped with the rest of the namespace, so the
+    destination has to be handed over under its own name or the read denylist
+    cannot cover the corpus (`_permission_settings` builds its rules from this
+    environment)."""
+    corpus = (tmp_path / "corpus").resolve()
+    # A sibling seat's provider key: ambient, stripped from the harness env, and
+    # distinct from the checkout token so the assertion names one source only.
+    ambient_key = "sk-other-seats-provider-key"
+    monkeypatch.setenv("ZAI_KEY", ambient_key)
+    monkeypatch.setattr(settings, "transcript_dir", str(corpus), raising=False)
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert "FUKO_TRANSCRIPT_DIR" not in captured["env"]
+    assert captured["env"]["FUKO_TRANSCRIPT_DENY_DIR"] == str(corpus)
+    # The hand-off and the capture are separate wirings; asserting only the
+    # environment would stay green with the `transcript=` kwarg dropped, and
+    # capture would silently be off on every deployment.
+    assert isinstance(captured["transcript"], Transcript)
+    assert captured["transcript"].key
+    # The scrubber's CONTENTS, not just the object: a regression to
+    # `open_transcript([], ...)` or to the wrong environment would persist
+    # unscrubbed credentials on every deployment with the suite still green,
+    # and scrubbing-at-capture is this PR's whole security property.
+    assert (
+        captured["transcript"]._scrubber.scrub(f"key={ambient_key} here")
+        == "key=[REDACTED:ZAI_KEY] here"
+    )
+
+
+def test_a_renamed_store_credential_prefix_is_stripped_from_the_harness_env(monkeypatch):
+    """The SCRUB half of this is tested beside `_transcript_secrets`; this is
+    the STRIP half. A renamed prefix puts the two variables outside the `FUKO_`
+    namespace the comprehension strips, so without the explicit exclusion they
+    ride into the agent's own environment -- and deleting that one clause would
+    otherwise leave the suite green."""
+    monkeypatch.setattr(settings, "transcript_store_creds_env_prefix", "MYCO_S3", raising=False)
+    monkeypatch.setenv("MYCO_S3_ACCESS_KEY_ID", "the-access-key-id")
+    monkeypatch.setenv("MYCO_S3_SECRET_ACCESS_KEY", "the-secret-access-key")
+    monkeypatch.setenv("MYCO_S3_REGION", "auto")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert "MYCO_S3_ACCESS_KEY_ID" not in captured["env"]
+    assert "MYCO_S3_SECRET_ACCESS_KEY" not in captured["env"]
+    # The region code is not a credential and is deliberately NOT stripped --
+    # asserting it keeps the exclusion from quietly widening into the namespace.
+    assert captured["env"]["MYCO_S3_REGION"] == "auto"
+
+
+def test_boto3s_default_credential_chain_never_reaches_the_harness(monkeypatch):
+    """Not `FUKO_`-prefixed, so the namespace strip does not reach them -- and
+    the `FUKO_URL`-unset path puts a bucket credential in this process for the
+    first time. The container-credentials token is a bearer credential like the
+    other three; the sibling `*_URI` variables are endpoints, not secrets."""
+    for name in (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_SECURITY_TOKEN",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    ):
+        monkeypatch.setenv(name, f"value-of-{name}")
+    monkeypatch.setenv("AWS_CONTAINER_CREDENTIALS_FULL_URI", "http://169.254.170.2/creds")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    for name in (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_SECURITY_TOKEN",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    ):
+        assert name not in captured["env"]
+    # The endpoint is not a secret and is deliberately left alone -- scrubbing a
+    # URI by value would corrupt a transcript wherever it legitimately appears.
+    assert captured["env"]["AWS_CONTAINER_CREDENTIALS_FULL_URI"] == "http://169.254.170.2/creds"
+
+
+def test_a_local_blob_store_root_is_denied_beside_the_capture_dir(monkeypatch, tmp_path):
+    """With the `file` backend on this host the shipped blobs are a SECOND,
+    longer-lived copy of the same corpus -- the capture directory can be
+    rotated, the blob store is kept forever by design -- so a denylist covering
+    only `FUKO_TRANSCRIPT_DIR` leaves the bigger prize readable through exactly
+    the channel #237 closed."""
+    corpus = (tmp_path / "corpus").resolve()
+    blobs = (tmp_path / "blobs").resolve()
+    monkeypatch.setattr(settings, "transcript_dir", str(corpus), raising=False)
+    monkeypatch.setattr(settings, "transcript_store_backend", "file", raising=False)
+    monkeypatch.setattr(settings, "transcript_store_root", str(blobs), raising=False)
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    handed = captured["env"]["FUKO_TRANSCRIPT_DENY_DIR"].split("\n")
+    assert handed == [str(corpus), str(blobs)]
+    # ...and the rule actually renders for both, which the hand-off alone does
+    # not prove.
+    rules = json.loads(_permission_settings(captured["env"]))
+    deny = rules["permissions"]["deny"]
+    assert f"Read(//{str(corpus).lstrip('/')}/**)" in deny
+    assert f"Read(//{str(blobs).lstrip('/')}/**)" in deny
+
+
+def test_a_filesystem_root_blob_store_is_refused_not_silently_undenied(
+    monkeypatch, tmp_path, capsys
+):
+    """`_permission_settings` rstrips `/` to the empty string and drops the
+    candidate without even the non-POSIX announcement, so a root store would be
+    kept where no rule reaches and nothing says so. Refused on BOTH sides --
+    `make_blob_store` raises too -- so the driver and the store agree."""
+    corpus = (tmp_path / "corpus").resolve()
+    monkeypatch.setattr(settings, "transcript_dir", str(corpus), raising=False)
+    monkeypatch.setattr(settings, "transcript_store_backend", "file", raising=False)
+    monkeypatch.setattr(settings, "transcript_store_root", "/", raising=False)
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert captured["env"]["FUKO_TRANSCRIPT_DENY_DIR"] == str(corpus)
+    assert "filesystem root" in capsys.readouterr().err
+
+
+def test_a_bucket_blob_store_adds_no_deny_dir(monkeypatch, tmp_path):
+    """Only a LOCAL store puts bytes on this host; an s3/r2 root is a bucket
+    prefix and would render a rule matching nothing."""
+    corpus = (tmp_path / "corpus").resolve()
+    monkeypatch.setattr(settings, "transcript_dir", str(corpus), raising=False)
+    monkeypatch.setattr(settings, "transcript_store_backend", "r2", raising=False)
+    monkeypatch.setattr(settings, "transcript_store_root", "", raising=False)
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert captured["env"]["FUKO_TRANSCRIPT_DENY_DIR"] == str(corpus)
+
+
+def test_a_local_blob_store_is_denied_even_with_capture_off(monkeypatch, tmp_path):
+    """The blobs an earlier round left behind are the ones worth reading, and
+    they outlive the run -- and the capture setting -- that wrote them."""
+    blobs = (tmp_path / "blobs").resolve()
+    monkeypatch.setattr(settings, "transcript_dir", "", raising=False)
+    monkeypatch.setattr(settings, "transcript_store_backend", "file", raising=False)
+    monkeypatch.setattr(settings, "transcript_store_root", str(blobs), raising=False)
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert captured["env"]["FUKO_TRANSCRIPT_DENY_DIR"] == str(blobs)
+    assert captured["transcript"] is None
+
+
+def test_no_transcript_destination_hands_over_no_deny_dir(monkeypatch):
+    """Capture off must not put an empty value in the environment: an empty
+    deny path would render a rule matching nothing, or everything."""
+    monkeypatch.setattr(settings, "transcript_dir", "", raising=False)
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert "FUKO_TRANSCRIPT_DENY_DIR" not in captured["env"]
+    assert captured["transcript"] is None
+
+
+def test_a_refused_destination_leaves_no_deny_var_and_no_capture(monkeypatch, capsys):
+    """A destination `transcript_dir()` rejects must take BOTH sides down. The
+    root is the case that matters: `_permission_settings` rstrips it to the
+    empty string and drops the candidate silently, so a capture that opened
+    against it would be written where no rule reaches."""
+    monkeypatch.setattr(settings, "transcript_dir", "/", raising=False)
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert "FUKO_TRANSCRIPT_DENY_DIR" not in captured["env"]
+    assert captured["transcript"] is None
+    # ONE diagnostic, not two: `open_transcript` would resolve the same setting
+    # and reject it again, and one capture failure reporting twice is the
+    # log-flood shape `Transcript._fail` avoids one level down.
+    err = capsys.readouterr().err
+    assert err.count("transcript capture unavailable") == 1
+
+
 def test_failure_prints_full_stderr_and_leads_the_detail_with_the_verdict(monkeypatch, capsys):
     """A failing branch must leave an unabridged copy of stderr in the log.
 
@@ -2472,3 +2659,125 @@ def test_build_env_says_nothing_unless_the_findings_ledger_is_switched_off(monke
         ]
         == "0"
     )
+
+
+# --- The session-transcript index the metrics row references (#239).
+
+
+_FEED = [
+    json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "tool_use", "name": "Read", "input": {"file_path": "a.py"}}]
+            },
+        }
+    )
+    + "\n",
+    json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "content": "xy"}]}})
+    + "\n",
+    json.dumps({"type": "result", "subtype": "success", "result": REVIEW_JSON}) + "\n",
+]
+
+
+def _capture_with_a_store(monkeypatch, tmp_path):
+    """Capture on AND somewhere to ship it.
+
+    Both are required for an index row: `Transcript.index` writes one only for
+    bytes a sink affirms it stored, so a runner with nowhere to ship captures a
+    local file and records no reference to it (#239).
+
+    `FUKO_URL` is dropped because `upload_target()` gives it priority over the
+    configured store, so an ambient one would ship over HTTP and leave the store
+    this configures unexercised.
+    """
+    monkeypatch.delenv("FUKO_URL", raising=False)
+    monkeypatch.setattr(settings, "transcript_dir", str(tmp_path / "transcripts"))
+    monkeypatch.setattr(settings, "transcript_store_backend", "file")
+    monkeypatch.setattr(settings, "transcript_store_root", str(tmp_path / "blobs"))
+
+
+def test_invoke_attaches_the_transcript_index_to_its_result(monkeypatch, tmp_path):
+    """The reference and its figures leave the driver on the branch result, which
+    is what carries them to `/metrics/run` (#239)."""
+    _capture_with_a_store(monkeypatch, tmp_path)
+    result, captured = _invoke(
+        monkeypatch, AgenticBackend(), HarnessResult(0, REVIEW_JSON), feed=_FEED
+    )
+    assert result.returncode == 0
+    assert result.transcript["key"] == captured["transcript"].key
+    assert result.transcript["tool_calls"] == {"Read": 1}
+    assert result.transcript["tool_result_bytes"] == 2
+    assert result.transcript["complete"] is True
+
+
+def test_invoke_attaches_the_index_to_a_failed_run_too(monkeypatch, tmp_path):
+    """A run killed at `tool_timeout`, or one that emitted garbage, is exactly the
+    run whose per-tool figures are worth having."""
+    _capture_with_a_store(monkeypatch, tmp_path)
+    result, _ = _invoke(
+        monkeypatch, AgenticBackend(), HarnessResult(1, "", stderr="boom"), feed=_FEED[:2]
+    )
+    assert result.returncode == 1
+    assert result.transcript["tool_calls"] == {"Read": 1}
+    # No terminal `result` event reached the tee: the row says so rather than
+    # letting a cut-short run read as a finished one.
+    assert result.transcript["complete"] is False
+
+
+def test_invoke_records_no_reference_when_capture_is_off(monkeypatch):
+    """Capture off is the fleet default, and it must record no reference rather
+    than a key naming a blob that was never stored."""
+    monkeypatch.setattr(settings, "transcript_dir", "")
+    result, captured = _invoke(monkeypatch, AgenticBackend(), HarnessResult(0, REVIEW_JSON))
+    assert captured["transcript"] is None
+    assert result.transcript is None
+
+
+def _invoke_raising(monkeypatch, error, feed=()):
+    """`invoke` with a harness that streams ``feed`` and then RAISES.
+
+    The shape #258 is about: an `OSError` out of `run_review` reaches the
+    driver's handler AFTER `_drive`'s own `finally` has closed -- and with a
+    shipping sink, shipped -- the transcript, so the blob is already in the store
+    by the time the failure is turned into a result.
+    """
+    monkeypatch.setattr(agentic_mod, "fetch_pr_context", lambda *a, **k: _ctx())
+    monkeypatch.setattr(agentic_mod, "checkout_pr_head", lambda *a, **k: "/tmp/nowhere")
+    monkeypatch.setattr(agentic_mod, "rmtree", lambda *a, **k: None)
+    monkeypatch.setattr(agentic_mod, "strip_agent_config", lambda *a, **k: [])
+    monkeypatch.setattr(agentic_mod, "check_auth", lambda *a, **k: {"loggedIn": True})
+
+    def fake_run_review(prompt, checkout, *, cwd, model, env, timeout, max_turns, transcript=None):
+        for line in feed:
+            transcript.write(line)
+        if transcript is not None:
+            transcript.close()  # `_drive`'s own `finally`, which ships the bytes
+        raise error
+
+    monkeypatch.setattr(agentic_mod, "run_review", fake_run_review)
+    return AgenticBackend().invoke(PR, {"FUKO_AGENTIC_MODEL": "claude-x"}, ["review"])
+
+
+def test_invoke_attaches_the_index_when_the_run_raises_after_shipping(monkeypatch, tmp_path):
+    """#258: the `OSError` handler used to return BEFORE the `finally` lifted the
+    index off the transcript, so a failure raised while iterating the harness
+    pipe left a shipped blob with nothing describing it. The return now happens
+    after that `finally` and carries the reference."""
+    _capture_with_a_store(monkeypatch, tmp_path)
+    result = _invoke_raising(monkeypatch, OSError("pipe died"), feed=_FEED[:2])
+    assert result.returncode == 1
+    assert result.detail.startswith("failed:exit 1: could not prepare the review sandbox")
+    assert result.transcript["tool_calls"] == {"Read": 1}
+    assert result.transcript["complete"] is False
+
+
+def test_invoke_reports_a_missing_harness_with_no_index(monkeypatch, tmp_path):
+    """The spawn-time half of the same handler is unchanged in what it reports,
+    and honestly carries no reference: nothing streamed, so nothing shipped."""
+    _capture_with_a_store(monkeypatch, tmp_path)
+    result = _invoke_raising(monkeypatch, HarnessNotAvailableError("claude not on PATH"))
+    assert result.returncode == 1
+    assert result.detail == "failed:exit 1: claude not on PATH"
+    assert result.transcript is None
+    assert result.channels == {"agentic-review": "failed:exit 1"}
