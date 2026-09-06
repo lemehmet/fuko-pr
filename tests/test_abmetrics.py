@@ -128,6 +128,24 @@ def test_candidate_pairs_ignore_a_one_sided_surplus():
     assert candidate_pairs(claims, "a", "b") == ()
 
 
+def test_candidate_pairs_apply_the_exclusion_per_anchor_not_per_bucket():
+    """A bucket can hold an exact match AND a paraphrase; only the paraphrase is listed."""
+    claims = [
+        _c("a", "r1", "src/app.py", "Unchecked None"),
+        _c("a", "r1", "src/app.py", "Prefix is added after the budget is allocated"),
+        _c("b", "r1", "src/app.py", "unchecked none"),
+        _c("b", "r1", "src/app.py", "Prefix is prepended after the budget was spent"),
+    ]
+
+    p = pair_metrics(claims, "a", "b")
+    pairs = candidate_pairs(claims, "a", "b")
+
+    assert (p.shared, p.union) == (1, 3)
+    assert len(pairs) == 1
+    assert pairs[0].a_titles == ("Prefix is added after the budget is allocated",)
+    assert pairs[0].b_titles == ("Prefix is prepended after the budget was spent",)
+
+
 def test_candidate_pairs_list_a_repeated_claim_once():
     """A round can publish one anchor twice; the figures count it once, so this must too."""
     claims = [

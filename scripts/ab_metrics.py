@@ -226,13 +226,19 @@ def _report_candidates(claims: list[Claim], a: str, b: str, receipts: set[tuple[
     fitted-to-its-answer matcher #159 rules out.
 
     A floor, not the whole of it, and the header says so: every title listed is
-    in ``union - shared``, but the converse fails in two ways this tool's own
-    data reaches. Same-round disagreements the arms anchored on DIFFERENT files
-    never share a bucket, and findings that arrived titleless are dropped before
-    :func:`collect_claims` builds an anchor at all. Both omissions run one way --
-    a reader who took the list for the entire looseness would conclude the bound
-    is tighter than it is -- so, as with every other exclusion this report
-    carries, it is disclosed in band rather than left to the docstring.
+    in ``union - shared``, but the converse fails three ways this tool's own data
+    reaches. Same-round disagreements the arms anchored on DIFFERENT files never
+    share a bucket; an unmatched claim the other arm has nothing to weigh against
+    is dropped as a one-sided surplus; and findings that arrived titleless are
+    dropped before :func:`collect_claims` builds an anchor at all. All three run
+    one way -- a reader who took the list for the entire looseness would conclude
+    the bound is tighter than it is -- so, as with every other exclusion this
+    report carries, they are disclosed in band rather than left to the docstring.
+
+    The header also points back at the backup-answered rounds (#204) instead of
+    marking pairs with them: a rescued key is the head the run STARTED on while a
+    round is keyed at submission, so joining the two could flag a clean pair as
+    confounded on nothing but key drift (#210).
 
     The empty line says only that no such PAIR exists, which is the one claim
     that holds however the list came out empty: the arms shared no round at all,
@@ -249,9 +255,12 @@ def _report_candidates(claims: list[Claim], a: str, b: str, receipts: set[tuple[
         f"\n{len(pairs)} same-round same-file pair(s) the exact-title rule scored as "
         "DISAGREEING. Cross-arm agreement above is a LOWER bound; adjudicate these by "
         "hand to put a floor under how loose it is (#243), and do not fold the verdict "
-        "back into a matcher. Same-file pairs only -- disagreements the arms anchored "
-        "on DIFFERENT files, and any findings dropped as titleless, are outside this "
-        "list, so it under-states the looseness rather than bounding it:"
+        "back into a matcher.\n"
+        "the list under-states the looseness rather than bounding it -- outside it are "
+        "disagreements the arms anchored on DIFFERENT files, unmatched claims on a file "
+        "the other arm published nothing on, and findings dropped as titleless.\n"
+        "any rounds a failover backup answered are named above: a pair drawn from one "
+        "is not the same-model comparison this list's premise assumes."
     )
     for pair in pairs:
         print(f"    {pair.round_key} {pair.file}")
