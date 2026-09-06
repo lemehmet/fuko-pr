@@ -912,11 +912,13 @@ def _examined_faults(exc: ValidationError) -> _ExaminedFaults:
         in_examined = bool(loc) and loc[0] == "examined"
         entry_loc = in_examined and len(loc) >= 2 and isinstance(loc[1], int)
         if entry_loc and len(loc) >= 3:
-            # Off-vocabulary keys land here too (a mistyped `region`), and they
-            # are recorded against the entry exactly like a missing `conclusion`:
-            # every field of a coverage entry is advisory, so any fault in one
-            # costs the entry and nothing more. Only the REQUIRED fields are
-            # named in the message, which is what the runbook is for.
+            # A wrong-TYPED advisory field lands here too (`"region": null`), and
+            # is recorded against the entry exactly like a missing `conclusion`:
+            # any fault in a coverage entry costs the entry and nothing more.
+            # Only the REQUIRED fields are named in the message, which is what
+            # the runbook is for. An off-vocabulary KEY does not reach here at
+            # all -- this module sets no `extra=` policy, so pydantic ignores
+            # one silently (`qwen-anthropic/qwen3.8-max` on #273).
             hollow.setdefault(loc[1], {})[str(loc[2])] = err.get("type") == "missing"
         elif entry_loc:
             # The entry is not an object at all (`"examined": [null]`), which
@@ -1125,61 +1127,6 @@ def _salvage_prefix(body: str, limit: int) -> tuple[dict, str] | None:
     return None
 
 
-def _whole_object_before_junk(body: str) -> tuple[dict, int] | None:
-    """The complete review ``body`` opens with, and the offset it ends at.
-
-    A model that closes its object and then adds a sentence containing a ``}``
-    defeats the first-``{``-to-last-``}`` slice: the slice carries the prose too,
-    ``json.loads`` rejects the pair as ``Extra data``, and the salvage then
-    recovers the object in full -- correctly, but reporting a ``degraded`` round
-    that lost nothing, on the very channel this module exists to make
-    trustworthy. Decoding the leading value instead keeps the documented
-    tolerance for stray prose from depending on whether the prose contains a
-    brace (fuko-dorian on #273).
-
-    Held to :data:`SALVAGE_ANCHOR` for the same reason the salvage is: the first
-    complete object in the text may be a preamble the model wrote before the
-    review, and one without ``findings`` must never publish as a round that
-    found none. Returns ``None`` in that case, and whenever the leading value is
-    not a complete object, leaving the caller to salvage or fail.
-
-    The end offset is returned so the caller can ask :func:`_rival_review_follows`
-    what is behind it: the anchor alone does not catch a warm-up object that
-    happens to carry ``findings``, and publishing that would report a clean pass
-    while discarding the real verdict further down the same message (fuko-henry
-    on #273).
-    """
-    try:
-        payload, end = json.JSONDecoder().raw_decode(body)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict) or not isinstance(payload.get(SALVAGE_ANCHOR), list):
-        return None
-    return payload, end
-
-
-def _rival_review_follows(body: str, offset: int) -> bool:
-    """Whether a second object carrying :data:`SALVAGE_ANCHOR` follows ``offset``.
-
-    Two candidate reviews in one message cannot be told apart by position -- the
-    later one is as likely to be the verdict as the earlier -- so the caller
-    refuses the round rather than guessing. Only objects carrying ``findings``
-    count: prose that happens to contain a decodable ``{...}`` is the stray text
-    :func:`parse_review` has always tolerated, not a rival.
-    """
-    decoder = json.JSONDecoder()
-    index = body.find("{", offset)
-    while index != -1:
-        try:
-            candidate, _ = decoder.raw_decode(body, index)
-        except json.JSONDecodeError:
-            candidate = None
-        if isinstance(candidate, dict) and isinstance(candidate.get(SALVAGE_ANCHOR), list):
-            return True
-        index = body.find("{", index + 1)
-    return False
-
-
 def _coverage_loss(faults: _ExaminedFaults) -> str:
     """Name the dropped coverage for the round's ``degraded`` reason.
 
@@ -1237,35 +1184,37 @@ def parse_review(text: str) -> AgenticReview:
     try:
         payload = json.loads(body)
     except json.JSONDecodeError as e:
-        leading = _whole_object_before_junk(body)
-        if leading is not None and _rival_review_follows(body, leading[1]):
-            # Two verdicts, no way to tell which one the round meant -- and the
-            # wrong choice publishes a review the model superseded. Refusing is
-            # what the base parser did for this whole shape (#273).
-            raise ReviewParseError(f"more than one review object in reviewer output: {e}") from e
-        if leading is not None:
-            payload = leading[0]
-        else:
-            salvaged = _salvage_prefix(body, e.pos)
-            if salvaged is None:
-                raise ReviewParseError(f"malformed reviewer output: {e}") from e
-            payload, dropped = salvaged
-            # Deliberately does NOT name the ledger. The cut drops every member
-            # after it, and `prior_status` follows `examined` in the contract, so
-            # the round's verdicts on carried findings go with it -- `settle`
-            # re-offers those next round, but a reason naming only the ledger
-            # tells the reader the wrong thing was lost (fuko-gray and
-            # fuko-dorian on #273). What was dropped is in the harness dump; the
-            # reason says the tail went, not which member it was.
-            #
-            # Unless nothing went. A payload whose only defect is terminal
-            # punctuation -- the trailing comma models emit constantly -- is
-            # recovered entire at the boundary that comma IS, and reporting that
-            # round degraded withholds a merge for a review that arrived whole
-            # (fuko-dorian on #273). Only structure separates the two: if the
-            # discarded remainder is punctuation, no member was in it.
-            if dropped.strip(_PUNCTUATION_ONLY):
-                degraded = f"payload tail lost: unparseable JSON at char {e.pos}"
+        # Every recovery goes through the salvage, including the shapes a
+        # `json.JSONDecoder().raw_decode` could return whole. An earlier round of
+        # this PR had a leading-object fast path for exactly those, to spare a
+        # complete payload followed by prose the `degraded` label it does not
+        # deserve -- and it published a warm-up object as a CLEAN round twice, in
+        # two different ways, because "the leading object is the review" is not a
+        # property any check on that object can establish (all three review seats
+        # on #273, twice). The salvage returns the same recovered object for the
+        # same input; what it does not do is call it whole. Nothing that failed
+        # to parse in one piece publishes as `done`, and that is now true by
+        # construction rather than by a guard.
+        salvaged = _salvage_prefix(body, e.pos)
+        if salvaged is None:
+            raise ReviewParseError(f"malformed reviewer output: {e}") from e
+        payload, dropped = salvaged
+        # Deliberately does NOT name the ledger. The cut drops every member
+        # after it, and `prior_status` follows `examined` in the contract, so
+        # the round's verdicts on carried findings go with it -- `settle`
+        # re-offers those next round, but a reason naming only the ledger
+        # tells the reader the wrong thing was lost (fuko-gray and
+        # fuko-dorian on #273). What was dropped is in the harness dump; the
+        # reason says the tail went, not which member it was.
+        #
+        # Unless nothing went. A payload whose only defect is terminal
+        # punctuation -- the trailing comma models emit constantly -- is
+        # recovered entire at the boundary that comma IS, and reporting that
+        # round degraded withholds a merge for a review that arrived whole
+        # (fuko-dorian on #273). Only structure separates the two: a remainder
+        # of punctuation held no member, and can hide no second review either.
+        if dropped.strip(_PUNCTUATION_ONLY):
+            degraded = f"payload tail lost: unparseable JSON at char {e.pos}"
     if isinstance(payload, dict):
         # Fuko's verdict on the payload, so it may not be READ from the payload:
         # the model writes into this object and a seat that could set its own

@@ -1062,14 +1062,16 @@ def test_a_pruned_payload_that_still_fails_is_discarded_on_the_original_error(mo
     assert "conclusion" in str(excinfo.value), "the message describes the model's payload"
 
 
-def test_a_whole_payload_followed_by_prose_with_a_brace_is_not_called_degraded():
-    """Nothing was lost, so nothing may be reported lost on the degraded channel.
+def test_a_whole_payload_followed_by_prose_with_a_brace_publishes_degraded():
+    """Recovered entire, and still not called whole -- the label is the cheap half.
 
     The slice runs to the LAST `}`, so a closing sentence containing one drags
-    prose into the body and `json.loads` reports `Extra data`. The salvage then
-    recovers the object in full -- and labelling that round degraded would block
-    every consumer gating on `done` and print "reduced coverage" for a payload
-    that arrived whole (fuko-dorian on #273).
+    prose into the body and `json.loads` reports `Extra data`. Everything is
+    recovered, but the round is reported degraded anyway: `done` is reserved for
+    a payload that parsed in one piece, because no check on a leading object can
+    establish that the text behind it is not the real review. The needless label
+    is tracked separately; publishing a warm-up object as clean is not a trade
+    available for it.
     """
     payload = {
         "summary": "s",
@@ -1079,51 +1081,38 @@ def test_a_whole_payload_followed_by_prose_with_a_brace_is_not_called_degraded()
     }
     review = parse_review(json.dumps(payload) + "\n\nI also checked map[k] handling } done.")
 
-    assert review.degraded == ""
+    assert review.degraded.startswith("payload tail lost:")
     assert len(review.findings) == 1 and len(review.examined) == 1
     assert [p.id for p in review.prior_status] == ["fk_1"]
 
 
 def test_a_preamble_object_before_the_review_is_refused_not_published():
-    """The leading complete object is only a review if it reached a verdict.
+    """A leading object is only a review if it reached a verdict.
 
-    `raw_decode` takes the FIRST value in the text, which a model that narrates
-    before answering can make a stub -- and `findings` defaults to empty, so
-    publishing that stub would report a clean pass for a round whose verdict is
-    further down the same message. Same anchor rule as the salvage.
+    A model that narrates before answering makes the first object in the text a
+    stub, and `findings` defaults to empty -- so a recovery that stopped there
+    would report a clean pass for a round whose verdict is further down the same
+    message. The anchor refuses it.
     """
     with pytest.raises(ReviewParseError):
         parse_review('{"summary": "thinking out loud"} then the real one: {"findings": []}')
 
 
-def test_a_stub_carrying_findings_before_the_real_review_is_refused():
-    """The anchor does not separate a warm-up object from the verdict; two do.
+def test_a_stub_carrying_findings_before_the_real_review_never_reads_as_clean():
+    """The anchor admits a warm-up object; `degraded` is what stops it passing.
 
-    A model that narrates before answering can emit a first object that satisfies
-    `findings` -- an empty list, or the contract template's own placeholder --
-    and publishing it as WHOLE reports a clean pass while the real review sits
-    further down the same message. Position cannot break the tie, so the round is
-    refused rather than guessed at (fuko-henry on #273).
+    A stub that satisfies `findings` with an empty list is indistinguishable
+    from a round that found nothing, so the anchor alone cannot refuse it. What
+    can be guaranteed is that such a payload never parsed whole -- so it is
+    published degraded, gets the harness dump carrying the discarded verdict,
+    and reads as `done` to nobody (all three seats on #273, twice).
     """
     stub = '{"summary": "warming up", "findings": []}'
     real = '{"summary": "s", "findings": [{"file": "a.py", "title": "t", "body": "b"}]}'
-    with pytest.raises(ReviewParseError) as excinfo:
-        parse_review(f"{stub} ... and now the review: {real}")
+    review = parse_review(f"{stub} ... and now the review: {real}")
 
-    assert "more than one review object" in str(excinfo.value)
-
-
-def test_a_brace_in_the_closing_prose_is_not_mistaken_for_a_second_review():
-    """Stray text is what the parser has always tolerated; only a rival verdict isn't.
-
-    The remainder is scanned for another object carrying `findings`, so prose
-    that merely contains braces -- an unparseable one, and a small object that
-    states no verdict -- must leave the whole round whole.
-    """
-    payload = {"summary": "s", "findings": [{"file": "a.py", "title": "t", "body": "b"}]}
-    review = parse_review(json.dumps(payload) + ' note: {not json} and {"count": 3}')
-
-    assert review.degraded == "" and len(review.findings) == 1
+    assert review.findings == []
+    assert review.degraded.startswith("payload tail lost:")
 
 
 def test_a_trailing_comma_costs_a_comma_and_is_not_reported_as_a_loss():
