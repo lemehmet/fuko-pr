@@ -944,6 +944,32 @@ def _without_condemned_coverage(payload: object, faults: _ExaminedFaults) -> dic
     return pruned
 
 
+def _name_faults(fields: Mapping[str, bool]) -> str:
+    """Name an entry's condemned required fields, absent named apart from unusable.
+
+    Shared by the two messages that render :attr:`_ExaminedFaults.hollow` -- the
+    runbook for a discarded round and the ``degraded`` reason for a salvaged one
+    -- because they described the same dict in two places and drifted apart:
+    the reason called a present-but-unusable field "missing", which sends the
+    reader grepping the dumped payload for a key it plainly contains (#178,
+    CodeRabbit on #273). Only the required fields are ever named; an entry
+    condemned solely by a non-required one (a ``region`` of the wrong type,
+    which :func:`_examined_faults` records against the entry like any other)
+    falls back to a bare "unusable" rather than naming nothing at all.
+    """
+    return (
+        "; ".join(
+            f"{verb} {', '.join(names)}"
+            for verb, names in (
+                ("missing", [f for f in EXAMINED_REQUIRED_FIELDS if fields.get(f)]),
+                ("invalid", [f for f in EXAMINED_REQUIRED_FIELDS if f in fields and not fields[f]]),
+            )
+            if names
+        )
+        or "unusable"
+    )
+
+
 def _hollow_examined_runbook(faults: _ExaminedFaults, payload: object) -> str | None:
     """Turn a hollow-``examined`` rejection into something actionable, or return None.
 
@@ -964,15 +990,7 @@ def _hollow_examined_runbook(faults: _ExaminedFaults, payload: object) -> str | 
         return None
 
     index = min(hollow)
-    fields = hollow[index]
-    faulty = "; ".join(
-        f"{verb} {', '.join(names)}"
-        for verb, names in (
-            ("missing", [f for f in EXAMINED_REQUIRED_FIELDS if fields.get(f)]),
-            ("invalid", [f for f in EXAMINED_REQUIRED_FIELDS if f in fields and not fields[f]]),
-        )
-        if names
-    )
+    faulty = _name_faults(hollow[index])
     entries = payload.get("examined") if isinstance(payload, Mapping) else None
     entry = entries[index] if isinstance(entries, list) and index < len(entries) else None
     where = ""
@@ -1080,6 +1098,33 @@ def _salvage_prefix(body: str, limit: int) -> dict | None:
     return None
 
 
+def _whole_object_before_junk(body: str) -> dict | None:
+    """The complete object ``body`` opens with, when only trailing junk follows it.
+
+    A model that closes its object and then adds a sentence containing a ``}``
+    defeats the first-``{``-to-last-``}`` slice: the slice carries the prose too,
+    ``json.loads`` rejects the pair as ``Extra data``, and the salvage then
+    recovers the object in full -- correctly, but reporting a ``degraded`` round
+    that lost nothing, on the very channel this module exists to make
+    trustworthy. Decoding the leading value instead keeps the documented
+    tolerance for stray prose from depending on whether the prose contains a
+    brace (fuko-dorian on #273).
+
+    Held to :data:`SALVAGE_ANCHOR` for the same reason the salvage is: the first
+    complete object in the text may be a preamble the model wrote before the
+    review, and one without ``findings`` must never publish as a round that
+    found none. Returns ``None`` in that case, and whenever the leading value is
+    not a complete object, leaving the caller to salvage or fail.
+    """
+    try:
+        payload, _ = json.JSONDecoder().raw_decode(body)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(payload, dict) and isinstance(payload.get(SALVAGE_ANCHOR), list):
+        return payload
+    return None
+
+
 def _coverage_loss(faults: _ExaminedFaults) -> str:
     """Name the dropped coverage for the round's ``degraded`` reason.
 
@@ -1093,10 +1138,8 @@ def _coverage_loss(faults: _ExaminedFaults) -> str:
     if faults.whole or not faults.hollow:
         return "coverage ledger lost: examined section unusable"
     index = min(faults.hollow)
-    named = [f for f in EXAMINED_REQUIRED_FIELDS if f in faults.hollow[index]]
-    what = f"missing {', '.join(named)}" if named else "unusable"
     more = f", +{len(faults.hollow) - 1} more" if len(faults.hollow) > 1 else ""
-    return f"coverage ledger lost: examined[{index}] {what}{more}"
+    return f"coverage ledger lost: examined[{index}] {_name_faults(faults.hollow[index])}{more}"
 
 
 def parse_review(text: str) -> AgenticReview:
@@ -1108,13 +1151,16 @@ def parse_review(text: str) -> AgenticReview:
     raises :class:`ReviewParseError` rather than degrading to "no findings",
     because silently dropping a review reads as a clean pass downstream.
 
-    What is NOT worth a whole round is the ledger. ``examined`` is the last and
-    longest structure in the document and it is where observed payloads break --
-    mid-string at ~8 kB in, or a hollow entry with no conclusion -- while
-    ``summary`` and ``findings`` precede it and are complete. Discarding those to
-    protect an advisory audit trail cost mepro a real defect that three clean
-    rounds had missed (#255), so a fault confined to ``examined`` now drops the
-    condemned coverage and publishes the rest with a ``degraded`` reason.
+    What is NOT worth a whole round is the state half of the contract.
+    ``examined`` is the longest structure in the document and it is where
+    observed payloads break -- mid-string at ~8 kB in, or a hollow entry with no
+    conclusion -- while ``summary`` and ``findings`` precede it and are complete.
+    Discarding those to protect an advisory audit trail cost mepro a real defect
+    that three clean rounds had missed (#255), so a fault confined to
+    ``examined`` now drops the condemned coverage and publishes the rest with a
+    ``degraded`` reason. ``prior_status`` follows ``examined``, so a cut inside
+    the ledger takes it too -- which is why the reason for a cut says the tail
+    was lost rather than naming the ledger it may not be describing.
 
     The silent-loss objection that argued for whole-object parsing (#166) is
     answered by reporting rather than by discarding: the round says what it lost,
@@ -1131,10 +1177,19 @@ def parse_review(text: str) -> AgenticReview:
     try:
         payload = json.loads(body)
     except json.JSONDecodeError as e:
-        payload = _salvage_prefix(body, e.pos)
+        payload = _whole_object_before_junk(body)
         if payload is None:
-            raise ReviewParseError(f"malformed reviewer output: {e}") from e
-        degraded = f"coverage ledger lost: unparseable JSON at char {e.pos}"
+            payload = _salvage_prefix(body, e.pos)
+            if payload is None:
+                raise ReviewParseError(f"malformed reviewer output: {e}") from e
+            # Deliberately does NOT name the ledger. The cut drops every member
+            # after it, and `prior_status` follows `examined` in the contract, so
+            # the round's verdicts on carried findings go with it -- `settle`
+            # re-offers those next round, but a reason naming only the ledger
+            # tells the reader the wrong thing was lost (fuko-gray and
+            # fuko-dorian on #273). What was dropped is in the harness dump; the
+            # reason says the tail went, not which member it was.
+            degraded = f"payload tail lost: unparseable JSON at char {e.pos}"
     if isinstance(payload, dict):
         # Fuko's verdict on the payload, so it may not be READ from the payload:
         # the model writes into this object and a seat that could set its own

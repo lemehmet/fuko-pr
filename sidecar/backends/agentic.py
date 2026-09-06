@@ -893,9 +893,12 @@ class AgenticBackend:
         what is a one-line runner fix.
 
         Every return path sets :attr:`InvokeResult.channels` for the single
-        :data:`_CHANNEL` this backend publishes (#113): ``done`` on success, and
-        the pr-agent driver's own failure vocabulary otherwise (``killed:timeout``
-        / ``throttled:exit N`` / ``failed:exit N``). A COMPLETED run must state its
+        :data:`_CHANNEL` this backend publishes (#113): ``done`` on a whole
+        review, ``degraded: <reason>`` on one published from a damaged payload
+        (#255 -- a success, but a partial one, and every consumer that gates on
+        ``done`` must see the difference), and the pr-agent driver's own failure
+        vocabulary otherwise (``killed:timeout`` / ``throttled:exit N`` /
+        ``failed:exit N``). A COMPLETED run must state its
         channel finished rather than leave an empty map -- an empty map is what
         :func:`sidecar.status.fuko_states` reads as "not reported", which it cannot
         tell from a dead channel, so a ``done`` receipt with no channels would read

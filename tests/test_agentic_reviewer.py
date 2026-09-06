@@ -931,7 +931,7 @@ def test_a_real_corrupt_payload_publishes_its_verdict_instead_of_discarding_it()
     assert review.summary.startswith("A clippy-backlog drain")
     assert review.findings == []  # this round's verdict, and it is a real one
     assert review.examined == []  # the ledger is what was actually lost
-    assert review.degraded.startswith("coverage ledger lost: unparseable JSON at char ")
+    assert review.degraded.startswith("payload tail lost: unparseable JSON at char ")
 
 
 def test_salvage_refuses_a_cut_that_lands_before_the_findings():
@@ -1035,7 +1035,7 @@ def test_salvage_walks_back_past_a_boundary_the_desynced_scan_invented():
     text = '{"findings": [], "note": "x" , "y", "examined": []}'
     review = parse_review(text)
 
-    assert review.findings == [] and review.degraded.startswith("coverage ledger lost:")
+    assert review.findings == [] and review.degraded.startswith("payload tail lost:")
 
 
 def test_a_pruned_payload_that_still_fails_is_discarded_on_the_original_error(monkeypatch):
@@ -1060,6 +1060,99 @@ def test_a_pruned_payload_that_still_fails_is_discarded_on_the_original_error(mo
         parse_review(json.dumps(payload))
 
     assert "conclusion" in str(excinfo.value), "the message describes the model's payload"
+
+
+def test_a_whole_payload_followed_by_prose_with_a_brace_is_not_called_degraded():
+    """Nothing was lost, so nothing may be reported lost on the degraded channel.
+
+    The slice runs to the LAST `}`, so a closing sentence containing one drags
+    prose into the body and `json.loads` reports `Extra data`. The salvage then
+    recovers the object in full -- and labelling that round degraded would block
+    every consumer gating on `done` and print "reduced coverage" for a payload
+    that arrived whole (fuko-dorian on #273).
+    """
+    payload = {
+        "summary": "s",
+        "findings": [{"file": "a.py", "line": 1, "title": "t", "body": "b"}],
+        "examined": [{"file": "a.py", "checked": "c", "conclusion": "k", "evidence": "e"}],
+        "prior_status": [{"id": "fk_1", "status": "still_open", "reason": "r"}],
+    }
+    review = parse_review(json.dumps(payload) + "\n\nI also checked map[k] handling } done.")
+
+    assert review.degraded == ""
+    assert len(review.findings) == 1 and len(review.examined) == 1
+    assert [p.id for p in review.prior_status] == ["fk_1"]
+
+
+def test_a_preamble_object_before_the_review_is_refused_not_published():
+    """The leading complete object is only a review if it reached a verdict.
+
+    `raw_decode` takes the FIRST value in the text, which a model that narrates
+    before answering can make a stub -- and `findings` defaults to empty, so
+    publishing that stub would report a clean pass for a round whose verdict is
+    further down the same message. Same anchor rule as the salvage.
+    """
+    with pytest.raises(ReviewParseError):
+        parse_review('{"summary": "thinking out loud"} then the real one: {"findings": []}')
+
+
+def test_a_cut_tail_and_a_hollow_entry_are_both_named_in_one_reason():
+    """Two independent losses, joined -- a reason naming one understates the round.
+
+    The defect is in `prior_status` (last in the contract), so the largest cut
+    at or before it keeps `examined` whole enough to reach validation, where the
+    hollow entry is then condemned. Pinned because the two halves are produced by
+    unrelated code paths and a future edit that reassigns rather than joins would
+    drop one with the suite still green (fuko-henry on #273).
+    """
+    text = (
+        '{"summary": "s", "findings": [{"file": "a.py", "title": "t", "body": "b"}], '
+        '"examined": [{"file": "ok.py", "checked": "c", "conclusion": "x", "evidence": "e"}, '
+        '{"file": "hollow.py", "checked": "c"}], '
+        '"prior_status": [{"id": "fk_1", "status": "still_open", "reason": "the "x" case"}]}'
+    )
+    review = parse_review(text)
+
+    assert [e.file for e in review.examined] == ["ok.py"]
+    reason, ledger = review.degraded.split("; ")
+    assert reason.startswith("payload tail lost: unparseable JSON at char ")
+    assert ledger == "coverage ledger lost: examined[1] missing conclusion, evidence"
+
+
+def test_a_present_but_unusable_field_is_never_called_missing():
+    """The degraded reason and the runbook render the same dict, so they say the same.
+
+    `null` in a required field is present and unusable, not absent; calling it
+    missing sends the reader grepping the dumped payload for a key it plainly
+    contains (#178, CodeRabbit on #273).
+    """
+    payload = {
+        "findings": [],
+        "examined": [{"file": "a.py", "checked": "c", "conclusion": None, "evidence": "e"}],
+    }
+    assert parse_review(json.dumps(payload)).degraded == (
+        "coverage ledger lost: examined[0] invalid conclusion"
+    )
+
+
+def test_an_entry_condemned_only_by_a_non_required_field_still_names_a_fault():
+    """`region` faults reach `hollow` too, and neither message may then say nothing.
+
+    Reachable when a fault outside `examined` discards the round anyway, which is
+    exactly the mid-incident reader the runbook is written for -- and an entry
+    named with no fault beside it tells them less than the generic pydantic
+    message did (fuko-henry on #273).
+    """
+    payload = {
+        "findings": [{"file": "a.py", "body": "no title"}],
+        "examined": [
+            {"file": "a.py", "region": None, "checked": "c", "conclusion": "k", "evidence": "e"}
+        ],
+    }
+    with pytest.raises(ReviewParseError) as excinfo:
+        parse_review(json.dumps(payload))
+
+    assert "examined[0]" in str(excinfo.value) and "unusable" in str(excinfo.value)
 
 
 def test_parse_review_without_ledger_sections_reviews_exactly_as_before():
