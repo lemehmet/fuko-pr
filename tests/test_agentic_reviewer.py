@@ -1096,6 +1096,68 @@ def test_a_preamble_object_before_the_review_is_refused_not_published():
         parse_review('{"summary": "thinking out loud"} then the real one: {"findings": []}')
 
 
+def test_a_stub_carrying_findings_before_the_real_review_is_refused():
+    """The anchor does not separate a warm-up object from the verdict; two do.
+
+    A model that narrates before answering can emit a first object that satisfies
+    `findings` -- an empty list, or the contract template's own placeholder --
+    and publishing it as WHOLE reports a clean pass while the real review sits
+    further down the same message. Position cannot break the tie, so the round is
+    refused rather than guessed at (fuko-henry on #273).
+    """
+    stub = '{"summary": "warming up", "findings": []}'
+    real = '{"summary": "s", "findings": [{"file": "a.py", "title": "t", "body": "b"}]}'
+    with pytest.raises(ReviewParseError) as excinfo:
+        parse_review(f"{stub} ... and now the review: {real}")
+
+    assert "more than one review object" in str(excinfo.value)
+
+
+def test_a_brace_in_the_closing_prose_is_not_mistaken_for_a_second_review():
+    """Stray text is what the parser has always tolerated; only a rival verdict isn't.
+
+    The remainder is scanned for another object carrying `findings`, so prose
+    that merely contains braces -- an unparseable one, and a small object that
+    states no verdict -- must leave the whole round whole.
+    """
+    payload = {"summary": "s", "findings": [{"file": "a.py", "title": "t", "body": "b"}]}
+    review = parse_review(json.dumps(payload) + ' note: {not json} and {"count": 3}')
+
+    assert review.degraded == "" and len(review.findings) == 1
+
+
+def test_a_trailing_comma_costs_a_comma_and_is_not_reported_as_a_loss():
+    """The salvage recovers every member, so there is nothing to report degraded.
+
+    A terminal comma is the defect models emit most often and the one that costs
+    least: the cut IS that comma, so the prefix carries the whole document.
+    Reporting it degraded withholds a merge from consumers gating on `done` for a
+    review that arrived intact (fuko-dorian on #273).
+    """
+    text = (
+        '{"summary": "s", "findings": [{"file": "a.py", "title": "t", "body": "b"}], '
+        '"examined": [{"file": "a.py", "checked": "c", "conclusion": "k", "evidence": "e"}],}'
+    )
+    review = parse_review(text)
+
+    assert review.degraded == ""
+    assert len(review.findings) == 1 and len(review.examined) == 1
+
+
+def test_a_non_object_examined_entry_is_named_as_such_not_by_its_absent_fields():
+    """`[null]` has no keys, so the reason may not list four of them as invalid.
+
+    The runbook says so through its `where` clause; the degraded reason is the
+    only diagnostic that reaches the receipt channel and the PR header for a
+    salvaged round, so it needs its own (fuko-gray on #273).
+    """
+    payload = {"findings": [{"file": "a.py", "title": "t", "body": "b"}], "examined": [None]}
+    review = parse_review(json.dumps(payload))
+
+    assert len(review.findings) == 1 and review.examined == []
+    assert review.degraded == "coverage ledger lost: examined[0] is not an object"
+
+
 def test_a_cut_tail_and_a_hollow_entry_are_both_named_in_one_reason():
     """Two independent losses, joined -- a reason naming one understates the round.
 

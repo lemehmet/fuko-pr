@@ -877,6 +877,12 @@ class _ExaminedFaults:
     something the dumped payload plainly contains (CodeRabbit and
     ``qwen-anthropic/qwen3.8-max``, #178).
 
+    ``shapeless`` narrows that: an entry rejected at its OWN ``loc`` has no keys
+    to name, so it is recorded against every required field only to condemn it,
+    and a message that reads those back as field names would report keys the
+    entry does not contain -- the same confusion #178 was filed about, mirrored
+    (``qwen-anthropic/qwen3.8-max`` on #273).
+
     ``whole`` is set when ``examined`` is not a list at all, which condemns the
     section rather than any entry in it. ``others`` counts errors OUTSIDE
     ``examined``: it is what separates a round that can be salvaged from one that
@@ -885,6 +891,7 @@ class _ExaminedFaults:
     """
 
     hollow: dict[int, dict[str, bool]] = field(default_factory=dict)
+    shapeless: frozenset[int] = frozenset()
     whole: bool = False
     others: int = 0
 
@@ -897,6 +904,7 @@ class _ExaminedFaults:
 def _examined_faults(exc: ValidationError) -> _ExaminedFaults:
     """Sort a validation failure's errors into coverage faults and everything else."""
     hollow: dict[int, dict[str, bool]] = {}
+    shapeless: set[int] = set()
     whole = False
     others = 0
     for err in exc.errors():
@@ -917,13 +925,16 @@ def _examined_faults(exc: ValidationError) -> _ExaminedFaults:
             # so it gets the runbook rather than the generic complaint the
             # short loc would otherwise drop it into (fuko-henry, #178).
             hollow.setdefault(loc[1], {}).update(dict.fromkeys(EXAMINED_REQUIRED_FIELDS, False))
+            shapeless.add(loc[1])
         elif in_examined:
             # `"examined": "I looked at everything"` -- no entry to drop, so the
             # whole section goes.
             whole = True
         else:
             others += 1
-    return _ExaminedFaults(hollow=hollow, whole=whole, others=others)
+    return _ExaminedFaults(
+        hollow=hollow, shapeless=frozenset(shapeless), whole=whole, others=others
+    )
 
 
 def _without_condemned_coverage(payload: object, faults: _ExaminedFaults) -> dict | None:
@@ -1015,6 +1026,15 @@ def _hollow_examined_runbook(faults: _ExaminedFaults, payload: object) -> str | 
     return _RUNBOOK.format(locator=locator, lost=_clip(lost, _COUNT_BUDGET))
 
 
+_PUNCTUATION_ONLY = " \t\r\n,}"
+"""Characters a salvage may discard without having dropped anything.
+
+Whitespace, the trailing comma, and the closing brace the salvage re-appends
+itself. A remainder made only of these carried no member, so the round lost
+nothing and must not be reported degraded for it.
+"""
+
+
 SALVAGE_ANCHOR = "findings"
 """The key a salvaged prefix must carry before it may be published as a review.
 
@@ -1069,13 +1089,18 @@ def _member_boundaries(body: str) -> list[int]:
     return cuts
 
 
-def _salvage_prefix(body: str, limit: int) -> dict | None:
-    """The largest whole prefix of ``body`` that parses as an object, or None.
+def _salvage_prefix(body: str, limit: int) -> tuple[dict, str] | None:
+    """The largest whole prefix of ``body`` that parses as an object, and what it dropped.
 
     ``limit`` is the decoder's own failure offset: boundaries past it come from a
     scan that may already be desynchronised, so they are not considered at all.
     Candidates are tried newest-first, and the first one that parses is the
     answer -- an earlier boundary is a prefix of it and carries strictly less.
+
+    The discarded remainder is returned alongside because the caller reports a
+    loss and must not report one that did not happen: a payload whose only defect
+    is terminal punctuation (the classic trailing comma) is recovered entire, and
+    what it "lost" is a comma (``qwen-anthropic/qwen3.8-max`` on #273).
 
     Returns ``None`` unless the recovered object carries :data:`SALVAGE_ANCHOR`,
     which is what keeps "the cut landed after the findings" (publishable) apart
@@ -1094,12 +1119,14 @@ def _salvage_prefix(body: str, limit: int) -> dict | None:
         # is an object; the only question left is whether it reached the verdict.
         # No earlier candidate can carry a key this one lacks -- they are its own
         # prefixes -- so a first success without findings ends the search.
-        return payload if isinstance(payload.get(SALVAGE_ANCHOR), list) else None
+        if not isinstance(payload.get(SALVAGE_ANCHOR), list):
+            return None
+        return payload, body[cut:]
     return None
 
 
-def _whole_object_before_junk(body: str) -> dict | None:
-    """The complete object ``body`` opens with, when only trailing junk follows it.
+def _whole_object_before_junk(body: str) -> tuple[dict, int] | None:
+    """The complete review ``body`` opens with, and the offset it ends at.
 
     A model that closes its object and then adds a sentence containing a ``}``
     defeats the first-``{``-to-last-``}`` slice: the slice carries the prose too,
@@ -1115,14 +1142,42 @@ def _whole_object_before_junk(body: str) -> dict | None:
     review, and one without ``findings`` must never publish as a round that
     found none. Returns ``None`` in that case, and whenever the leading value is
     not a complete object, leaving the caller to salvage or fail.
+
+    The end offset is returned so the caller can ask :func:`_rival_review_follows`
+    what is behind it: the anchor alone does not catch a warm-up object that
+    happens to carry ``findings``, and publishing that would report a clean pass
+    while discarding the real verdict further down the same message (fuko-henry
+    on #273).
     """
     try:
-        payload, _ = json.JSONDecoder().raw_decode(body)
+        payload, end = json.JSONDecoder().raw_decode(body)
     except json.JSONDecodeError:
         return None
-    if isinstance(payload, dict) and isinstance(payload.get(SALVAGE_ANCHOR), list):
-        return payload
-    return None
+    if not isinstance(payload, dict) or not isinstance(payload.get(SALVAGE_ANCHOR), list):
+        return None
+    return payload, end
+
+
+def _rival_review_follows(body: str, offset: int) -> bool:
+    """Whether a second object carrying :data:`SALVAGE_ANCHOR` follows ``offset``.
+
+    Two candidate reviews in one message cannot be told apart by position -- the
+    later one is as likely to be the verdict as the earlier -- so the caller
+    refuses the round rather than guessing. Only objects carrying ``findings``
+    count: prose that happens to contain a decodable ``{...}`` is the stray text
+    :func:`parse_review` has always tolerated, not a rival.
+    """
+    decoder = json.JSONDecoder()
+    index = body.find("{", offset)
+    while index != -1:
+        try:
+            candidate, _ = decoder.raw_decode(body, index)
+        except json.JSONDecodeError:
+            candidate = None
+        if isinstance(candidate, dict) and isinstance(candidate.get(SALVAGE_ANCHOR), list):
+            return True
+        index = body.find("{", index + 1)
+    return False
 
 
 def _coverage_loss(faults: _ExaminedFaults) -> str:
@@ -1138,8 +1193,13 @@ def _coverage_loss(faults: _ExaminedFaults) -> str:
     if faults.whole or not faults.hollow:
         return "coverage ledger lost: examined section unusable"
     index = min(faults.hollow)
+    # An entry pydantic rejected at its own `loc` has no keys, so naming the
+    # required ones would report fields it does not contain. The runbook says so
+    # via its `where` clause; this reason has no equivalent and needs its own
+    # (`qwen-anthropic/qwen3.8-max` on #273).
+    what = "is not an object" if index in faults.shapeless else _name_faults(faults.hollow[index])
     more = f", +{len(faults.hollow) - 1} more" if len(faults.hollow) > 1 else ""
-    return f"coverage ledger lost: examined[{index}] {_name_faults(faults.hollow[index])}{more}"
+    return f"coverage ledger lost: examined[{index}] {what}{more}"
 
 
 def parse_review(text: str) -> AgenticReview:
@@ -1177,11 +1237,19 @@ def parse_review(text: str) -> AgenticReview:
     try:
         payload = json.loads(body)
     except json.JSONDecodeError as e:
-        payload = _whole_object_before_junk(body)
-        if payload is None:
-            payload = _salvage_prefix(body, e.pos)
-            if payload is None:
+        leading = _whole_object_before_junk(body)
+        if leading is not None and _rival_review_follows(body, leading[1]):
+            # Two verdicts, no way to tell which one the round meant -- and the
+            # wrong choice publishes a review the model superseded. Refusing is
+            # what the base parser did for this whole shape (#273).
+            raise ReviewParseError(f"more than one review object in reviewer output: {e}") from e
+        if leading is not None:
+            payload = leading[0]
+        else:
+            salvaged = _salvage_prefix(body, e.pos)
+            if salvaged is None:
                 raise ReviewParseError(f"malformed reviewer output: {e}") from e
+            payload, dropped = salvaged
             # Deliberately does NOT name the ledger. The cut drops every member
             # after it, and `prior_status` follows `examined` in the contract, so
             # the round's verdicts on carried findings go with it -- `settle`
@@ -1189,7 +1257,15 @@ def parse_review(text: str) -> AgenticReview:
             # tells the reader the wrong thing was lost (fuko-gray and
             # fuko-dorian on #273). What was dropped is in the harness dump; the
             # reason says the tail went, not which member it was.
-            degraded = f"payload tail lost: unparseable JSON at char {e.pos}"
+            #
+            # Unless nothing went. A payload whose only defect is terminal
+            # punctuation -- the trailing comma models emit constantly -- is
+            # recovered entire at the boundary that comma IS, and reporting that
+            # round degraded withholds a merge for a review that arrived whole
+            # (fuko-dorian on #273). Only structure separates the two: if the
+            # discarded remainder is punctuation, no member was in it.
+            if dropped.strip(_PUNCTUATION_ONLY):
+                degraded = f"payload tail lost: unparseable JSON at char {e.pos}"
     if isinstance(payload, dict):
         # Fuko's verdict on the payload, so it may not be READ from the payload:
         # the model writes into this object and a seat that could set its own
