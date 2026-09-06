@@ -911,24 +911,25 @@ def test_other_structural_failures_keep_the_generic_parse_message():
         assert "round discarded" not in str(excinfo.value)
 
 
-# A verbatim excerpt of the payload that discarded a gating seat's round on mepro
-# PR #2215 (fuko-pr review run 33992817624, job 101377956089), trimmed to two
-# coverage entries. Kept real rather than hand-written because it settles what
-# #255 could only hypothesise: `checked` escapes its embedded quotes correctly
-# and `conclusion`, on the very next line, does not -- so the document is
-# COMPLETE (it ends `] }`) and invalid mid-string, not cut short by a loaded
-# gateway. Whatever the cause, the shape is the one that matters here: `summary`
-# and `findings` are whole and precede the damage.
-MEPRO_2215_PAYLOAD = (Path(__file__).parent / "data" / "mepro-2215-final-message.txt").read_text(
-    encoding="utf-8"
-)
+# The payload that discarded a gating seat's round on a trial customer's repo,
+# trimmed to two coverage entries and REDACTED: the customer's repository is
+# private and this one is public, so its paths, line anchors and source
+# fragments are replaced with synthetic equivalents. Only the shape is real, and
+# the shape is the whole point -- it settles what #255 could only hypothesise.
+# `checked` escapes its embedded quotes correctly and `conclusion`, on the very
+# next line, does not, so the document is COMPLETE (it ends `] }`) and invalid
+# mid-string rather than cut short by a loaded gateway. `summary` and `findings`
+# are whole and precede the damage, byte offsets and nesting preserved.
+REJECTED_PAYLOAD = (
+    Path(__file__).parent / "data" / "rejected-payload-unescaped-quote.txt"
+).read_text(encoding="utf-8")
 
 
 def test_a_real_corrupt_payload_publishes_its_verdict_instead_of_discarding_it():
-    """#255: the bytes that cost mepro a gating seat's round now yield a review."""
-    review = parse_review(MEPRO_2215_PAYLOAD)
+    """#255: the bytes that cost a gating seat its round now yield a review."""
+    review = parse_review(REJECTED_PAYLOAD)
 
-    assert review.summary.startswith("A clippy-backlog drain")
+    assert review.summary.startswith("A lint-backlog drain")
     assert review.findings == []  # this round's verdict, and it is a real one
     assert review.examined == []  # the ledger is what was actually lost
     assert review.degraded.startswith("payload tail lost: unparseable JSON at char ")

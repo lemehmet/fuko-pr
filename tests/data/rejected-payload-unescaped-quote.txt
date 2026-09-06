@@ -1,0 +1,20 @@
+{
+  "summary": "A lint-backlog drain plus a CI step, and both halves check out against the checkout. Every behavioral rewrite in the diff is semantics- and type-preserving (I verified each against the underlying constant types, struct definitions, and collection types rather than trusting the autofix), the workflow's lint/test flags match the package manifest verbatim, the linter-component addition is genuinely required for the toolchain action, and the grep evidence supports the PR's premise that no lane ran the linter before. The README's new claims (flags, path-filter markdown exclusion, formatting not enforced) all match the workflow and the manifest. I found nothing material to report; the only things I could not verify offline are the exit-0 and hunk counts, which require running the build.",
+  "findings": [],
+  "examined": [
+    {
+      "file": "ci/workflows/native-pr-test.yml",
+      "region": "whole file",
+      "checked": "Step order (checkout -> toolchain -> cache -> lint -> test), the lint `run:` flags vs the package manifest, the `if: ${{ !cancelled() }}` placement (test step only), the linter-component input, the `paths` filter's markdown exclusion the README cites, and that the fork guard/concurrency/check name are unchanged.",
+      "conclusion": "The lint step's flags are byte-identical to the manifest's lint script, the linter component is a new required input for the toolchain action (which installs no components by default), and a failed lint step still fails the job even though the test step runs. The README's markdown-exclusion claim matches the actual filter.",
+      "evidence": "ci/workflows/native-pr-test.yml:34-105; pkg/native/manifest.json:25-28"
+    },
+    {
+      "file": "pkg/native/src/backend/device/capture.rs",
+      "region": "L6598-6601; CALL_LOG L5307",
+      "checked": "CALL_LOG's element type (`&'static str`) against the new `order.contains(&\"StopStreams\")` argument type.",
+      "conclusion": "`Vec<&'static str>::contains(&"StopStreams")` type-checks and compares by string content -- equivalent to the `iter().any(|c| *c == ...)` it replaces.",
+      "evidence": "capture.rs:5307, 6595-6601"
+    }
+  ]
+}
