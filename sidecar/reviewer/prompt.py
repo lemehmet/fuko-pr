@@ -570,8 +570,10 @@ class ReviewParseError(ValueError):
     ``AgenticBackend.invoke`` hands to ``_failure_result``, so it reaches the
     run receipt and the job log and nothing else about the failure does. For
     the one shape a reader cannot diagnose from a schema complaint -- a hollow
-    ``examined`` entry, which costs a round's findings for a section that is
-    advisory -- it is a runbook rather than a stack of pydantic locs (#166).
+    ``examined`` entry ALONGSIDE a fault in the review proper, which is what
+    still costs a round its findings now that a coverage fault on its own is
+    salvaged (#255) -- it is a runbook rather than a stack of pydantic locs
+    (#166).
     """
 
 
