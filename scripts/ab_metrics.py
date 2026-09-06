@@ -220,10 +220,19 @@ def _report_candidates(claims: list[Claim], a: str, b: str, receipts: set[tuple[
 
     Printed after the agreement figure because it is that figure's caveat: two
     arms on one model paraphrase, so the agreement above is a LOWER bound, and
-    these are the pairs a reader has to adjudicate to know how loose the bound is
+    adjudicating these pairs is how a reader puts a floor under how loose it is
     (#243). Nothing here is counted, averaged, or fed back into a metric -- the
     adjudication is a human's, and a tool that pre-empted it would be the
     fitted-to-its-answer matcher #159 rules out.
+
+    A floor, not the whole of it, and the header says so: every title listed is
+    in ``union - shared``, but the converse fails in two ways this tool's own
+    data reaches. Same-round disagreements the arms anchored on DIFFERENT files
+    never share a bucket, and findings that arrived titleless are dropped before
+    :func:`collect_claims` builds an anchor at all. Both omissions run one way --
+    a reader who took the list for the entire looseness would conclude the bound
+    is tighter than it is -- so, as with every other exclusion this report
+    carries, it is disclosed in band rather than left to the docstring.
 
     The empty line says only that no such PAIR exists, which is the one claim
     that holds however the list came out empty: the arms shared no round at all,
@@ -239,8 +248,10 @@ def _report_candidates(claims: list[Claim], a: str, b: str, receipts: set[tuple[
     print(
         f"\n{len(pairs)} same-round same-file pair(s) the exact-title rule scored as "
         "DISAGREEING. Cross-arm agreement above is a LOWER bound; adjudicate these by "
-        "hand to see how loose it is (#243), and do not fold the verdict back into a "
-        "matcher:"
+        "hand to put a floor under how loose it is (#243), and do not fold the verdict "
+        "back into a matcher. Same-file pairs only -- disagreements the arms anchored "
+        "on DIFFERENT files, and any findings dropped as titleless, are outside this "
+        "list, so it under-states the looseness rather than bounding it:"
     )
     for pair in pairs:
         print(f"    {pair.round_key} {pair.file}")
