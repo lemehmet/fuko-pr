@@ -64,7 +64,7 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="fuko-pr sidecar", version="0.7.4", lifespan=lifespan)
+app = FastAPI(title="fuko-pr sidecar", version="0.7.5", lifespan=lifespan)
 
 app.include_router(web.router)
 
