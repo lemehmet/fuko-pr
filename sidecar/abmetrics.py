@@ -409,11 +409,12 @@ def candidate_pairs(
     computed over, and a reader can hold the two side by side.
 
     Returns pairs ordered by round then file, each carrying every unmatched title
-    each arm published on that file in that round. A file where one arm's claims
-    all matched the other's exactly yields no pair, and neither does a one-sided
-    surplus: an unmatched claim with nothing on the other arm to weigh it against
-    is not a paraphrase awaiting adjudication, it is one arm finding what the
-    other did not, which the pooled shared/union counts already carry.
+    each arm published on that file in that round, once per anchor. A file where
+    one arm's claims all matched the other's exactly yields no pair, and neither
+    does a one-sided surplus: an unmatched claim with nothing on the other arm to
+    weigh it against is not a paraphrase awaiting adjudication, it is one arm
+    finding what the other did not, which the pooled shared/union counts already
+    carry.
     """
     left = [c for c in claims if c.arm == a]
     right = [c for c in claims if c.arm == b]
@@ -425,13 +426,33 @@ def candidate_pairs(
     out: list[CandidatePair] = []
     for key in sorted(set(mine) & set(theirs)):
         matched = {c.anchor for c in mine[key]} & {c.anchor for c in theirs[key]}
-        a_titles = tuple(c.title for c in mine[key] if c.anchor not in matched)
-        b_titles = tuple(c.title for c in theirs[key] if c.anchor not in matched)
+        a_titles = _unmatched_titles(mine[key], matched)
+        b_titles = _unmatched_titles(theirs[key], matched)
         if a_titles and b_titles:
             out.append(
                 CandidatePair(round_key=key[0], file=key[1], a_titles=a_titles, b_titles=b_titles)
             )
     return tuple(out)
+
+
+def _unmatched_titles(claims: Iterable[Claim], matched: set[tuple[str, str]]) -> tuple[str, ...]:
+    """The titles in ``claims`` whose anchor is not in ``matched``, once per anchor.
+
+    Deduplicated because every figure these titles qualify is anchor-SET based --
+    :func:`_by_round` collapses a round's repeats before :func:`pair_metrics`
+    counts them -- and a round really can publish one anchor twice: nothing
+    dedupes at publish time, the ledger collapses repeats store-side only, and
+    titles are re-derived from rendered markdown so two findings can converge on
+    one anchor. Listing it twice would print more lines than ``union - shared``
+    has claims and invite a hand pass to adjudicate the same claim twice.
+
+    First occurrence wins, so the list stays in the order the round published in.
+    """
+    seen: dict[tuple[str, str], str] = {}
+    for claim in claims:
+        if claim.anchor not in matched:
+            seen.setdefault(claim.anchor, claim.title)
+    return tuple(seen.values())
 
 
 def _by_round_file(claims: Iterable[Claim], rounds: set[str]) -> dict[tuple[str, str], list[Claim]]:

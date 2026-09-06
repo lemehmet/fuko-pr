@@ -128,6 +128,24 @@ def test_candidate_pairs_ignore_a_one_sided_surplus():
     assert candidate_pairs(claims, "a", "b") == ()
 
 
+def test_candidate_pairs_list_a_repeated_claim_once():
+    """A round can publish one anchor twice; the figures count it once, so this must too."""
+    claims = [
+        _c("a", "r1", "src/embed.py", "Prefix is added after the budget is allocated"),
+        _c("a", "r1", "src/embed.py", "prefix is added AFTER the budget is allocated"),
+        _c("b", "r1", "src/embed.py", "Prefix is prepended after the budget was spent"),
+    ]
+
+    p = pair_metrics(claims, "a", "b")
+    pairs = candidate_pairs(claims, "a", "b")
+
+    assert (p.shared, p.union) == (0, 2)
+    assert len(pairs) == 1
+    # One anchor, so one line -- and the wording the round published first.
+    assert pairs[0].a_titles == ("Prefix is added after the budget is allocated",)
+    assert pairs[0].b_titles == ("Prefix is prepended after the budget was spent",)
+
+
 def test_candidate_pairs_bucket_files_the_way_the_exact_rule_does():
     """A path differing only by padding is one file to the rule these pairs qualify."""
     claims = [
