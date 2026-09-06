@@ -1052,26 +1052,67 @@ is a failed round, not a false all-clear.
 """
 
 
-def _member_boundaries(body: str) -> list[int]:
-    """Offsets in ``body`` at which its top-level object could be closed off.
+@dataclass(frozen=True)
+class _ObjectScan:
+    """What one string-aware pass over a reviewer's output establishes about it.
 
-    Every position where a member of the outermost object has just finished: the
-    index OF a depth-1 comma, and the index just PAST a bracket that returns the
-    depth to 1 (a document cut immediately after ``"findings": []``, before its
-    comma). Strings are tracked so a brace inside a finding's prose -- code
-    quoted in a ``body``, which the model does constantly -- is not read as
-    structure.
+    ``cuts`` are the offsets at which the outermost object could be closed off:
+    the index OF a depth-1 comma, and the index just PAST a bracket that returns
+    the depth to 1 (a document cut immediately after ``"findings": []``, before
+    its comma). ``end`` is the index just past the brace that returns the depth
+    to 0, or ``None`` when the object never closed. ``rival`` records that a
+    second object opens after that close.
+    """
 
-    The scan is only trustworthy up to the payload's first defect; past it the
-    string state may be inverted (an unescaped ``"`` inside a value flips it),
-    so the caller discards boundaries beyond the decoder's own error offset
-    rather than trusting the tail.
+    cuts: list[int]
+    end: int | None
+    rival: bool
+
+
+def _scan_object(body: str) -> _ObjectScan:
+    """Locate the outermost object in ``body``, which must start at its first ``{``.
+
+    This replaces the ``rfind("}")`` the slice used to be bounded by, and the
+    difference is that where the object ends is now *observed* rather than
+    guessed from the last brace in the message. Guessing failed in both
+    directions and neither failure announced itself (#279): a stream cut inside
+    the first coverage entry ended the slice at a finding's own brace, hiding
+    the ``]`` that closed a complete ``findings`` array and costing the round a
+    verdict it was carrying; and a warm-up object followed by a truncated real
+    review ended the slice at the *stub's* brace, so the stub parsed in one
+    piece and published as a clean round while the verdict sat in the discarded
+    suffix.
+
+    Strings are tracked so a brace inside a finding's prose -- code quoted in a
+    ``body``, which the model does constantly -- is not read as structure. As
+    with any lexical scan the tracking is only trustworthy up to the payload's
+    first defect; past it an unescaped ``"`` inverts the string state, so
+    :func:`_salvage_prefix` discards boundaries beyond the decoder's own error
+    offset rather than trusting the tail. A desync can only make ``end`` land
+    early (on a brace that was really inside a string, leaving a body that stops
+    mid-structure and therefore cannot parse) or never land at all, so it costs
+    a salvage, never a false whole parse.
+
+    Past the close nothing is tracked but the one fact that changes the verdict:
+    ANY ``{``, unconditionally, is treated as a second candidate review. The
+    loose test is deliberate. A tighter one -- demanding the brace be followed
+    by a quoted key -- would spare a round whose closing prose quotes code, but
+    it reopens the hole #273 spent two rounds closing, because a stub whose
+    rival happens to be malformed enough to miss the test publishes as clean.
+    Refusing prose is a failed round; admitting a stub is a false all-clear, and
+    this module has already chosen which of those it will be wrong about (see
+    :data:`SALVAGE_ANCHOR`).
     """
     depth = 0
     in_string = False
     escaped = False
     cuts: list[int] = []
+    end: int | None = None
     for index, char in enumerate(body):
+        if end is not None:
+            if char == "{":
+                return _ObjectScan(cuts, end, rival=True)
+            continue
         if in_string:
             if escaped:
                 escaped = False
@@ -1088,18 +1129,21 @@ def _member_boundaries(body: str) -> list[int]:
             depth -= 1
             if depth == 1:
                 cuts.append(index + 1)
+            elif depth == 0:
+                end = index + 1
         elif char == "," and depth == 1:
             cuts.append(index)
-    return cuts
+    return _ObjectScan(cuts, end, rival=False)
 
 
-def _salvage_prefix(body: str, limit: int) -> tuple[dict, str] | None:
+def _salvage_prefix(body: str, limit: int, cuts: Sequence[int]) -> tuple[dict, str] | None:
     """The largest whole prefix of ``body`` that parses as an object, and what it dropped.
 
-    ``limit`` is the decoder's own failure offset: boundaries past it come from a
-    scan that may already be desynchronised, so they are not considered at all.
-    Candidates are tried newest-first, and the first one that parses is the
-    answer -- an earlier boundary is a prefix of it and carries strictly less.
+    ``cuts`` are :class:`_ObjectScan`'s member boundaries and ``limit`` is the
+    decoder's own failure offset: boundaries past it come from a scan that may
+    already be desynchronised, so they are not considered at all. Candidates are
+    tried newest-first, and the first one that parses is the answer -- an
+    earlier boundary is a prefix of it and carries strictly less.
 
     The discarded remainder is returned alongside because the caller reports a
     loss and must not report one that did not happen: a payload whose only defect
@@ -1110,7 +1154,7 @@ def _salvage_prefix(body: str, limit: int) -> tuple[dict, str] | None:
     which is what keeps "the cut landed after the findings" (publishable) apart
     from "the cut landed before them" (a false clean pass).
     """
-    for cut in reversed([c for c in _member_boundaries(body) if c <= limit]):
+    for cut in reversed([c for c in cuts if c <= limit]):
         try:
             payload = json.loads(body[:cut] + "}")
         except json.JSONDecodeError:
@@ -1155,10 +1199,16 @@ def parse_review(text: str) -> AgenticReview:
     """Parse the agent's final text into an :class:`AgenticReview`.
 
     Tolerates a fenced code block or stray prose around the object (models
-    occasionally disobey "JSON only") by slicing from the first ``{`` to the
-    last ``}`` before parsing. A payload that still cannot yield a findings list
-    raises :class:`ReviewParseError` rather than degrading to "no findings",
-    because silently dropping a review reads as a clean pass downstream.
+    occasionally disobey "JSON only") by slicing from the first ``{`` to where
+    :func:`_scan_object` observes that object close -- so a closing sentence
+    carrying a brace is identified as prose rather than dragged into the body,
+    an unterminated payload is salvaged over all the text it has rather than a
+    prefix some interior brace happened to end, and a message holding two
+    objects is refused instead of silently reduced to whichever one the last
+    brace fell inside (#276, #279). A payload that still cannot yield a findings
+    list raises :class:`ReviewParseError` rather than degrading to "no
+    findings", because silently dropping a review reads as a clean pass
+    downstream.
 
     What is NOT worth a whole round is the state half of the contract.
     ``examined`` is the longest structure in the document and it is where
@@ -1178,10 +1228,21 @@ def parse_review(text: str) -> AgenticReview:
     the review proper -- then the round is discarded anyway and the reader gets
     the runbook :func:`_hollow_examined_runbook` builds.
     """
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end <= start:
+    start = text.find("{")
+    if start == -1:
         raise ReviewParseError(f"no JSON object in reviewer output: {text[:200]!r}")
-    body = text[start : end + 1]
+    scan = _scan_object(text[start:])
+    if scan.rival:
+        # Two objects, established lexically -- which is the whole reason to do
+        # it here rather than by decoding: the second candidate is damaged in
+        # exactly the case that matters (a stream cut mid-review after a warm-up
+        # stub), so a check that has to parse it in order to see it cannot see
+        # it at all. That was the hole the reverted `raw_decode` guard left.
+        raise ReviewParseError(f"two candidate reviews in reviewer output: {text[:200]!r}")
+    # A body with no close is a truncated payload, not an absent one: the
+    # salvage gets every boundary the text holds instead of a prefix ending at
+    # whatever interior brace `rfind` used to land on (#279).
+    body = text[start : start + scan.end] if scan.end is not None else text[start:]
     degraded = ""
     try:
         payload = json.loads(body)
@@ -1197,7 +1258,7 @@ def parse_review(text: str) -> AgenticReview:
         # same input; what it does not do is call it whole. Nothing that failed
         # to parse in one piece publishes as `done`, and that is now true by
         # construction rather than by a guard.
-        salvaged = _salvage_prefix(body, e.pos)
+        salvaged = _salvage_prefix(body, e.pos, scan.cuts)
         if salvaged is None:
             raise ReviewParseError(f"malformed reviewer output: {e}") from e
         payload, dropped = salvaged
