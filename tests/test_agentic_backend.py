@@ -2462,6 +2462,56 @@ def test_hollow_examined_runbook_survives_the_receipt(monkeypatch, capsys):
     assert log and all(ln.startswith("fuko: claude-x ") for ln in log), log
 
 
+def test_a_salvaged_round_publishes_its_findings_and_reports_the_loss(monkeypatch, capsys):
+    """#255: a partial review a human can read beats a receipt saying one existed.
+
+    The round is `returncode 0` with its findings intact -- they publish exactly
+    as a whole round's do -- but it must not read as a clean pass anywhere a
+    human or a merge gate looks. It rides the CHANNEL seam that already exists
+    for a half-dead branch (#108), so `fuko status` reports `degraded` and the
+    branch header prints "reduced coverage" with no consumer taught a new key.
+    """
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    payload = {
+        "summary": "s",
+        "findings": [{"file": "a.py", "line": 1, "title": "a real finding", "body": "b"}],
+        "examined": [{"file": "hollow.py", "checked": "c", "evidence": "e"}],
+    }
+    result, _ = _invoke(monkeypatch, backend, HarnessResult(0, json.dumps(payload)), env=None)
+    err = capsys.readouterr().err
+
+    assert result.returncode == 0, result.detail
+    assert result.channels == {
+        agentic_mod._CHANNEL: "degraded: coverage ledger lost: examined[0] missing conclusion"
+    }
+    assert result.detail == "1 findings (coverage ledger lost: examined[0] missing conclusion)"
+    assert "\n" not in result.detail
+    # The discarded bytes are the only evidence of what damaged the payload, and
+    # this is the one path where they still exist in the process -- so they get
+    # the same prefixed dump a parse failure gets (#255, ask 2).
+    assert "salvaged (harness exit 0)" in err
+    assert "hollow.py" in err, "the dropped entry has to be diagnosable from the log"
+    assert [ln for ln in err.splitlines() if "published as degraded" in ln] == [
+        "fuko: claude-x review published as degraded: coverage ledger lost: "
+        "examined[0] missing conclusion"
+    ]
+
+
+def test_a_whole_round_still_reports_done_on_its_channel(monkeypatch):
+    """The degraded seam must not fire on a payload with nothing wrong with it."""
+    monkeypatch.setenv("QWEN_TOKEN_PLAN_KEY", "sk-sp-test")
+    backend = AgenticBackend(ReviewConfig(tool_timeout=5))
+    payload = {
+        "findings": [{"file": "a.py", "line": 1, "title": "t", "body": "b"}],
+        "examined": [{"file": "ok.py", "checked": "c", "conclusion": "x", "evidence": "e"}],
+    }
+    result, _ = _invoke(monkeypatch, backend, HarnessResult(0, json.dumps(payload)), env=None)
+
+    assert result.channels == {agentic_mod._CHANNEL: "done"}
+    assert result.detail == "1 findings"
+
+
 def test_auth_failure_detail_is_flattened_and_verdict_led(monkeypatch):
     """The auth path kept the column-0 vector open after the others were closed.
 
@@ -2638,8 +2688,11 @@ def test_invoke_constructs_no_failure_result_by_hand():
         f"invoke() builds {constructions} InvokeResults; only the success return "
         "may be hand-built — route failures through _failure_result"
     )
-    # And the surviving one is the success path.
-    assert 'channels={_CHANNEL: "done"}' in src
+    # And the surviving one is the success path. Its channel value is now a
+    # conditional -- `done`, or the degraded reason when the round was salvaged
+    # (#255) -- so the assertion pins the branch that must still say `done`
+    # rather than the whole expression.
+    assert "returncode=0" in src and 'else "done"}' in src
 
 
 def test_build_env_says_nothing_unless_the_findings_ledger_is_switched_off(monkeypatch):

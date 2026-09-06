@@ -1,0 +1,20 @@
+{
+  "summary": "A clippy-backlog drain plus a CI step, and both halves check out against the checkout. Every behavioral rewrite in the diff is semantics- and type-preserving (I verified each against the underlying constant types, struct definitions, and collection types rather than trusting the autofix), the workflow's clippy/test flags match package.json's `native:lint`/`native:test` verbatim, the `components: clippy` addition is genuinely required for the dtolnay action, and the grep evidence supports the PR's premise that no lane ran clippy before. The README's new claims (flags, paths-filter markdown exclusion, fmt not enforced) all match the workflow and package.json. I found nothing material to report; the only things I could not verify offline are the exit-0 and 520-hunk counts, which require running cargo.",
+  "findings": [],
+  "examined": [
+    {
+      "file": ".github/workflows/native-pr-test.yml",
+      "region": "whole file",
+      "checked": "Step order (checkout → toolchain → cache → clippy → test), the clippy `run:` flags vs package.json, the `if: ${{ !cancelled() }}` placement (test step only), the `components: clippy` input, the `paths` filter's `!packages/stream-relay-native/**/*.md` exclusion the README cites, and that the fork guard/concurrency/check name are unchanged.",
+      "conclusion": "The clippy step's flags are byte-identical to package.json `native:lint`, `components: clippy` is a new required input for dtolnay/rust-toolchain (which installs no components by default), and a failed clippy step still fails the job even though the test step runs. The README's markdown-exclusion claim matches the actual filter.",
+      "evidence": ".github/workflows/native-pr-test.yml:34-105; packages/stream-relay-native/package.json:25-28"
+    },
+    {
+      "file": "packages/stream-relay-native/src/backend/decklink/capture.rs",
+      "region": "L6598-6601; CALL_LOG L5307",
+      "checked": "CALL_LOG's element type (`&'static str`) against the new `order.contains(&\"StopStreams\")` argument type.",
+      "conclusion": "`Vec<&'static str>::contains(&"StopStreams")` type-checks and compares by string content — equivalent to the `iter().any(|c| *c == ...)` it replaces.",
+      "evidence": "capture.rs:5307, 6595-6601"
+    }
+  ]
+}

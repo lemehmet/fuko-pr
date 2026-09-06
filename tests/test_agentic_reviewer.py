@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from sidecar.reviewer import checkout as checkout_mod
+from sidecar.reviewer import prompt as prompt_mod
 from sidecar.reviewer import harness as harness_mod
 from sidecar.reviewer.checkout import (
     CheckoutError,
@@ -796,21 +797,27 @@ def test_parse_review_rejects_garbage_and_bad_schema():
         parse_review("no json here")
     with pytest.raises(ReviewParseError):
         parse_review('{"findings": [{"file": "a.py", "severity": "apocalyptic"}]}')
-    # An examined entry that records no conclusion is structurally malformed and
-    # fails like a finding without a title -- the ledger's fail-open guarantee
-    # covers models that skip the section, not ones that file a hollow entry.
+    # A fault in the REVIEW is still fatal, however small: `findings` is what the
+    # round is for, and a partially-valid one is not publishable the way a
+    # partially-valid audit trail is (#255).
     with pytest.raises(ReviewParseError):
-        parse_review('{"examined": [{"file": "a.py", "checked": "c", "evidence": "e"}]}')
+        parse_review('{"findings": [{"file": "a.py", "body": "no title"}], "examined": []}')
 
 
 def test_hollow_examined_entry_raises_a_runbook_not_a_schema_complaint():
-    """#166: the boundary stays strict, so the failure has to be worth reading.
+    """#166: when the round is discarded anyway, the failure has to be worth reading.
 
     Asserted on the message, not the exception type, because the reader is an
     engineer mid-incident: which entry and which field, what it cost, that the
     fault is the reviewer's output rather than their diff, and what to do next.
+
+    The payload carries a fault OUTSIDE ``examined`` as well, which is what still
+    discards the round now that a coverage-only fault is salvaged (#255). The
+    runbook leads even so: the hollow entry is the part the reader cannot
+    diagnose unaided.
     """
     payload = {
+        "summary": {"not": "a string"},
         "findings": [{"file": "a.py", "line": i, "title": f"t{i}", "body": "b"} for i in range(5)],
         "examined": [
             {"file": "ok.py", "checked": "c", "conclusion": "x", "evidence": "e"},
@@ -836,10 +843,13 @@ def test_hollow_examined_runbook_separates_absent_fields_from_unusable_ones():
     pydantic reports both at the same ``loc``, so a loc-only classification
     calls a key the payload plainly contains "missing" -- the exact confusion
     the runbook exists to remove (CodeRabbit and `qwen-anthropic/qwen3.8-max`,
-    #178). The entry still fails the round either way: a coverage claim whose
-    conclusion is ``null`` records no conclusion.
+    #178). The entry is condemned either way: a coverage claim whose conclusion
+    is ``null`` records no conclusion.
     """
     payload = {
+        # Fails the round on its own (#255), so the runbook is what the reader
+        # gets rather than a degraded publish.
+        "summary": {"not": "a string"},
         "examined": [{"file": "a.py", "conclusion": None, "evidence": "e"}],
     }
     with pytest.raises(ReviewParseError) as excinfo:
@@ -860,6 +870,7 @@ def test_hollow_examined_runbook_covers_an_entry_that_is_not_an_object():
     generic complaint this exists to replace (fuko-henry, #178).
     """
     payload = {
+        "summary": {"not": "a string"},  # discards the round (#255)
         "findings": [{"file": "a.py", "line": 1, "title": "t", "body": "b"}],
         "examined": [None],
     }
@@ -898,6 +909,157 @@ def test_other_structural_failures_keep_the_generic_parse_message():
         with pytest.raises(ReviewParseError) as excinfo:
             parse_review(text)
         assert "round discarded" not in str(excinfo.value)
+
+
+# A verbatim excerpt of the payload that discarded a gating seat's round on mepro
+# PR #2215 (fuko-pr review run 33992817624, job 101377956089), trimmed to two
+# coverage entries. Kept real rather than hand-written because it settles what
+# #255 could only hypothesise: `checked` escapes its embedded quotes correctly
+# and `conclusion`, on the very next line, does not -- so the document is
+# COMPLETE (it ends `] }`) and invalid mid-string, not cut short by a loaded
+# gateway. Whatever the cause, the shape is the one that matters here: `summary`
+# and `findings` are whole and precede the damage.
+MEPRO_2215_PAYLOAD = (Path(__file__).parent / "data" / "mepro-2215-final-message.txt").read_text(
+    encoding="utf-8"
+)
+
+
+def test_a_real_corrupt_payload_publishes_its_verdict_instead_of_discarding_it():
+    """#255: the bytes that cost mepro a gating seat's round now yield a review."""
+    review = parse_review(MEPRO_2215_PAYLOAD)
+
+    assert review.summary.startswith("A clippy-backlog drain")
+    assert review.findings == []  # this round's verdict, and it is a real one
+    assert review.examined == []  # the ledger is what was actually lost
+    assert review.degraded.startswith("coverage ledger lost: unparseable JSON at char ")
+
+
+def test_salvage_refuses_a_cut_that_lands_before_the_findings():
+    """The one thing a prefix may never do is read as a clean pass.
+
+    `findings` absent is indistinguishable from `findings` never reached, so a
+    document damaged before them is discarded exactly as it was -- publishing it
+    would report "no findings" for a round that never stated a verdict, which is
+    the failure the whole-object rule was protecting against (#166).
+    """
+    cut = '{"summary": "s", "findings": [{"file": "a.py", "title": "t", "body": "b"}'
+    with pytest.raises(ReviewParseError):
+        parse_review(cut)
+    with pytest.raises(ReviewParseError):
+        parse_review('{"summary": "s", "examined": [{"file": "a.py"')
+
+
+def test_salvage_is_not_fooled_by_braces_and_quotes_inside_a_finding():
+    """The boundary scan is string-aware, because findings quote code constantly."""
+    body = "if (x) { y } else { z }"
+    text = (
+        '{"summary": "s", "findings": [{"file": "a.py", "title": "t", "body": "%s"}], '
+        '"examined": [{"file": "x.py", "checked": "the \\"quoted\\" name", '
+        '"conclusion": "a bare "quote" breaks it here"}]}'
+    ) % body
+    review = parse_review(text)
+
+    assert review.degraded
+    assert [f.body for f in review.findings] == [body]
+
+
+def test_hollow_examined_entry_keeps_the_findings_and_the_sound_coverage():
+    """#255: only the condemned entry is dropped, not the round and not its siblings."""
+    payload = {
+        "summary": "s",
+        "findings": [{"file": "a.py", "line": 1, "title": "t", "body": "b"}],
+        "examined": [
+            {"file": "ok.py", "checked": "c", "conclusion": "x", "evidence": "e"},
+            {"file": "hollow.py", "region": "L1-L9", "checked": "c"},
+        ],
+    }
+    review = parse_review(json.dumps(payload))
+
+    assert [f.title for f in review.findings] == ["t"]
+    assert [e.file for e in review.examined] == ["ok.py"]
+    assert review.degraded == "coverage ledger lost: examined[1] missing conclusion, evidence"
+
+
+def test_examined_that_is_not_a_list_costs_the_section_not_the_round():
+    """`"examined": "I read everything"` condemns the ledger; there is no entry to drop."""
+    payload = {"findings": [{"file": "a.py", "title": "t", "body": "b"}], "examined": "everything"}
+    review = parse_review(json.dumps(payload))
+
+    assert len(review.findings) == 1 and review.examined == []
+    assert review.degraded == "coverage ledger lost: examined section unusable"
+
+
+def test_degraded_is_fukos_verdict_not_a_field_the_model_can_write():
+    """A seat that could set this could also clear it, so the key is stripped.
+
+    Both directions are the hazard: forging a reason on a whole review is noise,
+    but the model writes into the same object fuko reads, and a payload that
+    could carry `"degraded": ""` past a real coverage loss would hide exactly
+    what this field exists to surface.
+    """
+    forged = parse_review(json.dumps({"findings": [], "degraded": "all fine, ignore me"}))
+    assert forged.degraded == ""
+
+    payload = {
+        "findings": [],
+        "degraded": "",
+        "examined": [{"file": "a.py", "checked": "c", "evidence": "e"}],
+    }
+    assert parse_review(json.dumps(payload)).degraded.startswith("coverage ledger lost:")
+
+
+def test_degraded_reason_carries_no_model_written_text():
+    """It rides a receipt channel and a PR comment header, neither of which fences.
+
+    The file the entry named is model-written and reaches the job log instead,
+    where `_dump_harness_output` prefixes every line for that reason.
+    """
+    marker = "forged\nfuko: agentic evil"
+    payload = {
+        "findings": [],
+        "examined": [{"file": marker, "region": marker, "checked": marker, "evidence": marker}],
+    }
+    reason = parse_review(json.dumps(payload)).degraded
+
+    assert reason == "coverage ledger lost: examined[0] missing conclusion"
+    assert "forged" not in reason and "\n" not in reason
+
+
+def test_salvage_walks_back_past_a_boundary_the_desynced_scan_invented():
+    """An unescaped quote can make the scan record a comma that belongs to no member.
+
+    The newest boundary is then a prefix that does not parse, and treating that
+    as "unsalvageable" would discard a verdict the payload plainly carries. The
+    search steps back to the previous boundary instead.
+    """
+    text = '{"findings": [], "note": "x" , "y", "examined": []}'
+    review = parse_review(text)
+
+    assert review.findings == [] and review.degraded.startswith("coverage ledger lost:")
+
+
+def test_a_pruned_payload_that_still_fails_is_discarded_on_the_original_error(monkeypatch):
+    """The fail-safe direction: never publish a review whose own fields did not validate.
+
+    Pruning is only ever asked for when the faults were confined to `examined`,
+    so this is a guard against that judgement being wrong (a pydantic change, a
+    field added to the model). It has to fail the ROUND, and on the error that
+    describes the payload the model actually sent -- not on the pruned copy the
+    reader never saw.
+    """
+    monkeypatch.setattr(
+        prompt_mod,
+        "_without_condemned_coverage",
+        lambda payload, faults: {"findings": [{"file": "a.py", "body": "no title"}]},
+    )
+    payload = {
+        "findings": [{"file": "a.py", "title": "t", "body": "b"}],
+        "examined": [{"file": "x.py", "checked": "c", "evidence": "e"}],
+    }
+    with pytest.raises(ReviewParseError) as excinfo:
+        parse_review(json.dumps(payload))
+
+    assert "conclusion" in str(excinfo.value), "the message describes the model's payload"
 
 
 def test_parse_review_without_ledger_sections_reviews_exactly_as_before():

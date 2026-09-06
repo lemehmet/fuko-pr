@@ -1323,6 +1323,22 @@ class AgenticBackend:
                 transcript=transcript_index,
             )
 
+        if review.degraded:
+            # A SALVAGED round: the findings below are real and publish normally,
+            # but part of the payload was dropped to get them. Dumped like a
+            # parse failure and for the same reason -- the discarded bytes are
+            # the only evidence of what cut the payload short, and this is the
+            # one path where they still exist in the process (#255).
+            _dump_harness_output(
+                model_name, "salvaged (harness exit 0)", result.stderr, result.text
+            )
+            with _DUMP_LOCK:
+                sys.stderr.write(
+                    f"fuko: {model_name} review published as degraded: "
+                    f"{_flatten_for_log(review.degraded)}\n"
+                )
+                sys.stderr.flush()
+
         # Case/whitespace-normalized: `confidence` is deliberately a free-form
         # str so an off-vocabulary value degrades to filtering rather than
         # failing the parse, but that only works if the comparison meets the
@@ -1429,10 +1445,17 @@ class AgenticBackend:
         # map that `fuko_states` cannot tell from a dead channel (#113). This is the
         # one path where the difference bites: a receipt finalized `done` with no
         # channels reads as a clean pass even if the channel had in fact failed.
+        #
+        # A salvaged round rides the SAME seam rather than a new field: any channel
+        # value other than `done` is already what `fuko status` reads as `degraded`
+        # and what the branch header prints as "reduced coverage", so a partial
+        # round is visible to every existing consumer without one of them being
+        # taught a new key (#255). The value is safe to interpolate into both
+        # because `_coverage_loss` puts no model-written text in it.
         return InvokeResult(
             returncode=0,
-            detail=f"{len(kept)} findings",
-            channels={_CHANNEL: "done"},
+            detail=f"{len(kept)} findings" + (f" ({review.degraded})" if review.degraded else ""),
+            channels={_CHANNEL: f"degraded: {review.degraded}" if review.degraded else "done"},
             transcript=transcript_index,
             **_run_costs(result),
         )

@@ -178,13 +178,16 @@ class ExaminedRegion(BaseModel):
     advisory -- it is read by a model, not queried by code -- so an imprecise
     ``region`` costs targeting quality, never a parse failure.
 
-    Omitting a required field is a different thing and still fails the review
-    loudly, exactly as a finding without a ``title`` does: the fail-open
-    guarantee is for a model that leaves ``examined`` out altogether, not for
-    one that files an entry recording no conclusion. Loudly, but not opaquely --
-    the price of that boundary is paid by whoever reads the failed round, so
-    :func:`_hollow_examined_runbook` makes the message name the entry, the cost,
-    and the fact that the fault is the reviewer's rather than the diff's (#166).
+    Omitting a required field is a different thing and still costs the entry: a
+    coverage claim recording no conclusion is the unfalsifiable record this
+    ledger must not carry, so it is dropped rather than stored. What it no
+    longer costs is the ROUND. :func:`parse_review` drops the hollow entries and
+    publishes the findings under a ``degraded`` reason, because a partial review
+    a human can read beats a receipt saying one existed -- on mepro the round
+    discarded for this had found a real defect three clean rounds missed (#255).
+    The boundary's other half stands: the drop is reported on the round, never
+    silent, and a fault outside ``examined`` still fails the whole review with
+    the runbook :func:`_hollow_examined_runbook` builds (#166).
     """
 
     file: str = Field(
@@ -284,6 +287,16 @@ class AgenticReview(BaseModel):
     examined: list[ExaminedRegion] = Field(default_factory=list)
     prior_status: list[PriorFindingStatus] = Field(default_factory=list)
     summary: str = ""
+    degraded: str = Field(
+        default="",
+        description=(
+            "Empty on a whole review; otherwise why this one is PARTIAL -- what "
+            "was dropped to publish the rest. Fuko's own verdict on the payload, "
+            "never the model's: :func:`parse_review` strips any value the model "
+            "supplied before validating, so a seat cannot label its own round "
+            "degraded (nor, more to the point, label a degraded one clean)."
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -802,11 +815,11 @@ EXAMINED_REQUIRED_FIELDS = ("file", "checked", "conclusion", "evidence")
 """The fields that make a coverage entry retraceable and invalidatable, not a verdict.
 
 Public because the same set is load-bearing at two ends of the ledger and must
-not drift apart: :func:`_hollow_examined_runbook` fails a ROUND whose entry omits
-one (#166), and :func:`sidecar.reviewer.ledger.carry_in` drops an ENTRY whose
-stored value is blank before it can reach a later prompt (#157). The schema can
-only require the keys -- ``""`` satisfies a required ``str`` -- so the emptiness
-half of the same rule is enforced on the way out of the store.
+not drift apart: :func:`parse_review` drops an ENTRY that omits one and degrades
+the round for it (#166, #255), and :func:`sidecar.reviewer.ledger.carry_in` drops
+an ENTRY whose stored value is blank before it can reach a later prompt (#157).
+The schema can only require the keys -- ``""`` satisfies a required ``str`` -- so
+the emptiness half of the same rule is enforced on the way out of the store.
 
 ``file`` belongs here for a reason the other three do not share, and it is the
 one that makes a blank value dangerous rather than merely useless: it is the key
@@ -853,52 +866,106 @@ def _clip(value: object, limit: int) -> str:
     return text if len(text) <= limit else text[: max(limit - 3, 0)] + "..."
 
 
-def _hollow_examined_runbook(exc: ValidationError, payload: object) -> str | None:
-    """Turn a hollow-``examined`` rejection into something actionable, or return None.
+@dataclass(frozen=True)
+class _ExaminedFaults:
+    """Which ``examined`` entries a validation failure condemns, and what else broke.
 
-    The boundary this reports on is deliberate (#166): a coverage claim with no
-    conclusion and no evidence is the unfalsifiable record the ledger exists not
-    to carry, so it fails the whole round rather than being quietly dropped. But
-    the reader of that failure is an engineer mid-incident with no context on
-    fuko's internals, and `1 validation error for AgenticReview` tells them
-    nothing -- worst of all, it does not tell them the fault is in the
-    *reviewer's* output rather than in their own change, which is the difference
-    between merging and hunting a phantom bug.
+    ``hollow`` maps an entry's index to ``{field: was_absent}`` for each required
+    field it failed on -- absent (``missing``) and present-but-unusable
+    (``invalid``) are named apart because pydantic reports both at the same
+    ``loc`` and telling a reader a present key is missing sends them looking for
+    something the dumped payload plainly contains (CodeRabbit and
+    ``qwen-anthropic/qwen3.8-max``, #178).
 
-    A required field supplied as ``null`` (or as any other non-string) is the
-    same hollow coverage claim as an omitted one and routes here too, but
-    pydantic reports it at the identical ``loc`` with a different ``type``, so
-    the two are named apart -- ``missing`` for an absent key, ``invalid`` for a
-    present but unusable value. Calling a present key missing would send the
-    reader looking for something the dumped payload beside it plainly contains
-    (CodeRabbit and `qwen-anthropic/qwen3.8-max`, #178).
-
-    Returns ``None`` when no error names one of the three required
-    ``ExaminedRegion`` fields, so every other structural failure keeps the
-    generic message unchanged.
+    ``whole`` is set when ``examined`` is not a list at all, which condemns the
+    section rather than any entry in it. ``others`` counts errors OUTSIDE
+    ``examined``: it is what separates a round that can be salvaged from one that
+    cannot, since a fault in ``findings`` or ``prior_status`` is a fault in the
+    review itself and not in its advisory audit trail.
     """
+
+    hollow: dict[int, dict[str, bool]] = field(default_factory=dict)
+    whole: bool = False
+    others: int = 0
+
+    @property
+    def salvageable(self) -> bool:
+        """Whether dropping the condemned coverage leaves a review worth publishing."""
+        return not self.others and (self.whole or bool(self.hollow))
+
+
+def _examined_faults(exc: ValidationError) -> _ExaminedFaults:
+    """Sort a validation failure's errors into coverage faults and everything else."""
     hollow: dict[int, dict[str, bool]] = {}
+    whole = False
     others = 0
     for err in exc.errors():
         loc = err.get("loc", ())
-        entry_loc = len(loc) >= 2 and loc[0] == "examined" and isinstance(loc[1], int)
-        if entry_loc and len(loc) >= 3 and loc[2] in EXAMINED_REQUIRED_FIELDS:
+        in_examined = bool(loc) and loc[0] == "examined"
+        entry_loc = in_examined and len(loc) >= 2 and isinstance(loc[1], int)
+        if entry_loc and len(loc) >= 3:
+            # Off-vocabulary keys land here too (a mistyped `region`), and they
+            # are recorded against the entry exactly like a missing `conclusion`:
+            # every field of a coverage entry is advisory, so any fault in one
+            # costs the entry and nothing more. Only the REQUIRED fields are
+            # named in the message, which is what the runbook is for.
             hollow.setdefault(loc[1], {})[str(loc[2])] = err.get("type") == "missing"
-        elif entry_loc and len(loc) == 2:
+        elif entry_loc:
             # The entry is not an object at all (`"examined": [null]`), which
             # pydantic rejects at the ENTRY's loc rather than at any field's.
             # That is the most hollow shape there is -- it records nothing --
             # so it gets the runbook rather than the generic complaint the
             # short loc would otherwise drop it into (fuko-henry, #178).
             hollow.setdefault(loc[1], {}).update(dict.fromkeys(EXAMINED_REQUIRED_FIELDS, False))
+        elif in_examined:
+            # `"examined": "I looked at everything"` -- no entry to drop, so the
+            # whole section goes.
+            whole = True
         else:
             others += 1
+    return _ExaminedFaults(hollow=hollow, whole=whole, others=others)
+
+
+def _without_condemned_coverage(payload: object, faults: _ExaminedFaults) -> dict | None:
+    """A copy of ``payload`` with the condemned ``examined`` entries removed, or None.
+
+    ``None`` whenever the payload is not a mapping or the faults are not confined
+    to ``examined`` -- the caller must fail the round in both cases rather than
+    publish a review whose own findings did not validate.
+    """
+    if not isinstance(payload, Mapping) or not faults.salvageable:
+        return None
+    pruned = dict(payload)
+    entries = pruned.get("examined")
+    if faults.whole or not isinstance(entries, list):
+        pruned["examined"] = []
+    else:
+        pruned["examined"] = [e for i, e in enumerate(entries) if i not in faults.hollow]
+    return pruned
+
+
+def _hollow_examined_runbook(faults: _ExaminedFaults, payload: object) -> str | None:
+    """Turn a hollow-``examined`` rejection into something actionable, or return None.
+
+    Reached only when the round is discarded anyway -- a coverage fault ALONGSIDE
+    a fault in the review proper (:attr:`_ExaminedFaults.others`), since a
+    coverage fault on its own is now salvaged rather than fatal (#255). The
+    reader of that failure is an engineer mid-incident with no context on fuko's
+    internals, and `1 validation error for AgenticReview` tells them nothing --
+    worst of all, it does not tell them the fault is in the *reviewer's* output
+    rather than in their own change, which is the difference between merging and
+    hunting a phantom bug.
+
+    Returns ``None`` when no error names an ``examined`` entry, so every other
+    structural failure keeps the generic message unchanged.
+    """
+    hollow, others = faults.hollow, faults.others
     if not hollow:
         return None
 
     index = min(hollow)
     fields = hollow[index]
-    faults = "; ".join(
+    faulty = "; ".join(
         f"{verb} {', '.join(names)}"
         for verb, names in (
             ("missing", [f for f in EXAMINED_REQUIRED_FIELDS if fields.get(f)]),
@@ -924,10 +991,112 @@ def _hollow_examined_runbook(exc: ValidationError, payload: object) -> str | Non
         tails.append(f"+{others} other")
     extra = f" ({', '.join(tails)})" if tails else ""
     locator = _clip(
-        f"examined[{index}] ({where or 'no file recorded'}) {faults}{extra}",
+        f"examined[{index}] ({where or 'no file recorded'}) {faulty}{extra}",
         _LOCATOR_BUDGET,
     )
     return _RUNBOOK.format(locator=locator, lost=_clip(lost, _COUNT_BUDGET))
+
+
+SALVAGE_ANCHOR = "findings"
+"""The key a salvaged prefix must carry before it may be published as a review.
+
+The whole hazard of publishing a prefix is that a document cut BEFORE its
+findings parses into a review with none -- which reads downstream as a clean
+pass, the one wrong answer. ``findings`` absent is indistinguishable from
+``findings`` never reached, so absence is refused rather than defaulted: a model
+that legitimately emits no findings still emits the key (the contract asks for
+it, and every observed payload has it), and the cost of being wrong about that
+is a failed round, not a false all-clear.
+"""
+
+
+def _member_boundaries(body: str) -> list[int]:
+    """Offsets in ``body`` at which its top-level object could be closed off.
+
+    Every position where a member of the outermost object has just finished: the
+    index OF a depth-1 comma, and the index just PAST a bracket that returns the
+    depth to 1 (a document cut immediately after ``"findings": []``, before its
+    comma). Strings are tracked so a brace inside a finding's prose -- code
+    quoted in a ``body``, which the model does constantly -- is not read as
+    structure.
+
+    The scan is only trustworthy up to the payload's first defect; past it the
+    string state may be inverted (an unescaped ``"`` inside a value flips it),
+    so the caller discards boundaries beyond the decoder's own error offset
+    rather than trusting the tail.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    cuts: list[int] = []
+    for index, char in enumerate(body):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            depth += 1
+        elif char in "}]":
+            depth -= 1
+            if depth == 1:
+                cuts.append(index + 1)
+        elif char == "," and depth == 1:
+            cuts.append(index)
+    return cuts
+
+
+def _salvage_prefix(body: str, limit: int) -> dict | None:
+    """The largest whole prefix of ``body`` that parses as an object, or None.
+
+    ``limit`` is the decoder's own failure offset: boundaries past it come from a
+    scan that may already be desynchronised, so they are not considered at all.
+    Candidates are tried newest-first, and the first one that parses is the
+    answer -- an earlier boundary is a prefix of it and carries strictly less.
+
+    Returns ``None`` unless the recovered object carries :data:`SALVAGE_ANCHOR`,
+    which is what keeps "the cut landed after the findings" (publishable) apart
+    from "the cut landed before them" (a false clean pass).
+    """
+    for cut in reversed([c for c in _member_boundaries(body) if c <= limit]):
+        try:
+            payload = json.loads(body[:cut] + "}")
+        except json.JSONDecodeError:
+            # A boundary the scan recorded before the decoder's own failure can
+            # still be unusable -- an unescaped quote desynchronises the string
+            # state, and the comma it then "sees" belongs to no member. Try the
+            # next one down rather than concluding the payload is unsalvageable.
+            continue
+        # `body` starts at the payload's first `{`, so anything that parses here
+        # is an object; the only question left is whether it reached the verdict.
+        # No earlier candidate can carry a key this one lacks -- they are its own
+        # prefixes -- so a first success without findings ends the search.
+        return payload if isinstance(payload.get(SALVAGE_ANCHOR), list) else None
+    return None
+
+
+def _coverage_loss(faults: _ExaminedFaults) -> str:
+    """Name the dropped coverage for the round's ``degraded`` reason.
+
+    Deliberately carries NO model-written text: this string reaches a run
+    receipt's channel value and a PR comment header, both of which are read by
+    humans deciding whether to merge and neither of which fences its content.
+    Everything in it is fuko's own -- an index, this module's field names, a
+    count -- so the file the entry named is left to the harness dump, which is
+    prefixed line-by-line precisely because it carries model text.
+    """
+    if faults.whole or not faults.hollow:
+        return "coverage ledger lost: examined section unusable"
+    index = min(faults.hollow)
+    named = [f for f in EXAMINED_REQUIRED_FIELDS if f in faults.hollow[index]]
+    what = f"missing {', '.join(named)}" if named else "unusable"
+    more = f", +{len(faults.hollow) - 1} more" if len(faults.hollow) > 1 else ""
+    return f"coverage ledger lost: examined[{index}] {what}{more}"
 
 
 def parse_review(text: str) -> AgenticReview:
@@ -935,32 +1104,61 @@ def parse_review(text: str) -> AgenticReview:
 
     Tolerates a fenced code block or stray prose around the object (models
     occasionally disobey "JSON only") by slicing from the first ``{`` to the
-    last ``}`` before parsing -- but a payload that still fails to parse raises
-    :class:`ReviewParseError` rather than degrading to "no findings", because
-    silently dropping a review reads as a clean pass downstream.
+    last ``}`` before parsing. A payload that still cannot yield a findings list
+    raises :class:`ReviewParseError` rather than degrading to "no findings",
+    because silently dropping a review reads as a clean pass downstream.
 
-    The same argument now covers the ledger sections, one step removed:
-    dropping ``examined`` reads downstream as a round that explored nothing, so
-    the next round is aimed no better than an unstated one -- a coverage loss
-    rather than a false clean pass, but a silent one either way. Hence the
-    slicing stays whole-object: the ledger travels or fails with the review it
-    was produced by, never half-parsed out of it.
+    What is NOT worth a whole round is the ledger. ``examined`` is the last and
+    longest structure in the document and it is where observed payloads break --
+    mid-string at ~8 kB in, or a hollow entry with no conclusion -- while
+    ``summary`` and ``findings`` precede it and are complete. Discarding those to
+    protect an advisory audit trail cost mepro a real defect that three clean
+    rounds had missed (#255), so a fault confined to ``examined`` now drops the
+    condemned coverage and publishes the rest with a ``degraded`` reason.
 
-    The one failure that gets more than a schema complaint is a hollow
-    ``examined`` entry: it is the shape whose cost (a whole round of findings)
-    is most out of proportion to its cause, so it raises the runbook
-    :func:`_hollow_examined_runbook` builds instead (#166).
+    The silent-loss objection that argued for whole-object parsing (#166) is
+    answered by reporting rather than by discarding: the round says what it lost,
+    the backend puts that on the receipt's channel, and ``fuko status`` reads it
+    as ``degraded`` rather than ``done``. What still fails whole is a fault in
+    the review proper -- then the round is discarded anyway and the reader gets
+    the runbook :func:`_hollow_examined_runbook` builds.
     """
     start, end = text.find("{"), text.rfind("}")
     if start == -1 or end <= start:
         raise ReviewParseError(f"no JSON object in reviewer output: {text[:200]!r}")
+    body = text[start : end + 1]
+    degraded = ""
     try:
-        payload = json.loads(text[start : end + 1])
+        payload = json.loads(body)
     except json.JSONDecodeError as e:
-        raise ReviewParseError(f"malformed reviewer output: {e}") from e
+        payload = _salvage_prefix(body, e.pos)
+        if payload is None:
+            raise ReviewParseError(f"malformed reviewer output: {e}") from e
+        degraded = f"coverage ledger lost: unparseable JSON at char {e.pos}"
+    if isinstance(payload, dict):
+        # Fuko's verdict on the payload, so it may not be READ from the payload:
+        # the model writes into this object and a seat that could set its own
+        # `degraded` could also clear it. Stripped before validation rather than
+        # ignored after, so there is exactly one place the field is ever set.
+        payload.pop("degraded", None)
     try:
-        return AgenticReview.model_validate(payload)
+        review = AgenticReview.model_validate(payload)
     except ValidationError as e:
-        raise ReviewParseError(
-            _hollow_examined_runbook(e, payload) or f"malformed reviewer output: {e}"
-        ) from e
+        faults = _examined_faults(e)
+        pruned = _without_condemned_coverage(payload, faults)
+        if pruned is None:
+            raise ReviewParseError(
+                _hollow_examined_runbook(faults, payload) or f"malformed reviewer output: {e}"
+            ) from e
+        try:
+            review = AgenticReview.model_validate(pruned)
+        except ValidationError:
+            # The coverage faults were not the only ones after all (pydantic
+            # reports a bounded set). Fail on the ORIGINAL error, which is the
+            # one describing the payload the model actually sent.
+            raise ReviewParseError(f"malformed reviewer output: {e}") from e
+        # Joined, not replaced: a payload can lose its tail to a bad byte AND
+        # file a hollow entry before it, and a reason that named only the second
+        # would understate what the round dropped.
+        degraded = "; ".join(part for part in (degraded, _coverage_loss(faults)) if part)
+    return review.model_copy(update={"degraded": degraded}) if degraded else review
