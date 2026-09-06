@@ -1,3 +1,3 @@
 """fuko-pr: a thin RAG knowledge sidecar for PR-Agent."""
 
-__version__ = "0.7.4"
+__version__ = "0.7.5"
