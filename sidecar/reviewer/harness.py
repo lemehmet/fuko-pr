@@ -241,6 +241,31 @@ SENSITIVE_HOME_FILES = (
 SENSITIVE_SYSTEM_DIRS = ("/proc", "/sys", "/dev")
 
 
+def _unrepresentable(path: str) -> str | None:
+    """Why this rule builder cannot express ``path``, or ``None`` if it can.
+
+    The same family ``transcript_dir`` and the blob-root validator refuse at
+    the WRITING end, applied here at the declaring end -- where fuko cannot
+    rename the operator's directory and can only decline to pretend it is
+    covered. Returned as a reason rather than raised, because a declaration
+    fuko cannot honour must not fail the review; it must be announced.
+    """
+    if path.rstrip("/") == "":
+        # `rstrip("/")` reduces the root to the empty string, which is then
+        # dropped before the non-POSIX report can see it.
+        return "it is the filesystem root"
+    if os.name == "posix" and "\\" in path:
+        # A backslash is an ORDINARY POSIX filename character. Rewriting it to
+        # `/` -- what this builder used to do, and what #271 still does for the
+        # HOME-derived rules -- silently names a DIFFERENT directory:
+        # `/srv/cred\store` becomes `/srv/cred/store`.
+        return (
+            "it contains a backslash, an ordinary POSIX filename character "
+            "that this rule syntax cannot carry"
+        )
+    return None
+
+
 def _permission_settings(env: dict[str, str]) -> str:
     """Build the ``--settings`` payload: hooks off, credential stores unreadable.
 
@@ -306,6 +331,24 @@ def _permission_settings(env: dict[str, str]) -> str:
         entry = raw.strip()
         if not entry:
             continue
+        # A path whose real name carries leading or trailing whitespace cannot
+        # be declared through this channel, and the operator has to hear it
+        # (#285 r4). `transcript_dir` REFUSES a padded value outright, which is
+        # right for a single-value setting where padding is unambiguous. This
+        # is a newline-separated LIST, where indentation is ordinary formatting
+        # and refusing it would break the natural way to write more than one
+        # entry -- so the strip stays and the ambiguity is announced instead.
+        # What must not survive either way is the silent wrong rule: `/srv/oauth `
+        # is a different directory from `/srv/oauth`, and denying the latter
+        # while the former holds the session is the failure this whole branch
+        # exists to prevent.
+        if raw.strip("\r") != entry:
+            print(
+                f"fuko: declared deny path {raw!r} was read as {entry!r} -- surrounding "
+                "whitespace is treated as list formatting. If the directory's real name "
+                "has whitespace at either end it is NOT covered; rename it.",
+                file=sys.stderr,
+            )
         # REJECT the spellings this rule syntax cannot carry, rather than
         # rewriting them into a rule for some OTHER directory (#285 r3). The
         # transcript and blob-root validators already enumerate this family and
@@ -316,20 +359,7 @@ def _permission_settings(env: dict[str, str]) -> str:
         # A silent wrong rule is the worst outcome available here: the operator
         # sees a declaration, the denylist reports no problem, and the store
         # stays readable. Every refusal below is therefore announced.
-        unrepresentable_reason = None
-        if entry.rstrip("/") == "":
-            # `rstrip("/")` turns the root into the empty string, which the old
-            # code dropped before the report could see it.
-            unrepresentable_reason = "it is the filesystem root"
-        elif os.name == "posix" and "\\" in entry:
-            # A backslash is an ORDINARY POSIX filename character. Rewriting it
-            # to `/` — which is what this builder used to do, and what #271
-            # still does for the HOME-derived rules — silently names a
-            # different directory: `/srv/cred\store` becomes `/srv/cred/store`.
-            unrepresentable_reason = (
-                "it contains a backslash, an ordinary POSIX filename character "
-                "that this rule syntax cannot carry"
-            )
+        unrepresentable_reason = _unrepresentable(entry)
         if unrepresentable_reason:
             print(
                 f"fuko: NOT denying declared path {entry!r} -- {unrepresentable_reason}. "
@@ -354,7 +384,7 @@ def _permission_settings(env: dict[str, str]) -> str:
         # repaired into a rule the operator never wrote.
         if extra_deny.startswith("/"):
             try:
-                resolved = Path(extra_deny).resolve().as_posix().rstrip("/")
+                resolved = Path(extra_deny).resolve().as_posix()
             except (OSError, RuntimeError):
                 # A resolution loop or an unreadable parent. The declared rule
                 # is already emitted; losing the canonical one is worth a
@@ -365,8 +395,22 @@ def _permission_settings(env: dict[str, str]) -> str:
                     file=sys.stderr,
                 )
             else:
-                if resolved and resolved != extra_deny:
-                    candidates.append((resolved, True))
+                # The canonical target gets the SAME representability checks as
+                # the declared spelling (#285 r4): a clean alias can resolve to
+                # a target holding a backslash, or to `/`, and appending either
+                # unchecked reintroduces the wrong-rule bug one indirection
+                # later. A target this cannot express means the alias rule is
+                # the only cover there is, which is worth saying out loud.
+                target_reason = _unrepresentable(resolved)
+                if target_reason:
+                    print(
+                        f"fuko: declared path {entry!r} resolves to {resolved!r}, which is "
+                        f"NOT additionally denied -- {target_reason}. Only the declared "
+                        "spelling is covered; reads through the canonical path are not.",
+                        file=sys.stderr,
+                    )
+                elif resolved.rstrip("/") != extra_deny:
+                    candidates.append((resolved.rstrip("/"), True))
     # Unconditional: these do not depend on HOME, and on a runner without one
     # they are the only rules that remain.
     candidates += [(d, True) for d in SENSITIVE_SYSTEM_DIRS]

@@ -1950,6 +1950,52 @@ def test_a_dotdot_operator_store_denies_its_canonical_target(tmp_path):
     assert f"Read(//{str(store.resolve()).lstrip('/')}/**)" in deny
 
 
+def test_a_symlink_to_an_inexpressible_target_says_so(tmp_path, capsys):
+    """#285 r4: the canonical target needs the same checks as the alias.
+
+    A clean alias resolving to a target this syntax cannot carry would
+    otherwise append an unchecked rule — the wrong-rule bug one indirection
+    later. The alias rule is still emitted, because it is the only cover
+    available; what changes is that the operator is told the canonical path is
+    not covered.
+    """
+    target = tmp_path / "cred\\store"
+    target.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(target)
+    deny = json.loads(
+        harness_mod._permission_settings(
+            {"HOME": "/home/runner", "FUKO_EXTRA_DENY_DIRS": str(alias)}
+        )
+    )["permissions"]["deny"]
+    assert f"Read(//{str(alias).lstrip('/')}/**)" in deny
+    # The target itself is NOT denied. Matched on the resolved path rather
+    # than on a substring: `.git-credentials` is in the home denylist and
+    # would satisfy a loose "cred" check.
+    assert not any(str(target.resolve()) in rule for rule in deny)
+    err = capsys.readouterr().err
+    assert "NOT additionally denied" in err
+    assert "backslash" in err
+
+
+def test_surrounding_whitespace_in_a_declaration_is_announced(capsys):
+    """#285 r4: `/srv/oauth ` is a different directory from `/srv/oauth`.
+
+    This channel is a newline-separated LIST, so indentation is ordinary
+    formatting and refusing it — the remedy `transcript_dir` uses for its
+    single-value setting — would break the natural way to write more than one
+    entry. The strip stays; what must not survive is the operator believing a
+    padded name is covered.
+    """
+    deny = json.loads(
+        harness_mod._permission_settings(
+            {"HOME": "/home/runner", "FUKO_EXTRA_DENY_DIRS": "  /srv/oauth  "}
+        )
+    )["permissions"]["deny"]
+    assert "Read(//srv/oauth/**)" in deny
+    assert "treated as list formatting" in capsys.readouterr().err
+
+
 def test_a_backslash_in_a_declared_store_is_refused_not_rewritten(capsys):
     """#285 r3: on POSIX a backslash is an ordinary filename character.
 
