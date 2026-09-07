@@ -2193,6 +2193,194 @@ def test_a_root_config_dir_is_refused_not_silently_dropped(key, capsys):
     assert "filesystem root" in err
 
 
+def _dir_rule(path: str) -> str:
+    return f"Read(//{path.lstrip('/')}/**)"
+
+
+def _file_rule(path: str) -> str:
+    return f"Read(//{path.lstrip('/')})"
+
+
+def test_a_symlinked_home_denies_its_stores_under_their_real_names(tmp_path):
+    """#286: a rule is matched against the path the agent spells.
+
+    `HOME=/home/runner` with `/home/runner -> /srv/homes/runner` emitted rules
+    for the alias only, while `Read /srv/homes/runner/.ssh/id_ed25519` went
+    through -- the bypass `transcript_dir` resolves away for its own paths and
+    #285 closed for the operator-declared ones. BOTH spellings, as there.
+    """
+    real = tmp_path / "home-real"
+    real.mkdir()
+    alias = tmp_path / "home-alias"
+    alias.symlink_to(real)
+    deny = json.loads(harness_mod._permission_settings({"HOME": str(alias)}))["permissions"]["deny"]
+    assert _dir_rule(f"{alias}/.claude") in deny
+    assert _dir_rule(f"{real.resolve()}/.claude") in deny
+    assert _file_rule(f"{alias}/.netrc") in deny
+    assert _file_rule(f"{real.resolve()}/.netrc") in deny
+
+
+def test_a_symlinked_store_under_a_real_home_denies_its_target(tmp_path):
+    """Resolving HOME alone would miss this: the home is real, the store is not.
+
+    `~/.ssh -> /mnt/secrets/ssh` is the shape a runner with a mounted secrets
+    volume has, and the reason each store is resolved on its own rather than
+    the root once. A FILE store gets the same treatment, with the file rule.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    ssh = tmp_path / "secrets" / "ssh"
+    ssh.mkdir(parents=True)
+    (home / ".ssh").symlink_to(ssh)
+    netrc = tmp_path / "vault" / "netrc"
+    netrc.parent.mkdir()
+    netrc.write_text("machine x login y password z\n")
+    (home / ".netrc").symlink_to(netrc)
+    deny = json.loads(harness_mod._permission_settings({"HOME": str(home)}))["permissions"]["deny"]
+    assert _dir_rule(f"{home}/.ssh") in deny
+    assert _dir_rule(str(ssh.resolve())) in deny
+    assert _file_rule(f"{home}/.netrc") in deny
+    assert _file_rule(str(netrc.resolve())) in deny
+    # The rule form follows the STORE, not the target: a file store's canonical
+    # twin is a file rule, never a `/**` directory rule over it.
+    assert _dir_rule(str(netrc.resolve())) not in deny
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a backslash is a path separator off POSIX")
+def test_a_home_store_symlinked_to_an_inexpressible_target_says_so(tmp_path, capsys):
+    """The resolved spelling goes through the same check as the declared one.
+
+    A clean `~/.aws` pointing at a target this syntax cannot carry must not
+    append a rewritten rule for some other directory; the alias rule stays, the
+    target is announced as uncovered.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    target = tmp_path / "cred\\store"
+    target.mkdir()
+    (home / ".aws").symlink_to(target)
+    deny = json.loads(harness_mod._permission_settings({"HOME": str(home)}))["permissions"]["deny"]
+    assert _dir_rule(f"{home}/.aws") in deny
+    assert not any(str(target.resolve()) in rule for rule in deny)
+    err = capsys.readouterr().err
+    assert "HOME-derived path" in err
+    assert "NOT additionally denied" in err
+    assert "backslash" in err
+
+
+def test_a_dot_segment_root_home_denies_the_root_stores(capsys):
+    """#286 addendum: `HOME=/.` is the root, and the lexical check missed it.
+
+    `rstrip("/")` leaves `/.` alone, so the stores rendered as
+    `Read(//./.claude/**)` and nothing else -- alias-only rules, with `/.claude`
+    readable. The root is still a fine parent (see the `HOME=/` test above), so
+    this is not a refusal: the canonical spelling is added beside the declared
+    one and nothing is said on stderr.
+    """
+    deny = json.loads(harness_mod._permission_settings({"HOME": "/."}))["permissions"]["deny"]
+    assert "Read(//./.claude/**)" in deny
+    assert "Read(//.claude/**)" in deny
+    assert "Read(//.netrc)" in deny
+    assert not any(rule in ("Read(//**)", "Read(///**)", "Read(//./**)") for rule in deny)
+    for rule in _path_rules(deny):
+        assert "///" not in rule, rule
+    assert capsys.readouterr().err == ""
+
+
+def test_a_dotdot_root_home_denies_the_stores_where_the_kernel_puts_them(capsys):
+    """`HOME=/tmp/..` -- the other root alias from the #291 review.
+
+    The canonical spelling is what the KERNEL says, not what the string looks
+    like: on a Linux runner `/tmp/..` is `/` and the twin is `Read(//.claude/**)`;
+    on darwin `/tmp` is a symlink into `/private`, so `/tmp/../.claude` really is
+    `/private/.claude`, and that is the file a rule has to name. The test
+    computes the expectation the same way rather than pinning `/`.
+    """
+    deny = json.loads(harness_mod._permission_settings({"HOME": "/tmp/.."}))["permissions"]["deny"]
+    real_home = os.path.realpath("/tmp/..")
+    assert "Read(//tmp/../.claude/**)" in deny
+    assert _dir_rule(os.path.join(real_home, ".claude")) in deny
+    assert _file_rule(os.path.join(real_home, ".netrc")) in deny
+    assert not any(rule in ("Read(//**)", "Read(///**)") for rule in deny)
+    for rule in _path_rules(deny):
+        assert "///" not in rule, rule
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("alias", ["/.", "/tmp/..", "/./"])
+@pytest.mark.parametrize("key", ["CLAUDE_CONFIG_DIR", "FUKO_AMBIENT_CLAUDE_CONFIG_DIR"])
+def test_a_dot_segment_root_config_dir_is_refused_like_the_literal_root(key, alias, capsys):
+    """#286 addendum: `CLAUDE_CONFIG_DIR=/.` rendered `Read(//./**)`.
+
+    #291 refused the literal `/` because `Read(//**)` blinds the reviewer to the
+    checkout; `/.` and `/tmp/..` are the same directory under a spelling the
+    `rstrip` check did not recognise, and a rule built from them is either inert
+    or collapses to `Read(//**)` depending on whether the CLI normalizes the
+    pattern -- neither is a denylist entry. Decided lexically, so `/tmp/..` is
+    refused on every host, including one where the kernel resolves it elsewhere.
+    """
+    deny = json.loads(harness_mod._permission_settings({"HOME": "/home/runner", key: alias}))[
+        "permissions"
+    ]["deny"]
+    assert f"Read(//{alias.strip('/')}/**)" not in deny
+    assert not any(rule in ("Read(//**)", "Read(///**)") for rule in deny)
+    assert "Read(//home/runner/.claude/**)" in deny
+    err = capsys.readouterr().err
+    assert key in err
+    assert "filesystem root" in err
+
+
+@pytest.mark.parametrize("key", ["CLAUDE_CONFIG_DIR", "FUKO_AMBIENT_CLAUDE_CONFIG_DIR"])
+def test_a_symlinked_config_dir_denies_its_target(key, tmp_path):
+    """The config dir is denied by its own name, so its alias needs its twin too."""
+    real = tmp_path / "cfg-real"
+    real.mkdir()
+    alias = tmp_path / "cfg-alias"
+    alias.symlink_to(real)
+    deny = json.loads(harness_mod._permission_settings({"HOME": "/home/runner", key: str(alias)}))[
+        "permissions"
+    ]["deny"]
+    assert _dir_rule(str(alias)) in deny
+    assert _dir_rule(str(real.resolve())) in deny
+
+
+def test_a_dotdot_root_operator_store_is_refused_outright(capsys):
+    """The lexical root check reaches the operator-declared paths too.
+
+    Until #286 `FUKO_EXTRA_DENY_DIRS=/tmp/..` emitted `Read(//tmp/../**)` and
+    announced only that its target `/` was not ADDITIONALLY denied. The declared
+    spelling is the root itself, and the same rule that refuses `/` refuses it.
+    """
+    env = {"HOME": "/home/runner", "FUKO_EXTRA_DENY_DIRS": "/tmp/.."}
+    deny = json.loads(harness_mod._permission_settings(env))["permissions"]["deny"]
+    assert not any("tmp/.." in rule for rule in deny)
+    err = capsys.readouterr().err
+    assert "NOT denying declared path" in err
+    assert "filesystem root" in err
+
+
+def test_an_unresolvable_store_keeps_its_declared_rule(monkeypatch, capsys):
+    """Canonicalization is a second rule, never a condition on the first."""
+
+    def refuse(path):
+        raise OSError("loop")
+
+    monkeypatch.setattr(harness_mod.os.path, "realpath", refuse)
+    deny = json.loads(harness_mod._permission_settings({"HOME": "/home/runner"}))["permissions"][
+        "deny"
+    ]
+    assert "Read(//home/runner/.claude/**)" in deny
+    assert "could not canonicalize" in capsys.readouterr().err
+
+
+def test_two_spellings_of_one_rule_render_once():
+    """`//home/x` and its canonical `/home/x` both lose their leading slashes."""
+    deny = json.loads(harness_mod._permission_settings({"HOME": "//home/runner"}))["permissions"][
+        "deny"
+    ]
+    assert len(deny) == len(set(deny))
+
+
 @pytest.mark.parametrize("home", ["//home/runner", "///home/runner", "/home/runner"])
 def test_permission_rules_normalize_repeated_leading_slashes(home):
     """POSIX allows a leading `//`, and `Read(///...)` matches nothing."""

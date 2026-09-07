@@ -357,7 +357,14 @@ auth, so it is deliberately not used.
   `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `~/.config/gcloud`,
   `~/.docker`, `~/.kube`, `~/.netrc`, `~/.git-credentials`), written in the
   absolute-rule spelling `Read(//abs/path/**)` (a single leading slash silently
-  fails to match, and so does a triple).
+  fails to match, and so does a triple). A rule matches the path the agent
+  *spells*, so every store is denied under both its declared spelling and its
+  canonical one (`realpath`): a symlinked `HOME`, a `~/.ssh` that points into a
+  mounted secrets volume, or a `HOME` of `/.` would otherwise leave the store
+  readable under its real name. A `CLAUDE_CONFIG_DIR` that is the filesystem
+  root under any spelling (`/`, `/.`, `/tmp/..`) is refused and announced
+  rather than rendered, since `Read(//**)` would blind the reviewer to the
+  checkout.
 
   Two measured properties are worth knowing before you extend this. A **path**
   rule is enforced across the read-class tools — the `Read(...)` rules are what
