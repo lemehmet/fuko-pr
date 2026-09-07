@@ -186,6 +186,76 @@ jobs:
           # Token Plan key (sk-sp-…). Distinct from every other bucket above —
           # a QwenCloud throttle cools only henry.
           QWEN_TOKEN_PLAN_KEY: ${{ secrets.QWEN_TOKEN_PLAN_KEY }}
+          # gray's codex-proxy seat. NOT a secret and deliberately not one: the
+          # translating proxy on the runner substitutes its own stored ChatGPT
+          # session for whatever arrives, so this value never leaves the box.
+          # It is still required — Claude Code refuses to start without some
+          # client credential, and an unset var resolves `auth = "auto"` to
+          # subscription mode, which the preset refuses (see sidecar/presets.py).
+          # The seat's real credential is the proxy's; there is nothing here to
+          # rotate. See runner-setup.md.
+          #
+          # THE VALUE MUST NOT APPEAR IN THE CHECKOUT, and this is not
+          # cosmetic — gray found both halves of it on PR #285, in consecutive
+          # rounds. Every preset's `key_env` value is registered as a transcript
+          # secret and scrubbed by SUBSTRING replacement with no minimum length
+          # (correctly: a short real credential still needs redacting), so any
+          # needle that occurs in reviewed source rewrites the transcript's
+          # record of what the agent actually read, and the byte metrics with it.
+          #
+          # Round 1 killed `unused` — upstream's own suggestion — which redacted
+          # that ordinary word out of every transcript on every agentic seat.
+          # Round 2 killed the long literal that replaced it: a constant checked
+          # in HERE is still a needle that matches this very file, so a review
+          # touching this workflow redacted the line declaring it.
+          #
+          # A run-scoped value is absent from the checkout by construction,
+          # which is the property that matters — not length, and not obscurity.
+          # The proxy ignores the value entirely; Claude Code only requires that
+          # one exist.
+          CODEX_PROXY_KEY: codex-proxy-placeholder-${{ github.run_id }}-${{ github.run_attempt }}
+          # Credential stores on the runner that fuko cannot derive, added to
+          # the reviewer's read denylist. Newline-separated absolute paths.
+          #
+          # The proxy's ChatGPT OAuth session lives wherever its own
+          # CCP_CONFIG_DIR points, which fuko has no way to know — the fleet's
+          # is /var/lib/codex-proxy, not the ~/.config default the harness can
+          # name. Belt-and-braces here: the proxy runs under its own uid with a
+          # 0700 state dir, so this reviewer already gets EPERM. The rule is
+          # what protects a same-user deployment, which is the shape the
+          # denylist exists for.
+          FUKO_EXTRA_DENY_DIRS: /var/lib/codex-proxy
+          # ── headless-harness posture, FLEET-WIDE (every agentic seat, not
+          # just gray). mepro has run all three against its gateway seats for
+          # weeks; fuko-pr never picked them up, and a metered subscription is
+          # what made the gap worth closing. Each is a no-op on a seat that
+          # does not hit its case.
+          #
+          # No gateway model is in Claude Code's window table — not
+          # `gpt-5.6-sol`, not `qwen3.8-max` — so an enforcement that refuses
+          # unrecognised models refuses every model this fleet runs, by
+          # construction. The main model is not flying blind: each entry's
+          # `max_context` still arrives as CLAUDE_CODE_MAX_CONTEXT_TOKENS.
+          # This only stops the refusal on the auxiliary paths.
+          CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT: '1'
+          # The auxiliary calls (a session title) ride the seat's credential
+          # CONCURRENTLY with the main streaming request, for zero review
+          # value. On the gateway seats that doubled per-provider concurrency;
+          # on gray it spends ChatGPT plan quota. `small_model` only moves
+          # those calls to a cheaper tier — this removes them.
+          #
+          # Accepted cost, the same one mepro accepted: the title call was the
+          # loudest canary for provider model substitution. The `sdk`
+          # query_source line still carries that signal for the main call.
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
+          # A partially-completed stream is otherwise retried NON-streaming,
+          # which re-sends the whole request. The tool-replay hazard that
+          # motivates this elsewhere is mild here (the reviewer holds only
+          # Read/Grep/Glob, which replay harmlessly) — the reason it is set is
+          # the duplicate spend, which on a subscription is quota rather than
+          # money. It is also the configuration the translating proxy was
+          # validated under.
+          CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK: '1'
           # Pass the PR URL through the environment rather than expanding
           # ${{ github.event... }} directly in run: (avoids shell injection).
           PR_URL: ${{ github.event.pull_request.html_url }}

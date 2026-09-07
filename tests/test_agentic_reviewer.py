@@ -1891,6 +1891,172 @@ def test_permission_rules_deny_the_runners_own_registration_credentials():
     assert "Read(//home/runner/actions-runner/.credentials_rsautokey)" in deny
 
 
+def test_permission_rules_deny_operator_declared_stores():
+    """#285 r1: the proxy's session moves with its own `CCP_CONFIG_DIR`.
+
+    `SENSITIVE_HOME_DIRS` can only name the DEFAULT location, so a relocated
+    store was exactly as readable as an undenied one -- and the fleet's own
+    proxy relocates it (`/var/lib/codex-proxy`, not `~/.config`). The operator
+    declares what fuko cannot derive.
+    """
+    deny = json.loads(
+        harness_mod._permission_settings(
+            {"HOME": "/home/runner", "FUKO_EXTRA_DENY_DIRS": "/var/lib/codex-proxy"}
+        )
+    )["permissions"]["deny"]
+    assert "Read(//var/lib/codex-proxy/**)" in deny
+
+
+def test_operator_declared_stores_accept_more_than_one():
+    """Newline-separated, like the transcript directories it rides beside."""
+    deny = json.loads(
+        harness_mod._permission_settings(
+            {"HOME": "/home/runner", "FUKO_EXTRA_DENY_DIRS": "/srv/one\n  /srv/two/  \n"}
+        )
+    )["permissions"]["deny"]
+    assert "Read(//srv/one/**)" in deny
+    assert "Read(//srv/two/**)" in deny
+
+
+def test_a_symlinked_operator_store_denies_its_canonical_target(tmp_path):
+    """#285 r2: a rule for the alias leaves the store readable under its real name.
+
+    The same bypass `transcript_dir` resolves away before its paths ever reach
+    the rule builder; this knob forwards the operator's string verbatim, so the
+    resolution has to happen here. BOTH spellings are denied — an extra inert
+    rule costs nothing, a missing one costs the credential.
+    """
+    target = tmp_path / "real-store"
+    target.mkdir()
+    alias = tmp_path / "alias-store"
+    alias.symlink_to(target)
+    deny = json.loads(
+        harness_mod._permission_settings(
+            {"HOME": "/home/runner", "FUKO_EXTRA_DENY_DIRS": str(alias)}
+        )
+    )["permissions"]["deny"]
+    assert f"Read(//{str(alias).lstrip('/')}/**)" in deny
+    assert f"Read(//{str(target.resolve()).lstrip('/')}/**)" in deny
+
+
+def test_a_dotdot_operator_store_denies_its_canonical_target(tmp_path):
+    """`..` is the other spelling of the same hole, and the likelier typo."""
+    store = tmp_path / "store"
+    store.mkdir()
+    noisy = f"{tmp_path}/store/../store"
+    deny = json.loads(
+        harness_mod._permission_settings({"HOME": "/home/runner", "FUKO_EXTRA_DENY_DIRS": noisy})
+    )["permissions"]["deny"]
+    assert f"Read(//{str(store.resolve()).lstrip('/')}/**)" in deny
+
+
+def test_a_symlink_to_an_inexpressible_target_says_so(tmp_path, capsys):
+    """#285 r4: the canonical target needs the same checks as the alias.
+
+    A clean alias resolving to a target this syntax cannot carry would
+    otherwise append an unchecked rule — the wrong-rule bug one indirection
+    later. The alias rule is still emitted, because it is the only cover
+    available; what changes is that the operator is told the canonical path is
+    not covered.
+    """
+    target = tmp_path / "cred\\store"
+    target.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(target)
+    deny = json.loads(
+        harness_mod._permission_settings(
+            {"HOME": "/home/runner", "FUKO_EXTRA_DENY_DIRS": str(alias)}
+        )
+    )["permissions"]["deny"]
+    assert f"Read(//{str(alias).lstrip('/')}/**)" in deny
+    # The target itself is NOT denied. Matched on the resolved path rather
+    # than on a substring: `.git-credentials` is in the home denylist and
+    # would satisfy a loose "cred" check.
+    assert not any(str(target.resolve()) in rule for rule in deny)
+    err = capsys.readouterr().err
+    assert "NOT additionally denied" in err
+    assert "backslash" in err
+
+
+def test_surrounding_whitespace_in_a_declaration_is_announced(capsys):
+    """#285 r4: `/srv/oauth ` is a different directory from `/srv/oauth`.
+
+    This channel is a newline-separated LIST, so indentation is ordinary
+    formatting and refusing it — the remedy `transcript_dir` uses for its
+    single-value setting — would break the natural way to write more than one
+    entry. The strip stays; what must not survive is the operator believing a
+    padded name is covered.
+    """
+    deny = json.loads(
+        harness_mod._permission_settings(
+            {"HOME": "/home/runner", "FUKO_EXTRA_DENY_DIRS": "  /srv/oauth  "}
+        )
+    )["permissions"]["deny"]
+    assert "Read(//srv/oauth/**)" in deny
+    assert "treated as list formatting" in capsys.readouterr().err
+
+
+def test_a_backslash_in_a_declared_store_is_refused_not_rewritten(capsys):
+    """#285 r3: on POSIX a backslash is an ordinary filename character.
+
+    Rewriting it to `/` — which this builder used to do — turns
+    `/srv/cred\\store` into a rule for `/srv/cred/store`: a rule for the WRONG
+    directory, emitted silently, while the real store stays readable and the
+    operator sees a declaration that looks honoured. Refusing loudly is the
+    only outcome that does not lie.
+    """
+    deny = json.loads(
+        harness_mod._permission_settings(
+            {"HOME": "/home/runner", "FUKO_EXTRA_DENY_DIRS": "/srv/cred\\store"}
+        )
+    )["permissions"]["deny"]
+    assert not any("/srv/cred" in rule for rule in deny)
+    err = capsys.readouterr().err
+    assert "backslash" in err
+    assert "/srv/cred" in err
+
+
+def test_a_root_declared_store_is_reported_not_silently_dropped(capsys):
+    """`rstrip("/")` turns the root into "", which the old code dropped before
+    the report could see it — the same silent-skip `transcript_dir` refuses at
+    the writing end."""
+    deny = json.loads(
+        harness_mod._permission_settings({"HOME": "/home/runner", "FUKO_EXTRA_DENY_DIRS": "/"})
+    )["permissions"]["deny"]
+    assert not any(rule == "Read(///**)" or rule == "Read(//**)" for rule in deny)
+    assert "filesystem root" in capsys.readouterr().err
+
+
+def test_a_non_absolute_operator_store_is_reported_not_silently_dropped(capsys):
+    """A typo must announce itself: a rule that matches nothing is worse than none.
+
+    Same failure direction as a Windows-shaped HOME, and it lands in the same
+    report rather than in a second mechanism.
+    """
+    deny = json.loads(
+        harness_mod._permission_settings(
+            {"HOME": "/home/runner", "FUKO_EXTRA_DENY_DIRS": "relative/path"}
+        )
+    )["permissions"]["deny"]
+    assert not any("relative/path" in rule for rule in deny)
+    assert "relative/path" in capsys.readouterr().err
+
+
+def test_permission_rules_deny_the_codex_translators_oauth_store():
+    """The `codex-proxy` preset puts a long-lived ChatGPT session on the runner.
+
+    Every other model credential this backend handles is injected into the
+    harness process and denied via `/proc`; this one is never in the
+    environment at all -- the proxy substitutes it downstream -- so the
+    filesystem is the only channel, and it is the only one a published finding
+    can carry out.
+    """
+    deny = json.loads(harness_mod._permission_settings({"HOME": "/home/runner"}))["permissions"][
+        "deny"
+    ]
+    assert "Read(//home/runner/.config/claude-code-proxy/**)" in deny
+
+
 def test_runner_credentials_are_denied_as_files_not_as_a_directory():
     """The runner's workspace lives under the same directory as its credentials.
 

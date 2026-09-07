@@ -42,7 +42,8 @@ tools = ["review", "improve"]   # PR-Agent tools to run
 # so a config with none would have nothing that gates).
 #
 # Known presets: zai-coding, ollama, ollama-cloud, lemonade, openrouter,
-# prodia, anthropic, openai, qwen-anthropic. (lemonade = any Lemonade server,
+# prodia, anthropic, openai, qwen-anthropic, zai-anthropic, codex-proxy,
+# anthropic-compatible. (lemonade = any Lemonade server,
 # e.g. a LAN AMD box; OpenAI-compatible, no real auth — set LEMONADE_API_KEY
 # to any non-empty value and point base_url at the host. prodia = a rented
 # OpenAI-compatible GPU box, key from PRODIA_KEY; it has no default base_url,
@@ -50,7 +51,13 @@ tools = ["review", "improve"]   # PR-Agent tools to run
 # qwen-anthropic = QwenCloud's Anthropic-compatible Token Plan gateway, key
 # from QWEN_TOKEN_PLAN_KEY (sk-sp-…): an `anthropic/`-family preset serving
 # Qwen models, which is what admits a Qwen seat to the agentic backend —
-# pair it with backend = "agentic" and auth = "api-key".)
+# pair it with backend = "agentic" and auth = "api-key". zai-anthropic =
+# the same shape on z.ai's Coding Plan, key from ZAI_KEY. codex-proxy =
+# ChatGPT/Codex reached through a translating proxy ON THE RUNNER — the ChatGPT
+# subscription, NOT the OpenAI API the `openai` preset bills separately; needs
+# the proxy installed (see runner-setup.md) and, like the two above, agentic +
+# api-key. anthropic-compatible = any other gateway speaking the Anthropic
+# Messages API; it has no default endpoint, so the entry must set base_url.)
 #
 # `auth` (agentic backend only): "auto" (default) | "api-key" | "subscription".
 # api-key reads the preset's key env var; subscription runs as the runner's own

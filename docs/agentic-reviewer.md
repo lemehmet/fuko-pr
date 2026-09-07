@@ -468,6 +468,103 @@ vendor presets name a cheap tier there to keep those calls off an expensive
 model; a single-model deployment has no cheap tier, and naming a second slug
 would make the gateway swap models mid-review.
 
+### ChatGPT/Codex through a translator: `codex-proxy`
+
+Every preset above is a base-URL swap: the vendor happens to answer the
+Anthropic Messages API, so the harness talks to it unchanged. OpenAI does not,
+and that is the ordinary case rather than the exception — there is no
+Anthropic-compatible `/v1/messages` on ChatGPT/Codex, and none on OpenRouter
+either. So a Codex seat needs something on the runner to translate Anthropic
+Messages into Codex's Responses API. `codex-proxy` is the preset for that
+shape; `runner-setup.md` covers installing and pinning the proxy.
+
+```toml
+[[review.models]]
+provider = "codex-proxy"
+name = "gpt-5.6-sol"    # the slug the proxy routes, verbatim
+auth = "api-key"        # CODEX_PROXY_KEY — any non-empty value
+backend = "agentic"
+max_context = 272000    # the PLAN's window, not the model's headline number
+role = "trial"
+```
+
+Three things are different from every other seat, and each of them bites
+somewhere the config does not show:
+
+- **The subscription is not the API.** This is the ChatGPT plan, reached
+  through the proxy's own stored OAuth session. The `openai` preset reaches
+  the OpenAI *API* with `OPENAI_KEY`, which is separately billed credits a
+  ChatGPT subscription does not include. They are two products; only the
+  agentic backend can spend the first.
+- **`CODEX_PROXY_KEY` is not a secret, is not optional, and must not be an
+  ordinary word.** The proxy substitutes its stored session for whatever
+  arrives, so the value never leaves the runner — but Claude Code refuses to
+  start without *some* client credential, and leaving it unset resolves
+  `auth = "auto"` to subscription, which this preset refuses
+  (`requires_base_url`, exactly as above). The preset carries a default
+  `base_url` — the proxy's pinned loopback listener — so unlike
+  `anthropic-compatible` the entry need not spell the endpoint; the flag is
+  kept purely for that refusal.
+
+  The value must not occur anywhere in the checkout. Every preset key is
+  registered as a transcript secret and scrubbed by substring replacement with
+  **no minimum length** — correctly, since a short real credential still needs
+  redacting — so any needle present in reviewed source rewrites the
+  transcript's record of what the agent read. `unused`, upstream's own
+  suggestion, redacts that word out of every transcript on every agentic seat;
+  replacing it with a long constant committed to the repo only narrows the
+  collision to the file declaring it. Derive the value per run instead. Same
+  rule as the `FUKO_S3_REGION` exclusion in the transcript tests: a value that
+  can occur in reviewed prose must never become a needle.
+- **The credential outlives the run, and fuko cannot always find it.** The
+  proxy owns and refreshes a ChatGPT session on disk, which is why
+  `~/.config/claude-code-proxy` joins the harness's read denylist: it is the
+  one model credential the environment scrub cannot cover, because the harness
+  never holds it. But that is only the DEFAULT location — the store moves with
+  the proxy's own `CCP_CONFIG_DIR`, and a containerised deployment almost
+  certainly relocates it. A relocated store is exactly as readable as an
+  undenied one, so declare it with `FUKO_EXTRA_DENY_DIRS` (newline-separated
+  absolute paths) whenever it is not at the default.
+
+  The denial covers the deployment where the proxy runs as the runner's own
+  user. Prefer the one where it does not — a dedicated system user with a
+  `0700` home puts the session behind a filesystem permission rather than
+  behind a rule, and makes both the denylist entry and the declaration
+  redundant instead of load-bearing (`runner-setup.md`).
+
+Three things the receipts cannot tell you here.
+
+**The substitution detector is blind on this seat.** Elsewhere in the fleet a
+receipt whose answering `model` disagrees with its `label` is how a gateway
+serving something other than the configured model gets caught. This proxy
+echoes the REQUESTED model name back instead of reporting what served the
+request — measured 2026-09-07 against a live session: a `/v1/messages` call for
+`claude-opus-5` came back with `"model": "claude-opus-5"` and an answer from an
+OpenAI model. So on `codex-proxy` the two fields agree by construction, always,
+and the check can never fire. Do not read a clean label/model comparison on this
+seat as evidence of anything.
+
+The same measurement is the reassuring half of the story, and it is worth
+stating beside the gap: this proxy has **no Anthropic backend at all** — even an
+Anthropic-shaped model name routes to Codex (`CCP_ALIAS_PROVIDER`, default
+`codex`). The hazard `requires_base_url` exists to prevent — a `gpt-…`-labelled
+seat quietly reviewing with real Claude — therefore cannot happen *through* the
+proxy. It can only happen by bypassing it, which is precisely the auth mode the
+preset refuses.
+
+**Token and cost columns are fiction.** The proxy reports usage as local
+estimates rather than upstream counts (`cache_creation_input_tokens` and
+`cache_read_input_tokens` come back 0 by construction), so this seat's figures
+in `scripts/ab_metrics.py` are not measurements. Read its findings, not its
+arithmetic.
+
+**Exhaustion is slow to announce itself.** Plan exhaustion answers
+`429 {"message": "The usage limit has been reached"}` only after roughly 167
+seconds per attempt, which the CLI retries: the branch looks busy rather than
+blocked for minutes before the text reaches the classifier. It *is* classified
+as throttling once it does, so the branch fails over honestly — it is just
+slower to say so than a normal 429.
+
 ## Session transcripts (`FUKO_TRANSCRIPT_DIR`)
 
 The harness reads the CLI's whole NDJSON event feed and folds it away, keeping

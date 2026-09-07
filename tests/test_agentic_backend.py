@@ -255,6 +255,48 @@ def test_anthropic_compatible_preset_serves_every_slot_from_one_model(monkeypatc
     assert env["FUKO_AGENTIC_MODEL"] == "Qwen3.8-Flash-Next-GGUF"
 
 
+def test_codex_proxy_preset_defaults_to_the_loopback_translator(monkeypatch):
+    """ChatGPT/Codex arrives through a translator on the runner, not a vendor URL.
+
+    The endpoint comes off the PRESET here rather than the entry -- the proxy's
+    listener is pinned to loopback by its unit, so the address is a property of
+    the deployment shape and not of the seat. The plan has a cheap tier, so
+    unlike `anthropic-compatible` the auxiliary calls route to it.
+    """
+    monkeypatch.setenv("CODEX_PROXY_KEY", "unused")
+    env = AgenticBackend().build_env(
+        get_preset("codex-proxy"),
+        ModelConfig(provider="codex-proxy", name="gpt-5.6-sol", auth="api-key"),
+        knowledge="",
+        tools=["review"],
+    )
+    assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:18765"
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "gpt-5.6-luna"  # preset small_model
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "gpt-5.6-sol"
+    assert env["FUKO_AGENTIC_MODEL"] == "gpt-5.6-sol"
+
+
+@pytest.mark.parametrize("auth", ["subscription", "auto"])
+def test_codex_proxy_refuses_subscription_despite_having_a_default_endpoint(monkeypatch, auth):
+    """A default `base_url` must not soften `requires_base_url` into a no-op.
+
+    `codex-proxy` is the first preset to carry both, so the two halves of the
+    flag are visibly separable: the default answers "which endpoint", and the
+    flag is what refuses the mode that injects NONE. Without the refusal, an
+    entry named `gpt-5.6-sol` with the key unexported would resolve to
+    subscription and review with real Claude under the runner's own login --
+    while the receipt's label and requested model still agree.
+    """
+    monkeypatch.delenv("CODEX_PROXY_KEY", raising=False)
+    with pytest.raises(ValueError, match="reaches its model only through"):
+        AgenticBackend().build_env(
+            get_preset("codex-proxy"),
+            ModelConfig(provider="codex-proxy", name="gpt-5.6-sol", auth=auth),
+            knowledge="",
+            tools=["review"],
+        )
+
+
 @pytest.mark.parametrize("auth", ["api-key", "subscription", "auto"])
 def test_requires_base_url_preset_without_one_is_a_config_error(monkeypatch, auth):
     """No endpoint + `requires_base_url` must raise in EVERY auth mode.
@@ -658,6 +700,29 @@ def test_invoke_strips_a_newly_registered_presets_key(monkeypatch):
     backend = AgenticBackend()
     _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
     assert "FUTURE_PROVIDER_KEY" not in captured["env"]
+
+
+def test_invoke_passes_the_operator_deny_dirs_through_the_fuko_strip(monkeypatch):
+    """#285 r1: it is in the `FUKO_` namespace, which invoke() strips wholesale.
+
+    The whole point of the variable is to reach `_permission_settings`, and
+    the strip that protects FUKO_TOKEN would otherwise remove it on the way --
+    silently, leaving the operator's declared credential store undenied while
+    the config says it is covered. Exactly how the transcript directory came to
+    be undenied before #237.
+    """
+    monkeypatch.setenv("FUKO_EXTRA_DENY_DIRS", "/var/lib/codex-proxy")
+    backend = AgenticBackend()
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert captured["env"]["FUKO_EXTRA_DENY_DIRS"] == "/var/lib/codex-proxy"
+
+
+def test_invoke_omits_the_operator_deny_dirs_when_unset(monkeypatch):
+    """Absent, not empty: an empty needle would render `Read(///**)`-shaped noise."""
+    monkeypatch.delenv("FUKO_EXTRA_DENY_DIRS", raising=False)
+    backend = AgenticBackend()
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert "FUKO_EXTRA_DENY_DIRS" not in captured["env"]
 
 
 def test_invoke_strips_gh_cli_credentials(monkeypatch):

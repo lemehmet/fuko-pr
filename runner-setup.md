@@ -44,6 +44,91 @@ A Linux x64 host with:
   preset) must be exported in the workflow's `env:` block from a repo secret —
   the driver reads it on the runner, not on the sidecar.
 
+- **For a `codex-proxy` seat only**: an Anthropic-to-Codex translator on the
+  runner. ChatGPT/Codex serves no Anthropic-compatible `/v1/messages`, so this
+  preset is not a base-URL swap like the other gateways — the harness speaks
+  Anthropic and something local has to translate to Codex's Responses API.
+  Install [`claude-code-proxy`](https://claude-code-proxy.raine.dev/)
+  version-pinned, run it under systemd, and log it in once per host (a device
+  code flow — it then owns and refreshes its own ChatGPT OAuth session, so
+  there is nothing to rotate and nothing to push).
+
+  **Check your glibc before you plan on the release binary.** Upstream ships
+  one Linux build and it is linked against `GLIBC_2.39` (Ubuntu 24.04). On an
+  Ubuntu 22.04 runner it installs cleanly and then fails every invocation with
+  `version 'GLIBC_2.39' not found`. As of 2026-09-07 there is no musl asset in
+  any release and the crate is unpublished, so there is nothing to build from
+  `cargo install` either. Running the proxy in a container off a 24.04 base is
+  the cheap way out, and it also survives the next glibc bump.
+
+  Four properties are load-bearing, and each fails quietly if dropped:
+
+  - **The listener must be loopback-only.** The proxy does not authenticate its
+    callers — it substitutes its stored ChatGPT session for whatever credential
+    arrives — so any host that reaches the listener spends the subscription.
+    Natively that is `CCP_BIND_ADDRESS=127.0.0.1`; in a container it is the
+    publish spec (`-p 127.0.0.1:18765:18765`, with the in-container bind left
+    at `0.0.0.0` where nothing can reach it). Do not widen either one to debug
+    from another machine — a published port also installs a DNAT rule your host
+    firewall does not see. Use an SSH tunnel.
+    Note that loopback is not a complete answer on a runner: any OTHER job on
+    the same host, including an untrusted fork's test payload, is already
+    inside it. Reviews are safe from that direction (the harness has no `Bash`
+    and no network tools) but co-tenants are not, so put the proxy on hosts
+    whose job mix you accept.
+  - **`CODEX_PROXY_KEY` exported to a long, distinctive value.** Claude Code
+    refuses to start without a client credential; this one is never sent
+    upstream. It is not a secret, but it is not optional either — leaving it
+    unset does not fail cleanly, it resolves `auth = "auto"` to subscription
+    mode, which the preset then refuses (deliberately: see
+    `sidecar/presets.py`).
+    **The value must not occur anywhere in the checkout.** Every preset's
+    key value is registered as a transcript secret and scrubbed by substring
+    replacement with no minimum length — correctly, because a short real
+    credential still needs redacting — so any needle that appears in reviewed
+    source rewrites the transcript's record of what the agent read, and the
+    byte metrics with it. `unused`, which upstream's examples suggest, redacts
+    that ordinary word out of every transcript; a long constant committed to
+    the repo instead still matches the file that declares it. Derive it per run
+    (`${{ github.run_id }}`) so it cannot be in the checkout at all.
+  - **`CCP_TRAFFIC_LOG` absent, not `0`.** Captures preserve prompts, diffs and
+    tool results in full; on a review runner that directory is a copy of every
+    pull request the fleet has read.
+
+  **Run it as a dedicated system user, not as the runner user.** The proxy owns
+  a long-lived ChatGPT OAuth session under its own `~/.config/claude-code-proxy`
+  and refreshes it in place. Give that user its own `0700` home — and, in a
+  container, run it as that uid against a bind-mounted state directory, with
+  `CCP_CONFIG_DIR` set identically on the service and on the login command so
+  the two cannot disagree about where the session lives. The session is then
+  unreadable by every runner user as a matter of filesystem permission —
+  which is a wall, where the reviewer's read denylist is only a rule. fuko
+  denies `~/.config/claude-code-proxy` under the job's `HOME` as well, because
+  the same-user deployment is the obvious one and the reviewer publishes what it
+  reads to an untrusted PR author; but prefer the arrangement where the denial
+  is redundant. The harness reaches the proxy over loopback, so the two users
+  need not match.
+
+  If the proxy's store is NOT at the default `~/.config/claude-code-proxy` —
+  it moves with the proxy's own `CCP_CONFIG_DIR`, and a containerised
+  deployment almost certainly relocates it — fuko cannot derive the path.
+  Declare it in the workflow so the reviewer's denylist covers it:
+
+  ```yaml
+  FUKO_EXTRA_DENY_DIRS: /var/lib/codex-proxy   # newline-separated for several
+  ```
+
+  Entries this rule syntax cannot represent — the filesystem root, a
+  non-absolute path, or (on POSIX) a name containing a backslash — are refused
+  and announced on stderr rather than silently denying nothing or, worse,
+  denying a different directory. If your store's name hits one of those,
+  rename or move it: fuko will not pretend it is covered.
+
+  `max_context` on the entry must be the ChatGPT plan's window for the model,
+  not the model's headline window — it is what sizes the harness's auto-compact,
+  and set too high a long review dies at the upstream limit instead of
+  compacting before it. Re-check it whenever you change the model.
+
 ## 1. Register the GitHub runner
 
 Follow [GitHub's self-hosted runner guide](https://docs.github.com/en/actions/hosting-your-own-runners).

@@ -52,6 +52,25 @@ job_budget_minutes = 110
 # FLEET COMPOSITION (2026-08-31) — one gating seat, two trial seats running
 # epic #160's stateful-vs-stateless A/B (#159).
 #
+# AMENDED 2026-09-07 — THE A/B BELOW IS OVER, AND EVERYTHING UNDER IT IS
+# HISTORY. Both QwenCloud plans exhausted on the same day, so all three seats
+# went dark together: henry (the gate), dorian (the stateless arm) and gray
+# (the stateful arm). gray came back on ChatGPT/Codex through the `codex-proxy`
+# preset and is now the ONLY gating seat; henry and dorian are still qwen, still
+# dark, and both non-gating for the duration (henry was demoted from active on
+# the same day — see its own note). They are left in place rather than deleted
+# because a plan window reopens and re-adding a seat by hand loses the
+# reasoning attached to it.
+#
+# Read the rest of this block as the record of an experiment that did not
+# finish, not as a description of what runs. What actually runs today is ONE
+# active agentic seat (gray, codex) plus two entries waiting on quota. The
+# reason the surviving seat is the one on a different provider is the whole
+# lesson of the outage: three seats on two plans from one vendor is one
+# credential away from an empty fleet, which is what the harness-diversity
+# argument (docs/agentic-reviewer.md) says about context and is equally true
+# about billing.
+#
 # WHY dorian IS GONE. The diff seat (openrouter/upstage/solar-pro4) was retired
 # on its receipts: roughly 3 valid findings out of ~40 across four issues
 # (#186, #189, #192, #197), including 18 consecutive declines on #197, several
@@ -88,9 +107,26 @@ job_budget_minutes = 110
 # var, which is global rather than per-entry and is OFF. It is not part of this
 # A/B; turning it on would change both arms at once.
 
-# henry — the GATING seat: same provider, same model, same harness as both trial
-# seats. Kept gating so a round still has a reviewer that is not part of the
-# experiment.
+# henry — DARK since 2026-09-07 (QwenCloud plan exhausted) and DEMOTED to trial
+# for the duration. Left configured on purpose: the entry is cheap when dead and
+# the reasoning below is not recoverable from a git log a year from now.
+#
+# WHY NOT LEFT `active`. Two reasons, and the second is the one that decided it.
+# A dark seat still starts a branch, and if the gateway stalls rather than
+# erroring it burns up to `tool_timeout` — 30 minutes — before failing over.
+# Worse: QwenCloud's exhausted plans have been observed to degrade SILENTLY to a
+# smaller model rather than erroring, and this fleet's substitution detector
+# compares a receipt's label against its answering model, which a silent
+# downgrade inside one gateway does not move. That would be a weak review
+# gating merges under a `qwen3.8-max` label with no receipt saying otherwise.
+# Non-gating costs nothing and removes both.
+#
+# PROMOTE IT BACK when the plan reopens — it is one line, and a reopened plan is
+# something you notice rather than something the config should guess at.
+#
+# It was the GATING seat: same provider, same model, same harness as both trial
+# seats. Kept gating so a round still had a reviewer that was not part of the
+# experiment. gray holds the gate now.
 #
 # NOT a twin of either arm, and the receipts must not be read as if it were:
 # henry takes the defaults, which is Tier 1 ON and Tier 2 OFF — a third state
@@ -109,11 +145,16 @@ name = "qwen3.8-max"
 max_context = 1000000
 auth = "api-key"
 backend = "agentic"
+role = "trial"
 token_env = "FUKO_GITHUB_TOKEN_HENRY"
 
-# A/B control — stateless arm. Inherits dorian's retired App identity; the name
-# on the App no longer describes the seat, which is why receipts are scored by
-# provider/model and role, never by bot login.
+# dorian — DARK since 2026-09-07, same plan exhaustion as henry, and now a
+# control with nothing to control for (see the amendment at the top). Kept as a
+# trial so a reopened plan costs nothing that gates.
+#
+# It was #159's A/B control — the stateless arm. Inherits dorian's retired App
+# identity; the name on the App no longer describes the seat, which is why
+# receipts are scored by provider/model and role, never by bot login.
 [[review.models]]
 provider = "qwen-anthropic"
 name = "qwen3.8-max"
@@ -125,18 +166,52 @@ coverage_ledger = false
 findings_ledger = false
 token_env = "FUKO_GITHUB_TOKEN_DORIAN"
 
-# A/B treatment — stateful arm. The ONLY configured difference from the control
-# is the state bundle (`coverage_ledger` + `findings_ledger`); keep it that way
-# or the experiment stops having one variable.
+# gray — the ChatGPT/Codex seat, ACTIVE and gating (2026-09-07).
+#
+# WHAT THIS REPLACED, said plainly: this slot was #159's stateful arm, and
+# taking it ENDS that A/B rather than pausing it — a treatment arm with no
+# surviving control measures nothing, and dorian (the control) is now a
+# stateless qwen seat with nothing to be a control FOR. The experiment was
+# already unrunnable: both QwenCloud plans exhausted on 2026-09-07 and all
+# three seats went dark at once, which is also why the seat that came back is
+# the one on a different provider. #159 stays open; re-running it needs a pair
+# on ONE model again, and it can be any model — that was always the point.
+#
+# It is ACTIVE rather than trial because the alternative was no gate at all.
+# henry and dorian are both still qwen and both still dark, so a non-gating
+# codex seat would have left this repo merging with no fuko review whatsoever.
+#
+# It takes the state DEFAULTS (Tier 1 on, Tier 2 off) — no `coverage_ledger`
+# or `findings_ledger` line — deliberately: those flags were the experiment's
+# variable, and a gating seat should run what everyone else runs. Do not read
+# this seat's receipts as either arm of #159.
+#
+# `max_context` is the ChatGPT PLAN's window for gpt-5.6, not the model's
+# headline number. It sizes the harness's auto-compact; set too high, a long
+# review dies at the upstream limit instead of compacting before it. RE-CHECK
+# it when flipping the model (GPT-6 Astra), and re-check the preset's
+# `small_model` against the account in the same pass.
+#
+# auth is PINNED for the same reason henry's is, with one extra tooth: for a
+# `requires_base_url` preset fuko REFUSES subscription mode outright, because
+# subscription injects no endpoint and this seat's `gpt-…` slugs are served
+# ONLY by the loopback translator. The realistic way in is not writing
+# `auth = "subscription"`; it is leaving `auth` at `auto` with CODEX_PROXY_KEY
+# unexported. `base_url` is absent on purpose — the preset defaults it to the
+# proxy's pinned listener, so the address stays a property of the runner.
+#
+# NO BACKUP, unchanged from below, and here it matters more: plan exhaustion
+# answers 429 only after ~167s per attempt and the CLI retries, so an exhausted
+# round spends real wall-clock before it says so. It still fails over honestly
+# (or dies on tool_timeout, which is throttle-class too) — it is just slow to
+# admit it. See docs/agentic-reviewer.md.
 [[review.models]]
-provider = "qwen-anthropic"
-name = "qwen3.8-max"
-max_context = 1000000
+provider = "codex-proxy"
+name = "gpt-5.6-sol"
+max_context = 272000
 auth = "api-key"
 backend = "agentic"
-role = "trial"
-coverage_ledger = true
-findings_ledger = true
+role = "active"
 token_env = "FUKO_GITHUB_TOKEN_GRAY"
 
 # NO BACKUP as of 2026-09-01, on purpose. The z.ai seat that sat here was

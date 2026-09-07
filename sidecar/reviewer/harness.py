@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -112,6 +113,26 @@ _ENV_AMBIENT_CONFIG_DIR = "FUKO_AMBIENT_CLAUDE_CONFIG_DIR"
 #: which is how the directory came to be undenied in the first place.
 _ENV_TRANSCRIPT_DENY_DIR = "FUKO_TRANSCRIPT_DENY_DIR"
 
+#: Operator-supplied absolute directories to add to the read denylist,
+#: NEWLINE-separated. Passed through from the workflow environment.
+#:
+#: This exists because the stores below are the ones fuko can NAME, and an
+#: operator's runner holds credential stores fuko has never heard of. The case
+#: that produced it is concrete: the `codex-proxy` preset's translating proxy
+#: keeps a long-lived ChatGPT OAuth session whose location is set by the
+#: proxy's OWN `CCP_CONFIG_DIR`, so :data:`SENSITIVE_HOME_DIRS` can only cover
+#: the default path -- a relocated store is exactly as readable as an undenied
+#: one, and on a same-user deployment that is a live exfiltration path (found
+#: by the reviewer itself on PR #285).
+#:
+#: A path knob rather than a `CCP_CONFIG_DIR` special case on purpose: the
+#: proxy is one instance of "a credential store whose path only the operator
+#: knows", and a rule per vendor would have to be written again for the next
+#: one. Rides the same shape as :data:`_ENV_TRANSCRIPT_DENY_DIR` -- read here
+#: and nowhere else, stripped with the rest of the ``FUKO_`` namespace and
+#: re-set explicitly before the spawn.
+_ENV_EXTRA_DENY_DIRS = "FUKO_EXTRA_DENY_DIRS"
+
 #: Directories the agent must never read, relative to the runner's home.
 #:
 #: ``--add-dir`` ADDS a readable root; it does NOT confine reads to it. Verified
@@ -155,6 +176,14 @@ SENSITIVE_HOME_DIRS = (
     ".gnupg",
     ".config/gh",
     ".config/gcloud",
+    # An Anthropic-to-Codex translating proxy (the `codex-proxy` preset) owns a
+    # ChatGPT OAuth session here and refreshes it IN PLACE, so unlike every
+    # model credential this backend injects, it is a long-lived one that lives
+    # on disk in the runner's home for the life of the box. It is also the one
+    # credential the environment denial below cannot reach: the harness never
+    # holds it -- the proxy substitutes it downstream -- so `/proc/self/environ`
+    # is not the channel, the filesystem is.
+    ".config/claude-code-proxy",
     ".docker",
     ".kube",
 )
@@ -210,6 +239,31 @@ SENSITIVE_HOME_FILES = (
 #: the agent's own environment, reachable by any path we failed to enumerate.
 #: Only a boundary fixes the class; this closes the instance.
 SENSITIVE_SYSTEM_DIRS = ("/proc", "/sys", "/dev")
+
+
+def _unrepresentable(path: str) -> str | None:
+    """Why this rule builder cannot express ``path``, or ``None`` if it can.
+
+    The same family ``transcript_dir`` and the blob-root validator refuse at
+    the WRITING end, applied here at the declaring end -- where fuko cannot
+    rename the operator's directory and can only decline to pretend it is
+    covered. Returned as a reason rather than raised, because a declaration
+    fuko cannot honour must not fail the review; it must be announced.
+    """
+    if path.rstrip("/") == "":
+        # `rstrip("/")` reduces the root to the empty string, which is then
+        # dropped before the non-POSIX report can see it.
+        return "it is the filesystem root"
+    if os.name == "posix" and "\\" in path:
+        # A backslash is an ORDINARY POSIX filename character. Rewriting it to
+        # `/` -- what this builder used to do, and what #271 still does for the
+        # HOME-derived rules -- silently names a DIFFERENT directory:
+        # `/srv/cred\store` becomes `/srv/cred/store`.
+        return (
+            "it contains a backslash, an ordinary POSIX filename character "
+            "that this rule syntax cannot carry"
+        )
+    return None
 
 
 def _permission_settings(env: dict[str, str]) -> str:
@@ -268,6 +322,95 @@ def _permission_settings(env: dict[str, str]) -> str:
         transcript_deny = entry.strip().replace("\\", "/").rstrip("/")
         if transcript_deny:
             candidates.append((transcript_deny, True))
+    # Whatever else the operator knows lives on this runner and must not be
+    # read. Unlike every rule above, fuko cannot derive these -- see
+    # :data:`_ENV_EXTRA_DENY_DIRS`. Non-absolute entries fall into the same
+    # `unusable` report below as a Windows-shaped HOME, so a typo announces
+    # itself instead of quietly denying nothing.
+    for raw in (env.get(_ENV_EXTRA_DENY_DIRS) or "").split("\n"):
+        entry = raw.strip()
+        if not entry:
+            continue
+        # A path whose real name carries leading or trailing whitespace cannot
+        # be declared through this channel, and the operator has to hear it
+        # (#285 r4). `transcript_dir` REFUSES a padded value outright, which is
+        # right for a single-value setting where padding is unambiguous. This
+        # is a newline-separated LIST, where indentation is ordinary formatting
+        # and refusing it would break the natural way to write more than one
+        # entry -- so the strip stays and the ambiguity is announced instead.
+        # What must not survive either way is the silent wrong rule: `/srv/oauth `
+        # is a different directory from `/srv/oauth`, and denying the latter
+        # while the former holds the session is the failure this whole branch
+        # exists to prevent.
+        if raw.strip("\r") != entry:
+            print(
+                f"fuko: declared deny path {raw!r} was read as {entry!r} -- surrounding "
+                "whitespace is treated as list formatting. If the directory's real name "
+                "has whitespace at either end it is NOT covered; rename it.",
+                file=sys.stderr,
+            )
+        # REJECT the spellings this rule syntax cannot carry, rather than
+        # rewriting them into a rule for some OTHER directory (#285 r3). The
+        # transcript and blob-root validators already enumerate this family and
+        # refuse it at the writing end; this is the same taxonomy at the
+        # declaring end, where fuko cannot rename the operator's directory and
+        # so can only decline to pretend it is covered.
+        #
+        # A silent wrong rule is the worst outcome available here: the operator
+        # sees a declaration, the denylist reports no problem, and the store
+        # stays readable. Every refusal below is therefore announced.
+        unrepresentable_reason = _unrepresentable(entry)
+        if unrepresentable_reason:
+            print(
+                f"fuko: NOT denying declared path {entry!r} -- {unrepresentable_reason}. "
+                "That store is readable by the reviewer; move it or rename it.",
+                file=sys.stderr,
+            )
+            continue
+        extra_deny = entry.rstrip("/")
+        candidates.append((extra_deny, True))
+        # ALSO deny the canonical target. A rule is matched against the path
+        # the agent spells, so an alias-only rule leaves the store readable
+        # under its real name -- the same bypass `transcript_dir` resolves away
+        # before it ever reaches here (`test_a_symlinked_destination_resolves_
+        # to_its_target`), and the operator declaring a symlinked or
+        # `..`-containing store is the realistic case, not the adversarial one.
+        #
+        # BOTH spellings, rather than replacing the declared one: whether the
+        # CLI resolves a path before matching is its business and could change,
+        # and an extra inert rule costs nothing where a missing one costs the
+        # credential. Only for entries already absolute -- a relative one must
+        # still reach the `unusable` report below rather than be silently
+        # repaired into a rule the operator never wrote.
+        if extra_deny.startswith("/"):
+            try:
+                resolved = Path(extra_deny).resolve().as_posix()
+            except (OSError, RuntimeError):
+                # A resolution loop or an unreadable parent. The declared rule
+                # is already emitted; losing the canonical one is worth a
+                # sentence on stderr, not a failed review.
+                print(
+                    f"fuko: could not canonicalize deny path {extra_deny!r}; "
+                    "only the declared spelling is denied.",
+                    file=sys.stderr,
+                )
+            else:
+                # The canonical target gets the SAME representability checks as
+                # the declared spelling (#285 r4): a clean alias can resolve to
+                # a target holding a backslash, or to `/`, and appending either
+                # unchecked reintroduces the wrong-rule bug one indirection
+                # later. A target this cannot express means the alias rule is
+                # the only cover there is, which is worth saying out loud.
+                target_reason = _unrepresentable(resolved)
+                if target_reason:
+                    print(
+                        f"fuko: declared path {entry!r} resolves to {resolved!r}, which is "
+                        f"NOT additionally denied -- {target_reason}. Only the declared "
+                        "spelling is covered; reads through the canonical path are not.",
+                        file=sys.stderr,
+                    )
+                elif resolved.rstrip("/") != extra_deny:
+                    candidates.append((resolved.rstrip("/"), True))
     # Unconditional: these do not depend on HOME, and on a runner without one
     # they are the only rules that remain.
     candidates += [(d, True) for d in SENSITIVE_SYSTEM_DIRS]
