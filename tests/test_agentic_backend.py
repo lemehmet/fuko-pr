@@ -725,6 +725,50 @@ def test_invoke_omits_the_operator_deny_dirs_when_unset(monkeypatch):
     assert "FUKO_EXTRA_DENY_DIRS" not in captured["env"]
 
 
+def test_invoke_omits_the_operator_deny_dirs_when_whitespace_only(monkeypatch):
+    """The set-or-not decision is the ONLY place the stripped form is consulted (#289)."""
+    monkeypatch.setenv("FUKO_EXTRA_DENY_DIRS", "  \n  ")
+    backend = AgenticBackend()
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert "FUKO_EXTRA_DENY_DIRS" not in captured["env"]
+
+
+@pytest.mark.parametrize(
+    ("ambient", "padded", "bare"),
+    [
+        ("  /srv/oauth  ", "  /srv/oauth  ", "/srv/oauth"),
+        ("/srv/a\n/srv/b  ", "/srv/b  ", "/srv/b"),
+    ],
+)
+def test_invoke_forwards_deny_dir_padding_so_the_consumer_can_warn_about_it(
+    monkeypatch, capsys, ambient, padded, bare
+):
+    """#289: `invoke()` used to `.strip()` the whole value before forwarding it.
+
+    The consumer's #285 r4 warning -- a padded entry was read as its trimmed
+    spelling, so a directory really NAMED with the padding is not covered -- can
+    only fire on evidence that survives the hand-off. Inner entries kept theirs
+    (the split is on newlines), which is why the per-entry test in
+    `test_agentic_reviewer.py` passed while the first and last entry of a real
+    deployment lost their padding silently. This runs the padded value through
+    the lossy caller and asserts at the consumer, which neither existing test did.
+    """
+    monkeypatch.setenv("FUKO_EXTRA_DENY_DIRS", ambient)
+    backend = AgenticBackend()
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert captured["env"]["FUKO_EXTRA_DENY_DIRS"] == ambient
+
+    forwarded = captured["env"]["FUKO_EXTRA_DENY_DIRS"]
+    deny = json.loads(
+        _permission_settings({"HOME": "/home/runner", "FUKO_EXTRA_DENY_DIRS": forwarded})
+    )["permissions"]["deny"]
+    err = capsys.readouterr().err
+    assert repr(padded) in err
+    assert repr(bare) in err
+    assert "treated as list formatting" in err
+    assert f"Read(//{bare.lstrip('/')}/**)" in deny
+
+
 def test_invoke_strips_gh_cli_credentials(monkeypatch):
     """`gh`'s own spellings are exported by many runner images and are just as live."""
     monkeypatch.setenv("GH_TOKEN", "gh-cli-secret")

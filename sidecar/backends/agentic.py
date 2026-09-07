@@ -1031,12 +1031,17 @@ class AgenticBackend:
         # AMBIENT environment and re-set here, because the strip above removed
         # it with the rest of the `FUKO_` namespace -- the same shape, and for
         # the same reason, as the transcript directories one line up. Passed
-        # through verbatim: `_permission_settings` does the splitting and
-        # reports any entry that is not POSIX-absolute, so a typo is announced
-        # rather than silently denying nothing.
-        extra_deny = os.environ.get(_ENV_EXTRA_DENY_DIRS, "").strip()
-        if extra_deny:
-            harness_env[_ENV_EXTRA_DENY_DIRS] = extra_deny
+        # through UNTOUCHED, padding included: `_permission_settings` does the
+        # splitting and strips per entry, and its #285 r4 warning -- "the
+        # directory whose real name is `/srv/oauth ` is NOT covered" -- can
+        # only fire on padding that survives this hand-off. A `.strip()` here
+        # erased exactly that evidence for the first and last entry (#289).
+        # The stripped form decides only whether to set the variable at all,
+        # so a whitespace-only value stays absent rather than rendering an
+        # empty rule.
+        raw_extra_deny = os.environ.get(_ENV_EXTRA_DENY_DIRS, "")
+        if raw_extra_deny.strip():
+            harness_env[_ENV_EXTRA_DENY_DIRS] = raw_extra_deny
         # DELIVERY-side receipt (mepro#2012 r2, both gating seats converged):
         # a workflow validator can only prove the CONFIG carries a window;
         # this line is the one place that knows what the spawned harness
