@@ -513,14 +513,38 @@ somewhere the config does not show:
   session behind a filesystem permission rather than behind a rule, and makes
   the denylist entry redundant instead of load-bearing (`runner-setup.md`).
 
-Two things the receipts cannot tell you here. The proxy reports token usage as
-**local estimates** rather than upstream counts, so this seat's token and cost
-columns in `scripts/ab_metrics.py` are not measurements — read its findings,
-not its arithmetic. And plan exhaustion answers `429 {"message": "The usage
-limit has been reached"}` only after roughly 167 seconds per attempt, which the
-CLI retries: the branch looks busy rather than blocked for minutes before the
-text reaches the classifier. It *is* classified as throttling once it does, so
-the branch fails over honestly — it is just slower to say so than a normal 429.
+Three things the receipts cannot tell you here.
+
+**The substitution detector is blind on this seat.** Elsewhere in the fleet a
+receipt whose answering `model` disagrees with its `label` is how a gateway
+serving something other than the configured model gets caught. This proxy
+echoes the REQUESTED model name back instead of reporting what served the
+request — measured 2026-09-07 against a live session: a `/v1/messages` call for
+`claude-opus-5` came back with `"model": "claude-opus-5"` and an answer from an
+OpenAI model. So on `codex-proxy` the two fields agree by construction, always,
+and the check can never fire. Do not read a clean label/model comparison on this
+seat as evidence of anything.
+
+The same measurement is the reassuring half of the story, and it is worth
+stating beside the gap: this proxy has **no Anthropic backend at all** — even an
+Anthropic-shaped model name routes to Codex (`CCP_ALIAS_PROVIDER`, default
+`codex`). The hazard `requires_base_url` exists to prevent — a `gpt-…`-labelled
+seat quietly reviewing with real Claude — therefore cannot happen *through* the
+proxy. It can only happen by bypassing it, which is precisely the auth mode the
+preset refuses.
+
+**Token and cost columns are fiction.** The proxy reports usage as local
+estimates rather than upstream counts (`cache_creation_input_tokens` and
+`cache_read_input_tokens` come back 0 by construction), so this seat's figures
+in `scripts/ab_metrics.py` are not measurements. Read its findings, not its
+arithmetic.
+
+**Exhaustion is slow to announce itself.** Plan exhaustion answers
+`429 {"message": "The usage limit has been reached"}` only after roughly 167
+seconds per attempt, which the CLI retries: the branch looks busy rather than
+blocked for minutes before the text reaches the classifier. It *is* classified
+as throttling once it does, so the branch fails over honestly — it is just
+slower to say so than a normal 429.
 
 ## Session transcripts (`FUKO_TRANSCRIPT_DIR`)
 
