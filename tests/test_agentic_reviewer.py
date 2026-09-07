@@ -741,7 +741,13 @@ def test_parse_diff_resets_state_between_files():
 
 
 def test_parse_review_tolerates_braces_inside_finding_text():
-    """`rfind('}')` takes the LAST brace, so braces in a body are not a truncation."""
+    """The scan tracks strings, so braces in a body are structure to nobody.
+
+    `_scan_object` is inside the quoted `body` when it reads them, so the depth
+    never moves and `end` lands on the document's own closing brace. It is also
+    still inside the string for the `{` of `{z}`, which is why a body quoting
+    code does not read as a second candidate review.
+    """
     payload = {
         "summary": "s",
         "findings": [
@@ -1063,16 +1069,16 @@ def test_a_pruned_payload_that_still_fails_is_discarded_on_the_original_error(mo
     assert "conclusion" in str(excinfo.value), "the message describes the model's payload"
 
 
-def test_a_whole_payload_followed_by_prose_with_a_brace_publishes_degraded():
-    """Recovered entire, and still not called whole -- the label is the cheap half.
+def test_a_whole_payload_followed_by_prose_with_a_brace_is_not_degraded():
+    """#276: the trailing sentence is identified as prose, so nothing was lost.
 
-    The slice runs to the LAST `}`, so a closing sentence containing one drags
-    prose into the body and `json.loads` reports `Extra data`. Everything is
-    recovered, but the round is reported degraded anyway: `done` is reserved for
-    a payload that parsed in one piece, because no check on a leading object can
-    establish that the text behind it is not the real review. The needless label
-    is tracked separately; publishing a warm-up object as clean is not a trade
-    available for it.
+    The slice used to run to the LAST `}`, so a closing sentence containing one
+    dragged prose into the body, `json.loads` reported `Extra data`, and a
+    review that arrived intact was published `degraded` -- withholding a merge
+    from consumers gating on `done`. The scan now observes where the object
+    closes, so the sentence never enters the body at all. The label is refused
+    because the tail is positively known to be prose, not because a check on the
+    leading object cleared it -- that check is the one #273 proved impossible.
     """
     payload = {
         "summary": "s",
@@ -1082,9 +1088,26 @@ def test_a_whole_payload_followed_by_prose_with_a_brace_publishes_degraded():
     }
     review = parse_review(json.dumps(payload) + "\n\nI also checked map[k] handling } done.")
 
-    assert review.degraded.startswith("payload tail lost:")
+    assert review.degraded == ""
     assert len(review.findings) == 1 and len(review.examined) == 1
     assert [p.id for p in review.prior_status] == ["fk_1"]
+
+
+def test_prose_carrying_an_opening_brace_costs_the_round():
+    """The cost side of the loose rival test, pinned so the trade-off is visible.
+
+    Anything after the close that opens a brace is treated as a second candidate
+    review, including a closing sentence that quotes code. Narrowing the test to
+    "brace followed by a quoted key" would spare this round and reopen #273's
+    hole, because a stub whose rival is malformed enough to miss the narrow test
+    publishes as clean. A failed round is the direction this module is willing
+    to be wrong in.
+    """
+    payload = {"summary": "s", "findings": [{"file": "a.py", "title": "t", "body": "b"}]}
+    with pytest.raises(ReviewParseError) as excinfo:
+        parse_review(json.dumps(payload) + "\n\nI also checked the `if (x) { y }` branch.")
+
+    assert "two candidate reviews" in str(excinfo.value)
 
 
 def test_a_preamble_object_before_the_review_is_refused_not_published():
@@ -1093,27 +1116,160 @@ def test_a_preamble_object_before_the_review_is_refused_not_published():
     A model that narrates before answering makes the first object in the text a
     stub, and `findings` defaults to empty -- so a recovery that stopped there
     would report a clean pass for a round whose verdict is further down the same
-    message. The anchor refuses it.
+    message. The rival test refuses it before anything is decoded: the anchor
+    could not, because the stub parses WHOLE and `AgenticReview` fills in the
+    verdict it never stated.
     """
     with pytest.raises(ReviewParseError):
         parse_review('{"summary": "thinking out loud"} then the real one: {"findings": []}')
 
 
-def test_a_stub_carrying_findings_before_the_real_review_never_reads_as_clean():
-    """The anchor admits a warm-up object; `degraded` is what stops it passing.
+def test_a_stub_carrying_findings_before_the_real_review_is_refused():
+    """The anchor admits a warm-up object; the rival test is what refuses it.
 
     A stub that satisfies `findings` with an empty list is indistinguishable
-    from a round that found nothing, so the anchor alone cannot refuse it. What
-    can be guaranteed is that such a payload never parsed whole -- so it is
-    published degraded, gets the harness dump carrying the discarded verdict,
-    and reads as `done` to nobody (all three seats on #273, twice).
+    from a round that found nothing, so the anchor alone cannot refuse it. This
+    used to be published degraded -- a real verdict reduced to an empty one,
+    correct only in that it never read as `done`. Two objects in the message is
+    now grounds to discard the round outright, which is the honest answer: fuko
+    cannot tell which of them is the review, so it states no verdict rather than
+    the stub's.
     """
     stub = '{"summary": "warming up", "findings": []}'
     real = '{"summary": "s", "findings": [{"file": "a.py", "title": "t", "body": "b"}]}'
-    review = parse_review(f"{stub} ... and now the review: {real}")
+    with pytest.raises(ReviewParseError):
+        parse_review(f"{stub} ... and now the review: {real}")
 
-    assert review.findings == []
+
+def test_a_stub_before_a_truncated_review_never_publishes_as_a_whole_round():
+    """#279: the exact shape the last brace used to hand to the stub.
+
+    The real review is cut mid-finding, so the only `}` in the message is the
+    warm-up object's own -- the old slice discarded everything after it and the
+    stub then parsed in ONE PIECE, publishing `done` with zero findings, no
+    `degraded`, and no harness dump, while the verdict sat in the suffix. The
+    second object is damaged, which is why this had to be settled lexically: a
+    guard that decodes the rival in order to see it cannot see this one.
+    """
+    text = (
+        '{"summary": "warming up", "findings": []} then: '
+        '{"summary": "s", "findings": [{"file": "a.py", "title": "t"'
+    )
+    with pytest.raises(ReviewParseError) as excinfo:
+        parse_review(text)
+
+    assert "two candidate reviews" in str(excinfo.value)
+
+
+def test_a_cut_inside_the_first_coverage_entry_keeps_the_findings():
+    """#279: a complete `findings` array is no longer hidden by a finding's own brace.
+
+    Cut inside `examined[0]`, the last `}` in the text belongs to the finding, so
+    the slice stopped before the `]` that closed `findings` and the only boundary
+    left was the comma after `summary` -- a prefix with no anchor, so the round
+    was discarded with its verdict intact in the bytes. The same payload damaged
+    one entry later salvaged fine, which is how narrow the hole was and why it
+    went unseen. The salvage now runs over all the text the message has.
+    """
+    text = (
+        '{"summary": "s", "findings": [{"file": "a.py", "title": "t", "body": "b"}], '
+        '"examined": [{"file": "x.py", "checked": "c'
+    )
+    review = parse_review(text)
+
+    assert [f.title for f in review.findings] == ["t"]
+    assert review.examined == []
     assert review.degraded.startswith("payload tail lost:")
+
+
+def test_a_payload_that_never_closes_at_all_is_salvaged_not_refused():
+    """No `}` anywhere is a truncated review, not an absent one.
+
+    The old guard read "last `}` at or before the first `{`" as "no JSON object
+    here" and raised before the salvage could look, so a stream cut before the
+    document's first closing brace cost the round unconditionally. Absence is
+    now decided by the opening brace alone; everything after it is text the
+    salvage is entitled to work on.
+    """
+    review = parse_review('{"summary": "s", "findings": [], "examined": [{"file": "x.py"')
+
+    assert review.findings == [] and review.summary == "s"
+    assert review.degraded.startswith("payload tail lost:")
+
+
+def test_a_cut_at_a_member_boundary_is_still_reported_as_a_truncated_round():
+    """A truncation that leaves no remainder is still a truncation.
+
+    Cut immediately after the bracket that closed `findings`, the salvage
+    recovers the whole prefix and drops nothing, so the trailing-punctuation
+    exemption -- written for a document that CLOSED with every member present --
+    would call this round whole. It was not: the stream stopped mid-object, the
+    coverage ledger and every verdict after it are gone, and a `done` with no
+    `degraded` gets no harness dump for the operator to read. The document's
+    missing close is what separates the two.
+    """
+    review = parse_review('{"summary": "s", "findings": []')
+
+    assert review.findings == [] and review.summary == "s"
+    assert review.degraded == "payload never closed: reviewer output ended mid-object"
+
+
+def test_a_desync_that_closes_on_a_bracket_still_salvages_rather_than_refusing():
+    """A depth that hits 0 on a `]` is a miscount, not a close, so no `{` after it is a rival.
+
+    An unescaped quote pair around a brace inside an `examined` conclusion --
+    the #255 damage shape, quoting code the module says models do constantly --
+    leaves every depth one too low, so `examined`'s own `]` reads as the end of
+    the document. Anything holding an object after it (here `prior_status`, and
+    `examined[1]` before that) would then look like a second candidate review
+    and cost the round a verdict it is carrying, which is worse than the salvage
+    this shape used to get. Closing on a bracket is the witness: it cannot
+    happen to a body that starts at a `{`.
+    """
+    text = (
+        '{"summary": "s", "findings": [{"file": "a.py", "title": "t", "body": "b"}], '
+        '"examined": [{"file": "x.py", "conclusion": "contains(&"}") ok"}, {"file": "y.py"}], '
+        '"prior_status": [{"id": "k1", "status": "open"}]}'
+    )
+    review = parse_review(text)
+
+    assert [f.title for f in review.findings] == ["t"]
+    assert review.degraded.startswith("payload tail lost:")
+
+
+def test_a_desync_that_closes_on_a_brace_is_still_refused_when_an_object_follows():
+    """The bracket witness does not spare a close that really is a `}`.
+
+    The stray quote is in `summary`, so the scan and the decoder agree the
+    object ended at the `}` inside it -- a bogus close no lexical test can tell
+    from a real one, which is why the witness declines to try. A `{` after it is
+    still read as a rival and the round still refused. That is the residual case
+    the witness leaves open, and it is on the side this module chooses: a failed
+    round, never a verdict fuko cannot attribute. Anything weaker on this side
+    of the `char != "}"` test has to keep this passing.
+    """
+    with pytest.raises(ReviewParseError) as excinfo:
+        parse_review('{"summary": "he said "} then {"findings": []}')
+
+    assert "two candidate reviews" in str(excinfo.value)
+
+
+def test_a_desync_that_closes_on_a_brace_with_no_object_after_it_loses_only_prose():
+    """The one shape that publishes `done` on a bogus close, recorded as a decision.
+
+    A stray quote in `summary` -- the contract's only top-level string -- lets
+    the decoder agree with the scan that the object closed inside it, so the
+    body parses whole and nothing degrades. `main` refused this input outright.
+    The verdict survives regardless: `findings`, `examined` and `prior_status`
+    are lists whose entries open with a `{`, so a tail carrying any of them is
+    refused as a rival instead, and what is lost here is the rest of a sentence.
+    Correcting it would mean degrading a round on a guess about its tail, which
+    is exactly the loss #276 says must not be reported.
+    """
+    review = parse_review('{"summary": "he said "} below.", "findings": [], "examined": []}')
+
+    assert review.summary == "he said " and review.findings == []
+    assert review.degraded == ""
 
 
 def test_a_trailing_comma_costs_a_comma_and_is_not_reported_as_a_loss():
