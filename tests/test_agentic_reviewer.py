@@ -2100,14 +2100,97 @@ def test_permission_rules_use_the_double_slash_absolute_spelling():
         assert not rule.startswith("Read(/home"), rule  # the single-slash form
 
 
-def test_permission_rules_skip_non_posix_roots_and_say_so(capsys):
-    """A rule we cannot vouch for is worse than none: skip it, and make it loud."""
+def test_permission_rules_skip_non_posix_roots_and_say_so(monkeypatch, capsys):
+    """A rule we cannot vouch for is worse than none: skip it, and make it loud.
+
+    Simulates the Windows runner rather than merely its path spelling: off
+    POSIX the backslash is the separator, so the value is rewritten to render
+    in the report at all. On POSIX the same string means something else
+    entirely -- see the backslash tests below.
+    """
+    monkeypatch.setattr(os, "name", "nt")
     settings = json.loads(harness_mod._permission_settings({"USERPROFILE": r"C:\Users\runner"}))
     # Only the HOME-derived rules are dropped; the system rules do not need HOME.
     assert not any("Users" in rule for rule in settings["permissions"]["deny"])
     err = capsys.readouterr().err
     assert "NOT applied" in err
     assert "C:/Users/runner/.claude" in err
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a backslash is a path separator off POSIX")
+def test_a_backslash_in_home_is_refused_not_rewritten_on_posix(capsys):
+    """#271: on POSIX a backslash in HOME is part of the directory's name.
+
+    Rewriting it to `/` -- what this builder did until now -- emitted rules for
+    `/home/run/ner/.claude`, a directory that does not exist, while the real
+    `~/.claude` under `/home/run\\ner` stayed readable. There is no producing
+    side to refuse this earlier, so the rule builder has to.
+    """
+    deny = json.loads(harness_mod._permission_settings({"HOME": "/home/run\\ner"}))["permissions"][
+        "deny"
+    ]
+    assert not any("/home/run" in rule for rule in deny)
+    # Only the HOME-derived rules are lost; the system and tool denials stand.
+    assert "Read(//proc/**)" in deny
+    assert "Bash" in deny
+    err = capsys.readouterr().err
+    assert "NOT applied" in err
+    assert "HOME" in err
+    assert "backslash" in err
+    # The value is printed `repr`-style, so the backslash arrives doubled.
+    assert repr("/home/run\\ner") in err
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a backslash is a path separator off POSIX")
+@pytest.mark.parametrize("key", ["CLAUDE_CONFIG_DIR", "FUKO_AMBIENT_CLAUDE_CONFIG_DIR"])
+def test_a_backslash_in_a_config_dir_is_refused_not_rewritten_on_posix(key, capsys):
+    """Same defect, second candidate: the config dir is denied by its own name."""
+    deny = json.loads(
+        harness_mod._permission_settings({"HOME": "/home/runner", key: "/cfg/cl\\aude"})
+    )["permissions"]["deny"]
+    assert not any("/cfg/cl" in rule for rule in deny)
+    # The refusal is per candidate: HOME's own rules are unaffected.
+    assert "Read(//home/runner/.claude/**)" in deny
+    err = capsys.readouterr().err
+    assert key in err
+    assert "backslash" in err
+
+
+def test_a_root_home_anchors_its_stores(capsys):
+    """#271 addendum: `HOME=/` used to be `rstrip`ped to "" and silently skipped.
+
+    The root is a perfectly good PARENT: a service uid with `HOME=/` keeps its
+    `~/.claude` at `/.claude`, which is an ordinary absolute path with an
+    ordinary rule. Denying the stores beats announcing that they are undenied,
+    so this case gets rules rather than a stderr line.
+    """
+    deny = json.loads(harness_mod._permission_settings({"HOME": "/"}))["permissions"]["deny"]
+    assert "Read(//.claude/**)" in deny
+    assert "Read(//.ssh/**)" in deny
+    assert "Read(//.netrc)" in deny
+    assert not any(rule in ("Read(//**)", "Read(///**)") for rule in deny)
+    for rule in _path_rules(deny):
+        assert "///" not in rule, rule
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("key", ["CLAUDE_CONFIG_DIR", "FUKO_AMBIENT_CLAUDE_CONFIG_DIR"])
+def test_a_root_config_dir_is_refused_not_silently_dropped(key, capsys):
+    """#271 addendum: a config dir that IS the root cannot be denied by name.
+
+    Unlike HOME, this candidate is denied itself, and `Read(//**)` would deny
+    the checkout under review along with everything else. The old code
+    `rstrip`ped it to "" and skipped it without a word; the operator now hears
+    that the config dir is readable.
+    """
+    deny = json.loads(harness_mod._permission_settings({"HOME": "/home/runner", key: "/"}))[
+        "permissions"
+    ]["deny"]
+    assert not any(rule in ("Read(//**)", "Read(///**)") for rule in deny)
+    assert "Read(//home/runner/.claude/**)" in deny
+    err = capsys.readouterr().err
+    assert key in err
+    assert "filesystem root" in err
 
 
 @pytest.mark.parametrize("home", ["//home/runner", "///home/runner", "/home/runner"])

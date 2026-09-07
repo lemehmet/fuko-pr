@@ -256,14 +256,53 @@ def _unrepresentable(path: str) -> str | None:
         return "it is the filesystem root"
     if os.name == "posix" and "\\" in path:
         # A backslash is an ORDINARY POSIX filename character. Rewriting it to
-        # `/` -- what this builder used to do, and what #271 still does for the
-        # HOME-derived rules -- silently names a DIFFERENT directory:
-        # `/srv/cred\store` becomes `/srv/cred/store`.
+        # `/` -- what this builder used to do for every candidate, until #285
+        # (operator-declared) and #271 (HOME and config dirs) -- silently names
+        # a DIFFERENT directory: `/srv/cred\store` becomes `/srv/cred/store`.
         return (
             "it contains a backslash, an ordinary POSIX filename character "
             "that this rule syntax cannot carry"
         )
     return None
+
+
+def _environment_root(env: dict[str, str], key: str, *, root_is_a_parent: bool) -> str | None:
+    """The directory ``env[key]`` names, normalized for rule building, or ``None``.
+
+    ``None`` means either the variable is unset or empty (nothing to say) or
+    its value cannot anchor a rule -- in which case the refusal is announced on
+    stderr, because a candidate that is dropped before the ``unusable`` report
+    can see it is exactly the silent skip this builder exists to avoid (#271).
+
+    ``root_is_a_parent`` says whether the value is denied ITSELF (a config dir,
+    where ``/`` would render ``Read(//**)`` and blind the reviewer to the
+    checkout) or only anchors children (``HOME``, whose ``/`` is a perfectly
+    good parent for ``/.claude`` and ``/.ssh``). Only in the first case is the
+    filesystem root a reason to refuse.
+    """
+    value = env.get(key) or ""
+    if not value:
+        return None
+    if os.name != "posix":
+        # Off POSIX the backslash IS the separator, and the rewrite is what lets
+        # a Windows-shaped value render at all -- into the `unusable` report,
+        # since `C:/Users/...` is not POSIX-absolute. On POSIX the same byte is
+        # an ordinary filename character, and rewriting it would name a
+        # directory that does not exist; that case is refused below instead.
+        value = value.replace("\\", "/")
+    root = value.rstrip("/")
+    if root == "" and root_is_a_parent:
+        return ""
+    reason = _unrepresentable(value)
+    if reason:
+        print(
+            f"fuko: credential denylist NOT applied for {key}={value!r} -- {reason}. "
+            "Every deny rule derived from it is missing, so what lives under it is "
+            "readable by the reviewer; rename or relocate it.",
+            file=sys.stderr,
+        )
+        return None
+    return root
 
 
 def _permission_settings(env: dict[str, str]) -> str:
@@ -280,10 +319,18 @@ def _permission_settings(env: dict[str, str]) -> str:
     Such a root is skipped and announced on stderr instead, so the operator
     learns the credential denylist is not in force on that runner rather than
     discovering it from a leaked review.
+
+    The same holds for a root this syntax cannot carry at all: a ``HOME`` or
+    config dir holding a backslash on POSIX, or a config dir that IS the
+    filesystem root. Neither is rewritten into a rule for some other directory;
+    each is refused and announced (#271). A ``HOME`` of ``/`` is not in that
+    set -- its stores are ``/.claude``, ``/.ssh``, ..., which are ordinary
+    absolute paths and get ordinary rules.
     """
     candidates: list[tuple[str, bool]] = []  # (path, is_directory)
-    home = (env.get("HOME") or env.get("USERPROFILE") or "").replace("\\", "/").rstrip("/")
-    if home:
+    home_key = "HOME" if env.get("HOME") else "USERPROFILE"
+    home = _environment_root(env, home_key, root_is_a_parent=True)
+    if home is not None:
         candidates += [(f"{home}/{d}", True) for d in SENSITIVE_HOME_DIRS]
         candidates += [(f"{home}/{f}", False) for f in SENSITIVE_HOME_FILES]
     # Both the config dir the harness will USE and any ambient one it replaced.
@@ -297,7 +344,7 @@ def _permission_settings(env: dict[str, str]) -> str:
     # it accumulates this run's own session state, and the ambient one,
     # because it is the higher-value target and the reason this rule exists.
     for key in ("CLAUDE_CONFIG_DIR", _ENV_AMBIENT_CONFIG_DIR):
-        config_dir = (env.get(key) or "").replace("\\", "/").rstrip("/")
+        config_dir = _environment_root(env, key, root_is_a_parent=False)
         if config_dir:
             candidates.append((config_dir, True))
     # The session-transcript corpus (#237). Same reasoning as the config dirs
