@@ -56,9 +56,11 @@ job_budget_minutes = 110
 # HISTORY. Both QwenCloud plans exhausted on the same day, so all three seats
 # went dark together: henry (the gate), dorian (the stateless arm) and gray
 # (the stateful arm). gray came back on ChatGPT/Codex through the `codex-proxy`
-# preset and is now the gating seat; henry and dorian are still qwen and still
-# dark, and are left in place rather than deleted because a plan window reopens
-# and re-adding a seat by hand loses the reasoning attached to it.
+# preset and is now the ONLY gating seat; henry and dorian are still qwen, still
+# dark, and both non-gating for the duration (henry was demoted from active on
+# the same day — see its own note). They are left in place rather than deleted
+# because a plan window reopens and re-adding a seat by hand loses the
+# reasoning attached to it.
 #
 # Read the rest of this block as the record of an experiment that did not
 # finish, not as a description of what runs. What actually runs today is ONE
@@ -105,11 +107,22 @@ job_budget_minutes = 110
 # var, which is global rather than per-entry and is OFF. It is not part of this
 # A/B; turning it on would change both arms at once.
 
-# henry — DARK since 2026-09-07 (QwenCloud plan exhausted). Still `active`, so
-# a round that finds the plan reopened gates on it again without an edit; until
-# then it fails its branch on the first call. Left configured on purpose — the
-# entry is cheap when dead and the reasoning below is not recoverable from a
-# git log a year from now.
+# henry — DARK since 2026-09-07 (QwenCloud plan exhausted) and DEMOTED to trial
+# for the duration. Left configured on purpose: the entry is cheap when dead and
+# the reasoning below is not recoverable from a git log a year from now.
+#
+# WHY NOT LEFT `active`. Two reasons, and the second is the one that decided it.
+# A dark seat still starts a branch, and if the gateway stalls rather than
+# erroring it burns up to `tool_timeout` — 30 minutes — before failing over.
+# Worse: QwenCloud's exhausted plans have been observed to degrade SILENTLY to a
+# smaller model rather than erroring, and this fleet's substitution detector
+# compares a receipt's label against its answering model, which a silent
+# downgrade inside one gateway does not move. That would be a weak review
+# gating merges under a `qwen3.8-max` label with no receipt saying otherwise.
+# Non-gating costs nothing and removes both.
+#
+# PROMOTE IT BACK when the plan reopens — it is one line, and a reopened plan is
+# something you notice rather than something the config should guess at.
 #
 # It was the GATING seat: same provider, same model, same harness as both trial
 # seats. Kept gating so a round still had a reviewer that was not part of the
@@ -132,6 +145,7 @@ name = "qwen3.8-max"
 max_context = 1000000
 auth = "api-key"
 backend = "agentic"
+role = "trial"
 token_env = "FUKO_GITHUB_TOKEN_HENRY"
 
 # dorian — DARK since 2026-09-07, same plan exhaustion as henry, and now a
