@@ -50,6 +50,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import posixpath
 import re
 import shutil
 import subprocess
@@ -241,7 +242,7 @@ SENSITIVE_HOME_FILES = (
 SENSITIVE_SYSTEM_DIRS = ("/proc", "/sys", "/dev")
 
 
-def _unrepresentable(path: str) -> str | None:
+def _unrepresentable(path: str, *, root_is_a_parent: bool = False) -> str | None:
     """Why this rule builder cannot express ``path``, or ``None`` if it can.
 
     The same family ``transcript_dir`` and the blob-root validator refuse at
@@ -249,11 +250,10 @@ def _unrepresentable(path: str) -> str | None:
     rename the operator's directory and can only decline to pretend it is
     covered. Returned as a reason rather than raised, because a declaration
     fuko cannot honour must not fail the review; it must be announced.
+
+    ``root_is_a_parent`` says the path only anchors children (``HOME``), where
+    the root is a perfectly good parent and is not a reason to refuse.
     """
-    if path.rstrip("/") == "":
-        # `rstrip("/")` reduces the root to the empty string, which is then
-        # dropped before the non-POSIX report can see it.
-        return "it is the filesystem root"
     if os.name == "posix" and "\\" in path:
         # A backslash is an ORDINARY POSIX filename character. Rewriting it to
         # `/` -- what this builder used to do for every candidate, until #285
@@ -263,6 +263,21 @@ def _unrepresentable(path: str) -> str | None:
             "it contains a backslash, an ordinary POSIX filename character "
             "that this rule syntax cannot carry"
         )
+    if root_is_a_parent:
+        return None
+    if path.rstrip("/") == "":
+        # `rstrip("/")` reduces the root to the empty string, which is then
+        # dropped before the non-POSIX report can see it.
+        return "it is the filesystem root"
+    if posixpath.normpath(path).rstrip("/") == "":
+        # `/.` and `/tmp/..` are the root by another spelling (#286). Decided
+        # LEXICALLY, not with `realpath`: the question is whether a rule
+        # rendered from this value -- `Read(//./**)`, `Read(//tmp/../**)` --
+        # collapses to `Read(//**)` under a path normalizer and blinds the
+        # reviewer to the checkout, and that does not depend on what the
+        # kernel says `/tmp` is on this host (a symlink into `/private` on
+        # darwin, where `realpath("/tmp/..")` is not the root at all).
+        return f"it is the filesystem root ({path!r} normalizes to '/')"
     return None
 
 
@@ -279,6 +294,10 @@ def _environment_root(env: dict[str, str], key: str, *, root_is_a_parent: bool) 
     checkout) or only anchors children (``HOME``, whose ``/`` is a perfectly
     good parent for ``/.claude`` and ``/.ssh``). Only in the first case is the
     filesystem root a reason to refuse.
+
+    The value comes back as DECLARED (``/.`` stays ``/.``, an alias stays an
+    alias). Its canonical spelling is a second rule the caller adds beside it
+    via :func:`_canonical_twin`, never a replacement for it.
     """
     value = env.get(key) or ""
     if not value:
@@ -290,10 +309,7 @@ def _environment_root(env: dict[str, str], key: str, *, root_is_a_parent: bool) 
         # an ordinary filename character, and rewriting it would name a
         # directory that does not exist; that case is refused below instead.
         value = value.replace("\\", "/")
-    root = value.rstrip("/")
-    if root == "" and root_is_a_parent:
-        return ""
-    reason = _unrepresentable(value)
+    reason = _unrepresentable(value, root_is_a_parent=root_is_a_parent)
     if reason:
         print(
             f"fuko: credential denylist NOT applied for {key}={value!r} -- {reason}. "
@@ -302,7 +318,59 @@ def _environment_root(env: dict[str, str], key: str, *, root_is_a_parent: bool) 
             file=sys.stderr,
         )
         return None
-    return root
+    return value.rstrip("/")
+
+
+def _canonical_twin(path: str, declared_as: str) -> str | None:
+    """The canonical spelling of ``path`` to deny BESIDE it, or ``None``.
+
+    A rule is matched against the path the agent spells, so a rule for an alias
+    leaves the store readable under its real name -- the bypass ``transcript_dir``
+    resolves away before its paths ever reach this builder, and the one #286
+    found still open for the HOME-derived stores (a symlinked ``HOME``, a
+    symlinked ``~/.ssh``, a ``HOME`` of ``/.``). Both spellings are emitted
+    rather than the declared one replaced: whether the CLI resolves a path
+    before matching is its business and could change between versions, and an
+    extra inert rule costs nothing where a missing one costs the credential.
+
+    ``None`` when ``path`` is already canonical (nothing to add), when it is not
+    POSIX-absolute (resolving a relative or Windows-shaped value against the
+    working directory would invent a rule nobody declared; the ``unusable``
+    report handles it), or when the target cannot be resolved or expressed --
+    both announced, because a target that is NOT additionally denied is exactly
+    the readable-under-its-real-name hole, and the operator should hear so.
+    The canonical target gets the SAME representability check as the declared
+    spelling (#285 r4): a clean alias can resolve to a target holding a
+    backslash, or to ``/``, and appending either unchecked reintroduces the
+    wrong-rule bug one indirection later.
+    """
+    if not path.startswith("/"):
+        return None
+    try:
+        # Non-strict: the prefix is resolved even where the leaf does not exist
+        # yet, which is the normal state of a store the runner has not created.
+        resolved = os.path.realpath(path)
+    except (OSError, RuntimeError):
+        # A resolution loop or an unreadable parent. The declared rule is
+        # already emitted; losing the canonical one is worth a sentence on
+        # stderr, not a failed review.
+        print(
+            f"fuko: could not canonicalize {declared_as}; only the declared spelling is denied.",
+            file=sys.stderr,
+        )
+        return None
+    if resolved.rstrip("/") == path.rstrip("/"):
+        return None
+    reason = _unrepresentable(resolved)
+    if reason:
+        print(
+            f"fuko: {declared_as} resolves to {resolved!r}, which is NOT additionally denied "
+            f"-- {reason}. Only the declared spelling is covered; reads through the "
+            "canonical path are not.",
+            file=sys.stderr,
+        )
+        return None
+    return resolved.rstrip("/")
 
 
 def _permission_settings(env: dict[str, str]) -> str:
@@ -326,13 +394,30 @@ def _permission_settings(env: dict[str, str]) -> str:
     each is refused and announced (#271). A ``HOME`` of ``/`` is not in that
     set -- its stores are ``/.claude``, ``/.ssh``, ..., which are ordinary
     absolute paths and get ordinary rules.
+
+    Every path rule is matched against the path the agent SPELLS, so a store
+    reachable under two names needs two rules: each HOME-derived store and each
+    config dir is denied under its declared spelling AND its canonical one
+    (#286), the way the operator-declared paths already were. A symlinked
+    ``HOME``, a symlinked ``~/.ssh`` under a real one, and a ``HOME`` of ``/.``
+    all read the same to the kernel and differently to a rule; the resolved
+    spelling goes through the same representability check as the declared one.
     """
     candidates: list[tuple[str, bool]] = []  # (path, is_directory)
     home_key = "HOME" if env.get("HOME") else "USERPROFILE"
     home = _environment_root(env, home_key, root_is_a_parent=True)
     if home is not None:
-        candidates += [(f"{home}/{d}", True) for d in SENSITIVE_HOME_DIRS]
-        candidates += [(f"{home}/{f}", False) for f in SENSITIVE_HOME_FILES]
+        # Per STORE rather than once for HOME: resolving the root would cover a
+        # symlinked home and miss a symlinked `~/.ssh` under a real one, and
+        # the per-store resolution covers both, since the home prefix is part
+        # of every store's path.
+        stores = [(f"{home}/{d}", True) for d in SENSITIVE_HOME_DIRS]
+        stores += [(f"{home}/{f}", False) for f in SENSITIVE_HOME_FILES]
+        for store, is_dir in stores:
+            candidates.append((store, is_dir))
+            twin = _canonical_twin(store, f"{home_key}-derived path {store!r}")
+            if twin:
+                candidates.append((twin, is_dir))
     # Both the config dir the harness will USE and any ambient one it replaced.
     #
     # The caller may redirect CLAUDE_CONFIG_DIR at a private per-branch
@@ -347,6 +432,9 @@ def _permission_settings(env: dict[str, str]) -> str:
         config_dir = _environment_root(env, key, root_is_a_parent=False)
         if config_dir:
             candidates.append((config_dir, True))
+            twin = _canonical_twin(config_dir, f"{key}={config_dir!r}")
+            if twin:
+                candidates.append((twin, True))
     # The session-transcript corpus (#237). Same reasoning as the config dirs
     # one line up, and a higher-value target than either: a transcript holds
     # every `user` tool-result event of a past run -- the full contents of every
@@ -416,48 +504,12 @@ def _permission_settings(env: dict[str, str]) -> str:
             continue
         extra_deny = entry.rstrip("/")
         candidates.append((extra_deny, True))
-        # ALSO deny the canonical target. A rule is matched against the path
-        # the agent spells, so an alias-only rule leaves the store readable
-        # under its real name -- the same bypass `transcript_dir` resolves away
-        # before it ever reaches here (`test_a_symlinked_destination_resolves_
-        # to_its_target`), and the operator declaring a symlinked or
-        # `..`-containing store is the realistic case, not the adversarial one.
-        #
-        # BOTH spellings, rather than replacing the declared one: whether the
-        # CLI resolves a path before matching is its business and could change,
-        # and an extra inert rule costs nothing where a missing one costs the
-        # credential. Only for entries already absolute -- a relative one must
-        # still reach the `unusable` report below rather than be silently
-        # repaired into a rule the operator never wrote.
-        if extra_deny.startswith("/"):
-            try:
-                resolved = Path(extra_deny).resolve().as_posix()
-            except (OSError, RuntimeError):
-                # A resolution loop or an unreadable parent. The declared rule
-                # is already emitted; losing the canonical one is worth a
-                # sentence on stderr, not a failed review.
-                print(
-                    f"fuko: could not canonicalize deny path {extra_deny!r}; "
-                    "only the declared spelling is denied.",
-                    file=sys.stderr,
-                )
-            else:
-                # The canonical target gets the SAME representability checks as
-                # the declared spelling (#285 r4): a clean alias can resolve to
-                # a target holding a backslash, or to `/`, and appending either
-                # unchecked reintroduces the wrong-rule bug one indirection
-                # later. A target this cannot express means the alias rule is
-                # the only cover there is, which is worth saying out loud.
-                target_reason = _unrepresentable(resolved)
-                if target_reason:
-                    print(
-                        f"fuko: declared path {entry!r} resolves to {resolved!r}, which is "
-                        f"NOT additionally denied -- {target_reason}. Only the declared "
-                        "spelling is covered; reads through the canonical path are not.",
-                        file=sys.stderr,
-                    )
-                elif resolved.rstrip("/") != extra_deny:
-                    candidates.append((resolved.rstrip("/"), True))
+        # ALSO deny the canonical target -- the operator declaring a symlinked
+        # or `..`-containing store is the realistic case, not the adversarial
+        # one. See `_canonical_twin` for why both spellings rather than one.
+        twin = _canonical_twin(extra_deny, f"declared path {entry!r}")
+        if twin:
+            candidates.append((twin, True))
     # Unconditional: these do not depend on HOME, and on a runner without one
     # they are the only rules that remain.
     candidates += [(d, True) for d in SENSITIVE_SYSTEM_DIRS]
@@ -480,6 +532,10 @@ def _permission_settings(env: dict[str, str]) -> str:
         for path, is_dir in candidates
         if path.startswith("/")
     ]
+    # Two spellings can render as one rule (`//home/x` and its canonical
+    # `/home/x` both lose their leading slashes here); the duplicate is inert
+    # but reads as a mistake in the payload.
+    deny = list(dict.fromkeys(deny))
     unusable = sorted({path for path, _ in candidates if not path.startswith("/")})
     if unusable:
         print(
