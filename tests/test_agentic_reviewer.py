@@ -741,7 +741,13 @@ def test_parse_diff_resets_state_between_files():
 
 
 def test_parse_review_tolerates_braces_inside_finding_text():
-    """`rfind('}')` takes the LAST brace, so braces in a body are not a truncation."""
+    """The scan tracks strings, so braces in a body are structure to nobody.
+
+    `_scan_object` is inside the quoted `body` when it reads them, so the depth
+    never moves and `end` lands on the document's own closing brace. It is also
+    still inside the string for the `{` of `{z}`, which is why a body quoting
+    code does not read as a second candidate review.
+    """
     payload = {
         "summary": "s",
         "findings": [
@@ -1110,7 +1116,9 @@ def test_a_preamble_object_before_the_review_is_refused_not_published():
     A model that narrates before answering makes the first object in the text a
     stub, and `findings` defaults to empty -- so a recovery that stopped there
     would report a clean pass for a round whose verdict is further down the same
-    message. The anchor refuses it.
+    message. The rival test refuses it before anything is decoded: the anchor
+    could not, because the stub parses WHOLE and `AgenticReview` fills in the
+    verdict it never stated.
     """
     with pytest.raises(ReviewParseError):
         parse_review('{"summary": "thinking out loud"} then the real one: {"findings": []}')
@@ -1187,6 +1195,62 @@ def test_a_payload_that_never_closes_at_all_is_salvaged_not_refused():
 
     assert review.findings == [] and review.summary == "s"
     assert review.degraded.startswith("payload tail lost:")
+
+
+def test_a_cut_at_a_member_boundary_is_still_reported_as_a_truncated_round():
+    """A truncation that leaves no remainder is still a truncation.
+
+    Cut immediately after the bracket that closed `findings`, the salvage
+    recovers the whole prefix and drops nothing, so the trailing-punctuation
+    exemption -- written for a document that CLOSED with every member present --
+    would call this round whole. It was not: the stream stopped mid-object, the
+    coverage ledger and every verdict after it are gone, and a `done` with no
+    `degraded` gets no harness dump for the operator to read. The document's
+    missing close is what separates the two.
+    """
+    review = parse_review('{"summary": "s", "findings": []')
+
+    assert review.findings == [] and review.summary == "s"
+    assert review.degraded == "payload never closed: reviewer output ended mid-object"
+
+
+def test_a_desync_that_closes_on_a_bracket_still_salvages_rather_than_refusing():
+    """A depth that hits 0 on a `]` is a miscount, not a close, so no `{` after it is a rival.
+
+    An unescaped quote pair around a brace inside an `examined` conclusion --
+    the #255 damage shape, quoting code the module says models do constantly --
+    leaves every depth one too low, so `examined`'s own `]` reads as the end of
+    the document. Anything holding an object after it (here `prior_status`, and
+    `examined[1]` before that) would then look like a second candidate review
+    and cost the round a verdict it is carrying, which is worse than the salvage
+    this shape used to get. Closing on a bracket is the witness: it cannot
+    happen to a body that starts at a `{`.
+    """
+    text = (
+        '{"summary": "s", "findings": [{"file": "a.py", "title": "t", "body": "b"}], '
+        '"examined": [{"file": "x.py", "conclusion": "contains(&"}") ok"}, {"file": "y.py"}], '
+        '"prior_status": [{"id": "k1", "status": "open"}]}'
+    )
+    review = parse_review(text)
+
+    assert [f.title for f in review.findings] == ["t"]
+    assert review.degraded.startswith("payload tail lost:")
+
+
+def test_a_whole_object_before_a_second_one_is_refused_even_under_a_desync():
+    """The bracket witness does not spare a close that really is a `}`.
+
+    A desync whose bogus close lands on a brace is indistinguishable from a
+    document that ended there, so a `{` after it is still read as a rival and
+    the round is still refused. That is the residual case the witness does not
+    cover, and it is on the side this module chooses: a failed round, never a
+    verdict fuko cannot attribute.
+    """
+    text = '{"summary": "s", "findings": [{"file": "a.py", "title": "t", "body": "b"}]} {"x": 1}'
+    with pytest.raises(ReviewParseError) as excinfo:
+        parse_review(text)
+
+    assert "two candidate reviews" in str(excinfo.value)
 
 
 def test_a_trailing_comma_costs_a_comma_and_is_not_reported_as_a_loss():

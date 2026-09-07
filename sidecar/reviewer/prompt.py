@@ -1089,9 +1089,20 @@ def _scan_object(body: str) -> _ObjectScan:
     first defect; past it an unescaped ``"`` inverts the string state, so
     :func:`_salvage_prefix` discards boundaries beyond the decoder's own error
     offset rather than trusting the tail. A desync can only make ``end`` land
-    early (on a brace that was really inside a string, leaving a body that stops
-    mid-structure and therefore cannot parse) or never land at all, so it costs
-    a salvage, never a false whole parse.
+    early -- on a closer that was really inside a string, leaving a body that
+    stops mid-structure and therefore cannot parse -- or never land at all, so
+    it never costs a false whole parse. It can cost more than a salvage, though:
+    an early ``end`` turns every later ``{`` into a rival, and the members that
+    carry objects (``examined``, ``prior_status``) follow the verdict, so the
+    round the salvage would have published is refused instead
+    (``qwen-anthropic/qwen3.8-max`` on #281). The common desync is cheap to
+    witness: ``body`` starts at a ``{``, so its outermost object can only be
+    closed by a ``}``, and reaching depth 0 on a ``]`` proves the depth has been
+    one too low since some earlier miscount. That is reported as never closing
+    rather than as an end, which hands the salvage all the text and leaves no
+    close for a rival to follow. The residual case -- a desync whose bogus close
+    is a ``}`` inside a string, with a ``{`` after it -- still refuses the
+    round, which is the direction this module has chosen to be wrong in.
 
     Past the close nothing is tracked but the one fact that changes the verdict:
     ANY ``{``, unconditionally, is treated as a second candidate review. The
@@ -1130,6 +1141,17 @@ def _scan_object(body: str) -> _ObjectScan:
             if depth == 1:
                 cuts.append(index + 1)
             elif depth == 0:
+                if char != "}":
+                    # A depth that reaches 0 on a `]` cannot be this object's
+                    # own close, because `body` starts at its `{` -- so the
+                    # count has been one too low since an unescaped `"` inverted
+                    # the string state earlier. Report never-closed: the salvage
+                    # then gets all the text (what the old `rfind` bound gave
+                    # this shape) and no bogus close is left for a later `{` to
+                    # look like a rival after. The cuts past here go with it,
+                    # and cost nothing -- the decoder fails at the desync, so
+                    # every one of them is past the offset the salvage honours.
+                    return _ObjectScan(cuts, None, rival=False)
                 end = index + 1
         elif char == "," and depth == 1:
             cuts.append(index)
@@ -1278,6 +1300,16 @@ def parse_review(text: str) -> AgenticReview:
         # of punctuation held no member, and can hide no second review either.
         if dropped.strip(_PUNCTUATION_ONLY):
             degraded = f"payload tail lost: unparseable JSON at char {e.pos}"
+        elif scan.end is None:
+            # Nothing followed the cut, but the document never closed either:
+            # the stream stopped at a member boundary, which is the one place a
+            # truncation leaves no remainder to report. The punctuation
+            # exemption above is for a document that CLOSED with every member
+            # present; reusing it here would publish a round that was cut off
+            # mid-stream as whole, on `done`, with no harness dump -- the exact
+            # thing this module says cannot happen by construction
+            # (`qwen-anthropic/qwen3.8-max` on #281).
+            degraded = "payload never closed: reviewer output ended mid-object"
     if isinstance(payload, dict):
         # Fuko's verdict on the payload, so it may not be READ from the payload:
         # the model writes into this object and a seat that could set its own
