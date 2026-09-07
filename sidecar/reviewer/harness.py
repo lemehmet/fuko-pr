@@ -303,8 +303,37 @@ def _permission_settings(env: dict[str, str]) -> str:
     # itself instead of quietly denying nothing.
     for entry in (env.get(_ENV_EXTRA_DENY_DIRS) or "").split("\n"):
         extra_deny = entry.strip().replace("\\", "/").rstrip("/")
-        if extra_deny:
-            candidates.append((extra_deny, True))
+        if not extra_deny:
+            continue
+        candidates.append((extra_deny, True))
+        # ALSO deny the canonical target. A rule is matched against the path
+        # the agent spells, so an alias-only rule leaves the store readable
+        # under its real name -- the same bypass `transcript_dir` resolves away
+        # before it ever reaches here (`test_a_symlinked_destination_resolves_
+        # to_its_target`), and the operator declaring a symlinked or
+        # `..`-containing store is the realistic case, not the adversarial one.
+        #
+        # BOTH spellings, rather than replacing the declared one: whether the
+        # CLI resolves a path before matching is its business and could change,
+        # and an extra inert rule costs nothing where a missing one costs the
+        # credential. Only for entries already absolute -- a relative one must
+        # still reach the `unusable` report below rather than be silently
+        # repaired into a rule the operator never wrote.
+        if extra_deny.startswith("/"):
+            try:
+                resolved = Path(extra_deny).resolve().as_posix().rstrip("/")
+            except (OSError, RuntimeError):
+                # A resolution loop or an unreadable parent. The declared rule
+                # is already emitted; losing the canonical one is worth a
+                # sentence on stderr, not a failed review.
+                print(
+                    f"fuko: could not canonicalize deny path {extra_deny!r}; "
+                    "only the declared spelling is denied.",
+                    file=sys.stderr,
+                )
+            else:
+                if resolved and resolved != extra_deny:
+                    candidates.append((resolved, True))
     # Unconditional: these do not depend on HOME, and on a runner without one
     # they are the only rules that remain.
     candidates += [(d, True) for d in SENSITIVE_SYSTEM_DIRS]

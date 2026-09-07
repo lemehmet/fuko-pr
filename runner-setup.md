@@ -82,13 +82,15 @@ A Linux x64 host with:
     unset does not fail cleanly, it resolves `auth = "auto"` to subscription
     mode, which the preset then refuses (deliberately: see
     `sidecar/presets.py`).
-    **Do not use `unused`**, which is what upstream's own examples suggest.
-    Every preset's key value is registered as a transcript secret and scrubbed
-    by substring replacement with no minimum length — correctly, because a
-    short real credential still needs redacting — so an ordinary word here
-    redacts itself out of every captured transcript, corrupting stored source,
-    tool results and the byte metrics derived from them. Pick something that
-    cannot appear in reviewed code.
+    **The value must not occur anywhere in the checkout.** Every preset's
+    key value is registered as a transcript secret and scrubbed by substring
+    replacement with no minimum length — correctly, because a short real
+    credential still needs redacting — so any needle that appears in reviewed
+    source rewrites the transcript's record of what the agent read, and the
+    byte metrics with it. `unused`, which upstream's examples suggest, redacts
+    that ordinary word out of every transcript; a long constant committed to
+    the repo instead still matches the file that declares it. Derive it per run
+    (`${{ github.run_id }}`) so it cannot be in the checkout at all.
   - **`CCP_TRAFFIC_LOG` absent, not `0`.** Captures preserve prompts, diffs and
     tool results in full; on a review runner that directory is a copy of every
     pull request the fleet has read.

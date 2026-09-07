@@ -195,18 +195,25 @@ jobs:
           # The seat's real credential is the proxy's; there is nothing here to
           # rotate. See runner-setup.md.
           #
-          # THE VALUE MUST NOT BE AN ORDINARY WORD, and this is not cosmetic
-          # (found by gray on PR #285, its first review). Every preset's
-          # `key_env` value is registered as a transcript secret and scrubbed by
-          # SUBSTRING replacement with no minimum length — correctly, since a
-          # short real credential still needs redacting. So `unused`, the value
-          # upstream's own docs suggest, redacted the word "unused" out of every
-          # captured transcript on every agentic seat, corrupting stored source
-          # and tool results and the byte metrics derived from them. Same
-          # reasoning as the `FUKO_S3_REGION` exclusion in
-          # tests/test_transcript.py: a value that can appear in reviewed prose
-          # must never be registered as a needle.
-          CODEX_PROXY_KEY: fuko-codex-proxy-placeholder-not-a-secret
+          # THE VALUE MUST NOT APPEAR IN THE CHECKOUT, and this is not
+          # cosmetic — gray found both halves of it on PR #285, in consecutive
+          # rounds. Every preset's `key_env` value is registered as a transcript
+          # secret and scrubbed by SUBSTRING replacement with no minimum length
+          # (correctly: a short real credential still needs redacting), so any
+          # needle that occurs in reviewed source rewrites the transcript's
+          # record of what the agent actually read, and the byte metrics with it.
+          #
+          # Round 1 killed `unused` — upstream's own suggestion — which redacted
+          # that ordinary word out of every transcript on every agentic seat.
+          # Round 2 killed the long literal that replaced it: a constant checked
+          # in HERE is still a needle that matches this very file, so a review
+          # touching this workflow redacted the line declaring it.
+          #
+          # A run-scoped value is absent from the checkout by construction,
+          # which is the property that matters — not length, and not obscurity.
+          # The proxy ignores the value entirely; Claude Code only requires that
+          # one exist.
+          CODEX_PROXY_KEY: codex-proxy-placeholder-${{ github.run_id }}-${{ github.run_attempt }}
           # Credential stores on the runner that fuko cannot derive, added to
           # the reviewer's read denylist. Newline-separated absolute paths.
           #

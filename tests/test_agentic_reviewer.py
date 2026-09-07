@@ -1918,6 +1918,38 @@ def test_operator_declared_stores_accept_more_than_one():
     assert "Read(//srv/two/**)" in deny
 
 
+def test_a_symlinked_operator_store_denies_its_canonical_target(tmp_path):
+    """#285 r2: a rule for the alias leaves the store readable under its real name.
+
+    The same bypass `transcript_dir` resolves away before its paths ever reach
+    the rule builder; this knob forwards the operator's string verbatim, so the
+    resolution has to happen here. BOTH spellings are denied — an extra inert
+    rule costs nothing, a missing one costs the credential.
+    """
+    target = tmp_path / "real-store"
+    target.mkdir()
+    alias = tmp_path / "alias-store"
+    alias.symlink_to(target)
+    deny = json.loads(
+        harness_mod._permission_settings(
+            {"HOME": "/home/runner", "FUKO_EXTRA_DENY_DIRS": str(alias)}
+        )
+    )["permissions"]["deny"]
+    assert f"Read(//{str(alias).lstrip('/')}/**)" in deny
+    assert f"Read(//{str(target.resolve()).lstrip('/')}/**)" in deny
+
+
+def test_a_dotdot_operator_store_denies_its_canonical_target(tmp_path):
+    """`..` is the other spelling of the same hole, and the likelier typo."""
+    store = tmp_path / "store"
+    store.mkdir()
+    noisy = f"{tmp_path}/store/../store"
+    deny = json.loads(
+        harness_mod._permission_settings({"HOME": "/home/runner", "FUKO_EXTRA_DENY_DIRS": noisy})
+    )["permissions"]["deny"]
+    assert f"Read(//{str(store.resolve()).lstrip('/')}/**)" in deny
+
+
 def test_a_non_absolute_operator_store_is_reported_not_silently_dropped(capsys):
     """A typo must announce itself: a rule that matches nothing is worse than none.
 

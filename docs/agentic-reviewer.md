@@ -506,13 +506,16 @@ somewhere the config does not show:
   `anthropic-compatible` the entry need not spell the endpoint; the flag is
   kept purely for that refusal.
 
-  The value must be long and distinctive. Every preset key is registered as a
-  transcript secret and scrubbed by substring replacement with **no minimum
-  length** — correctly, since a short real credential still needs redacting —
-  so `unused`, which is upstream's own suggestion, redacts that word out of
-  every captured transcript on every agentic seat. Same rule as the
-  `FUKO_S3_REGION` exclusion in the transcript tests: a value that can occur in
-  reviewed prose must never become a needle.
+  The value must not occur anywhere in the checkout. Every preset key is
+  registered as a transcript secret and scrubbed by substring replacement with
+  **no minimum length** — correctly, since a short real credential still needs
+  redacting — so any needle present in reviewed source rewrites the
+  transcript's record of what the agent read. `unused`, upstream's own
+  suggestion, redacts that word out of every transcript on every agentic seat;
+  replacing it with a long constant committed to the repo only narrows the
+  collision to the file declaring it. Derive the value per run instead. Same
+  rule as the `FUKO_S3_REGION` exclusion in the transcript tests: a value that
+  can occur in reviewed prose must never become a needle.
 - **The credential outlives the run, and fuko cannot always find it.** The
   proxy owns and refreshes a ChatGPT session on disk, which is why
   `~/.config/claude-code-proxy` joins the harness's read denylist: it is the
