@@ -1891,6 +1891,48 @@ def test_permission_rules_deny_the_runners_own_registration_credentials():
     assert "Read(//home/runner/actions-runner/.credentials_rsautokey)" in deny
 
 
+def test_permission_rules_deny_operator_declared_stores():
+    """#285 r1: the proxy's session moves with its own `CCP_CONFIG_DIR`.
+
+    `SENSITIVE_HOME_DIRS` can only name the DEFAULT location, so a relocated
+    store was exactly as readable as an undenied one -- and the fleet's own
+    proxy relocates it (`/var/lib/codex-proxy`, not `~/.config`). The operator
+    declares what fuko cannot derive.
+    """
+    deny = json.loads(
+        harness_mod._permission_settings(
+            {"HOME": "/home/runner", "FUKO_EXTRA_DENY_DIRS": "/var/lib/codex-proxy"}
+        )
+    )["permissions"]["deny"]
+    assert "Read(//var/lib/codex-proxy/**)" in deny
+
+
+def test_operator_declared_stores_accept_more_than_one():
+    """Newline-separated, like the transcript directories it rides beside."""
+    deny = json.loads(
+        harness_mod._permission_settings(
+            {"HOME": "/home/runner", "FUKO_EXTRA_DENY_DIRS": "/srv/one\n  /srv/two/  \n"}
+        )
+    )["permissions"]["deny"]
+    assert "Read(//srv/one/**)" in deny
+    assert "Read(//srv/two/**)" in deny
+
+
+def test_a_non_absolute_operator_store_is_reported_not_silently_dropped(capsys):
+    """A typo must announce itself: a rule that matches nothing is worse than none.
+
+    Same failure direction as a Windows-shaped HOME, and it lands in the same
+    report rather than in a second mechanism.
+    """
+    deny = json.loads(
+        harness_mod._permission_settings(
+            {"HOME": "/home/runner", "FUKO_EXTRA_DENY_DIRS": "relative/path"}
+        )
+    )["permissions"]["deny"]
+    assert not any("relative/path" in rule for rule in deny)
+    assert "relative/path" in capsys.readouterr().err
+
+
 def test_permission_rules_deny_the_codex_translators_oauth_store():
     """The `codex-proxy` preset puts a long-lived ChatGPT session on the runner.
 

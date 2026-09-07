@@ -112,6 +112,26 @@ _ENV_AMBIENT_CONFIG_DIR = "FUKO_AMBIENT_CLAUDE_CONFIG_DIR"
 #: which is how the directory came to be undenied in the first place.
 _ENV_TRANSCRIPT_DENY_DIR = "FUKO_TRANSCRIPT_DENY_DIR"
 
+#: Operator-supplied absolute directories to add to the read denylist,
+#: NEWLINE-separated. Passed through from the workflow environment.
+#:
+#: This exists because the stores below are the ones fuko can NAME, and an
+#: operator's runner holds credential stores fuko has never heard of. The case
+#: that produced it is concrete: the `codex-proxy` preset's translating proxy
+#: keeps a long-lived ChatGPT OAuth session whose location is set by the
+#: proxy's OWN `CCP_CONFIG_DIR`, so :data:`SENSITIVE_HOME_DIRS` can only cover
+#: the default path -- a relocated store is exactly as readable as an undenied
+#: one, and on a same-user deployment that is a live exfiltration path (found
+#: by the reviewer itself on PR #285).
+#:
+#: A path knob rather than a `CCP_CONFIG_DIR` special case on purpose: the
+#: proxy is one instance of "a credential store whose path only the operator
+#: knows", and a rule per vendor would have to be written again for the next
+#: one. Rides the same shape as :data:`_ENV_TRANSCRIPT_DENY_DIR` -- read here
+#: and nowhere else, stripped with the rest of the ``FUKO_`` namespace and
+#: re-set explicitly before the spawn.
+_ENV_EXTRA_DENY_DIRS = "FUKO_EXTRA_DENY_DIRS"
+
 #: Directories the agent must never read, relative to the runner's home.
 #:
 #: ``--add-dir`` ADDS a readable root; it does NOT confine reads to it. Verified
@@ -276,6 +296,15 @@ def _permission_settings(env: dict[str, str]) -> str:
         transcript_deny = entry.strip().replace("\\", "/").rstrip("/")
         if transcript_deny:
             candidates.append((transcript_deny, True))
+    # Whatever else the operator knows lives on this runner and must not be
+    # read. Unlike every rule above, fuko cannot derive these -- see
+    # :data:`_ENV_EXTRA_DENY_DIRS`. Non-absolute entries fall into the same
+    # `unusable` report below as a Windows-shaped HOME, so a typo announces
+    # itself instead of quietly denying nothing.
+    for entry in (env.get(_ENV_EXTRA_DENY_DIRS) or "").split("\n"):
+        extra_deny = entry.strip().replace("\\", "/").rstrip("/")
+        if extra_deny:
+            candidates.append((extra_deny, True))
     # Unconditional: these do not depend on HOME, and on a runner without one
     # they are the only rules that remain.
     candidates += [(d, True) for d in SENSITIVE_SYSTEM_DIRS]

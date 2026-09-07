@@ -194,7 +194,30 @@ jobs:
           # subscription mode, which the preset refuses (see sidecar/presets.py).
           # The seat's real credential is the proxy's; there is nothing here to
           # rotate. See runner-setup.md.
-          CODEX_PROXY_KEY: unused
+          #
+          # THE VALUE MUST NOT BE AN ORDINARY WORD, and this is not cosmetic
+          # (found by gray on PR #285, its first review). Every preset's
+          # `key_env` value is registered as a transcript secret and scrubbed by
+          # SUBSTRING replacement with no minimum length — correctly, since a
+          # short real credential still needs redacting. So `unused`, the value
+          # upstream's own docs suggest, redacted the word "unused" out of every
+          # captured transcript on every agentic seat, corrupting stored source
+          # and tool results and the byte metrics derived from them. Same
+          # reasoning as the `FUKO_S3_REGION` exclusion in
+          # tests/test_transcript.py: a value that can appear in reviewed prose
+          # must never be registered as a needle.
+          CODEX_PROXY_KEY: fuko-codex-proxy-placeholder-not-a-secret
+          # Credential stores on the runner that fuko cannot derive, added to
+          # the reviewer's read denylist. Newline-separated absolute paths.
+          #
+          # The proxy's ChatGPT OAuth session lives wherever its own
+          # CCP_CONFIG_DIR points, which fuko has no way to know — the fleet's
+          # is /var/lib/codex-proxy, not the ~/.config default the harness can
+          # name. Belt-and-braces here: the proxy runs under its own uid with a
+          # 0700 state dir, so this reviewer already gets EPERM. The rule is
+          # what protects a same-user deployment, which is the shape the
+          # denylist exists for.
+          FUKO_EXTRA_DENY_DIRS: /var/lib/codex-proxy
           # ── headless-harness posture, FLEET-WIDE (every agentic seat, not
           # just gray). mepro has run all three against its gateway seats for
           # weeks; fuko-pr never picked them up, and a metered subscription is

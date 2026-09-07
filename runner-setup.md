@@ -76,11 +76,19 @@ A Linux x64 host with:
     inside it. Reviews are safe from that direction (the harness has no `Bash`
     and no network tools) but co-tenants are not, so put the proxy on hosts
     whose job mix you accept.
-  - **`CODEX_PROXY_KEY` exported to any non-empty value.** Claude Code refuses
-    to start without a client credential; this one is never sent upstream. It
-    is not a secret, but it is not optional either — and leaving it unset does
-    not fail cleanly, it resolves `auth = "auto"` to subscription mode, which
-    the preset then refuses (deliberately: see `sidecar/presets.py`).
+  - **`CODEX_PROXY_KEY` exported to a long, distinctive value.** Claude Code
+    refuses to start without a client credential; this one is never sent
+    upstream. It is not a secret, but it is not optional either — leaving it
+    unset does not fail cleanly, it resolves `auth = "auto"` to subscription
+    mode, which the preset then refuses (deliberately: see
+    `sidecar/presets.py`).
+    **Do not use `unused`**, which is what upstream's own examples suggest.
+    Every preset's key value is registered as a transcript secret and scrubbed
+    by substring replacement with no minimum length — correctly, because a
+    short real credential still needs redacting — so an ordinary word here
+    redacts itself out of every captured transcript, corrupting stored source,
+    tool results and the byte metrics derived from them. Pick something that
+    cannot appear in reviewed code.
   - **`CCP_TRAFFIC_LOG` absent, not `0`.** Captures preserve prompts, diffs and
     tool results in full; on a review runner that directory is a copy of every
     pull request the fleet has read.
@@ -98,6 +106,18 @@ A Linux x64 host with:
   reads to an untrusted PR author; but prefer the arrangement where the denial
   is redundant. The harness reaches the proxy over loopback, so the two users
   need not match.
+
+  If the proxy's store is NOT at the default `~/.config/claude-code-proxy` —
+  it moves with the proxy's own `CCP_CONFIG_DIR`, and a containerised
+  deployment almost certainly relocates it — fuko cannot derive the path.
+  Declare it in the workflow so the reviewer's denylist covers it:
+
+  ```yaml
+  FUKO_EXTRA_DENY_DIRS: /var/lib/codex-proxy   # newline-separated for several
+  ```
+
+  A non-absolute entry is reported on stderr rather than silently denying
+  nothing.
 
   `max_context` on the entry must be the ChatGPT plan's window for the model,
   not the model's headline window — it is what sizes the harness's auto-compact,

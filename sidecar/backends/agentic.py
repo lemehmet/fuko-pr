@@ -58,6 +58,7 @@ from ..reviewer.harness import (
     DEFAULT_MAX_TURNS,
     HarnessNotAvailableError,
     HarnessResult,
+    _ENV_EXTRA_DENY_DIRS,
     _ENV_TRANSCRIPT_DENY_DIR,
     check_auth,
     is_auth_failure,
@@ -1026,6 +1027,16 @@ class AgenticBackend:
             deny_dirs.append(str(blob_root))
         if deny_dirs:
             harness_env[_ENV_TRANSCRIPT_DENY_DIR] = "\n".join(deny_dirs)
+        # Operator-declared credential stores fuko cannot name. Read from the
+        # AMBIENT environment and re-set here, because the strip above removed
+        # it with the rest of the `FUKO_` namespace -- the same shape, and for
+        # the same reason, as the transcript directories one line up. Passed
+        # through verbatim: `_permission_settings` does the splitting and
+        # reports any entry that is not POSIX-absolute, so a typo is announced
+        # rather than silently denying nothing.
+        extra_deny = os.environ.get(_ENV_EXTRA_DENY_DIRS, "").strip()
+        if extra_deny:
+            harness_env[_ENV_EXTRA_DENY_DIRS] = extra_deny
         # DELIVERY-side receipt (mepro#2012 r2, both gating seats converged):
         # a workflow validator can only prove the CONFIG carries a window;
         # this line is the one place that knows what the spawned harness

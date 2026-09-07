@@ -496,22 +496,38 @@ somewhere the config does not show:
   the OpenAI *API* with `OPENAI_KEY`, which is separately billed credits a
   ChatGPT subscription does not include. They are two products; only the
   agentic backend can spend the first.
-- **`CODEX_PROXY_KEY` is not a secret, and is not optional.** The proxy
-  substitutes its stored session for whatever arrives, so the value never
-  leaves the runner — but Claude Code refuses to start without *some* client
-  credential, and leaving it unset resolves `auth = "auto"` to subscription,
-  which this preset refuses (`requires_base_url`, exactly as above). The
-  preset carries a default `base_url` — the proxy's pinned loopback listener —
-  so unlike `anthropic-compatible` the entry need not spell the endpoint; the
-  flag is kept purely for that refusal.
-- **The credential outlives the run.** The proxy owns and refreshes a ChatGPT
-  session on disk, which is why `~/.config/claude-code-proxy` joins the
-  harness's read denylist: it is the one model credential the environment scrub
-  cannot cover, because the harness never holds it. That denial covers the
-  deployment where the proxy runs as the runner's own user. Prefer the one
-  where it does not — a dedicated system user with a `0700` home puts the
-  session behind a filesystem permission rather than behind a rule, and makes
-  the denylist entry redundant instead of load-bearing (`runner-setup.md`).
+- **`CODEX_PROXY_KEY` is not a secret, is not optional, and must not be an
+  ordinary word.** The proxy substitutes its stored session for whatever
+  arrives, so the value never leaves the runner — but Claude Code refuses to
+  start without *some* client credential, and leaving it unset resolves
+  `auth = "auto"` to subscription, which this preset refuses
+  (`requires_base_url`, exactly as above). The preset carries a default
+  `base_url` — the proxy's pinned loopback listener — so unlike
+  `anthropic-compatible` the entry need not spell the endpoint; the flag is
+  kept purely for that refusal.
+
+  The value must be long and distinctive. Every preset key is registered as a
+  transcript secret and scrubbed by substring replacement with **no minimum
+  length** — correctly, since a short real credential still needs redacting —
+  so `unused`, which is upstream's own suggestion, redacts that word out of
+  every captured transcript on every agentic seat. Same rule as the
+  `FUKO_S3_REGION` exclusion in the transcript tests: a value that can occur in
+  reviewed prose must never become a needle.
+- **The credential outlives the run, and fuko cannot always find it.** The
+  proxy owns and refreshes a ChatGPT session on disk, which is why
+  `~/.config/claude-code-proxy` joins the harness's read denylist: it is the
+  one model credential the environment scrub cannot cover, because the harness
+  never holds it. But that is only the DEFAULT location — the store moves with
+  the proxy's own `CCP_CONFIG_DIR`, and a containerised deployment almost
+  certainly relocates it. A relocated store is exactly as readable as an
+  undenied one, so declare it with `FUKO_EXTRA_DENY_DIRS` (newline-separated
+  absolute paths) whenever it is not at the default.
+
+  The denial covers the deployment where the proxy runs as the runner's own
+  user. Prefer the one where it does not — a dedicated system user with a
+  `0700` home puts the session behind a filesystem permission rather than
+  behind a rule, and makes both the denylist entry and the declaration
+  redundant instead of load-bearing (`runner-setup.md`).
 
 Three things the receipts cannot tell you here.
 

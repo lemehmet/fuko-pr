@@ -702,6 +702,29 @@ def test_invoke_strips_a_newly_registered_presets_key(monkeypatch):
     assert "FUTURE_PROVIDER_KEY" not in captured["env"]
 
 
+def test_invoke_passes_the_operator_deny_dirs_through_the_fuko_strip(monkeypatch):
+    """#285 r1: it is in the `FUKO_` namespace, which invoke() strips wholesale.
+
+    The whole point of the variable is to reach `_permission_settings`, and
+    the strip that protects FUKO_TOKEN would otherwise remove it on the way --
+    silently, leaving the operator's declared credential store undenied while
+    the config says it is covered. Exactly how the transcript directory came to
+    be undenied before #237.
+    """
+    monkeypatch.setenv("FUKO_EXTRA_DENY_DIRS", "/var/lib/codex-proxy")
+    backend = AgenticBackend()
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert captured["env"]["FUKO_EXTRA_DENY_DIRS"] == "/var/lib/codex-proxy"
+
+
+def test_invoke_omits_the_operator_deny_dirs_when_unset(monkeypatch):
+    """Absent, not empty: an empty needle would render `Read(///**)`-shaped noise."""
+    monkeypatch.delenv("FUKO_EXTRA_DENY_DIRS", raising=False)
+    backend = AgenticBackend()
+    _, captured = _invoke(monkeypatch, backend, HarnessResult(0, REVIEW_JSON))
+    assert "FUKO_EXTRA_DENY_DIRS" not in captured["env"]
+
+
 def test_invoke_strips_gh_cli_credentials(monkeypatch):
     """`gh`'s own spellings are exported by many runner images and are just as live."""
     monkeypatch.setenv("GH_TOKEN", "gh-cli-secret")
