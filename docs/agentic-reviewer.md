@@ -505,9 +505,13 @@ somewhere the config does not show:
   so unlike `anthropic-compatible` the entry need not spell the endpoint; the
   flag is kept purely for that refusal.
 - **The credential outlives the run.** The proxy owns and refreshes a ChatGPT
-  session on disk under `~/.config/claude-code-proxy`, which is why that path
-  joins the harness's read denylist. It is the one model credential the
-  environment scrub cannot cover, because the harness never holds it.
+  session on disk, which is why `~/.config/claude-code-proxy` joins the
+  harness's read denylist: it is the one model credential the environment scrub
+  cannot cover, because the harness never holds it. That denial covers the
+  deployment where the proxy runs as the runner's own user. Prefer the one
+  where it does not — a dedicated system user with a `0700` home puts the
+  session behind a filesystem permission rather than behind a rule, and makes
+  the denylist entry redundant instead of load-bearing (`runner-setup.md`).
 
 Two things the receipts cannot tell you here. The proxy reports token usage as
 **local estimates** rather than upstream counts, so this seat's token and cost

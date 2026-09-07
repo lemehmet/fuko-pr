@@ -72,6 +72,17 @@ A Linux x64 host with:
     tool results in full; on a review runner that directory is a copy of every
     pull request the fleet has read.
 
+  **Run it as a dedicated system user, not as the runner user.** The proxy owns
+  a long-lived ChatGPT OAuth session under its own `~/.config/claude-code-proxy`
+  and refreshes it in place. Give that user its own `0700` home and the session
+  is unreadable by every runner user as a matter of filesystem permission —
+  which is a wall, where the reviewer's read denylist is only a rule. fuko
+  denies `~/.config/claude-code-proxy` under the job's `HOME` as well, because
+  the same-user deployment is the obvious one and the reviewer publishes what it
+  reads to an untrusted PR author; but prefer the arrangement where the denial
+  is redundant. The harness reaches the proxy over loopback, so the two users
+  need not match.
+
   `max_context` on the entry must be the ChatGPT plan's window for the model,
   not the model's headline window — it is what sizes the harness's auto-compact,
   and set too high a long review dies at the upstream limit instead of

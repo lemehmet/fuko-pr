@@ -195,6 +195,37 @@ jobs:
           # The seat's real credential is the proxy's; there is nothing here to
           # rotate. See runner-setup.md.
           CODEX_PROXY_KEY: unused
+          # ── headless-harness posture, FLEET-WIDE (every agentic seat, not
+          # just gray). mepro has run all three against its gateway seats for
+          # weeks; fuko-pr never picked them up, and a metered subscription is
+          # what made the gap worth closing. Each is a no-op on a seat that
+          # does not hit its case.
+          #
+          # No gateway model is in Claude Code's window table — not
+          # `gpt-5.6-sol`, not `qwen3.8-max` — so an enforcement that refuses
+          # unrecognised models refuses every model this fleet runs, by
+          # construction. The main model is not flying blind: each entry's
+          # `max_context` still arrives as CLAUDE_CODE_MAX_CONTEXT_TOKENS.
+          # This only stops the refusal on the auxiliary paths.
+          CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT: '1'
+          # The auxiliary calls (a session title) ride the seat's credential
+          # CONCURRENTLY with the main streaming request, for zero review
+          # value. On the gateway seats that doubled per-provider concurrency;
+          # on gray it spends ChatGPT plan quota. `small_model` only moves
+          # those calls to a cheaper tier — this removes them.
+          #
+          # Accepted cost, the same one mepro accepted: the title call was the
+          # loudest canary for provider model substitution. The `sdk`
+          # query_source line still carries that signal for the main call.
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
+          # A partially-completed stream is otherwise retried NON-streaming,
+          # which re-sends the whole request. The tool-replay hazard that
+          # motivates this elsewhere is mild here (the reviewer holds only
+          # Read/Grep/Glob, which replay harmlessly) — the reason it is set is
+          # the duplicate spend, which on a subscription is quota rather than
+          # money. It is also the configuration the translating proxy was
+          # validated under.
+          CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK: '1'
           # Pass the PR URL through the environment rather than expanding
           # ${{ github.event... }} directly in run: (avoids shell injection).
           PR_URL: ${{ github.event.pull_request.html_url }}
