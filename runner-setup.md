@@ -118,8 +118,11 @@ A Linux x64 host with:
   FUKO_EXTRA_DENY_DIRS: /var/lib/codex-proxy   # newline-separated for several
   ```
 
-  A non-absolute entry is reported on stderr rather than silently denying
-  nothing.
+  Entries this rule syntax cannot represent — the filesystem root, a
+  non-absolute path, or (on POSIX) a name containing a backslash — are refused
+  and announced on stderr rather than silently denying nothing or, worse,
+  denying a different directory. If your store's name hits one of those,
+  rename or move it: fuko will not pretend it is covered.
 
   `max_context` on the entry must be the ChatGPT plan's window for the model,
   not the model's headline window — it is what sizes the harness's auto-compact,

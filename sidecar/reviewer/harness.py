@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -301,10 +302,42 @@ def _permission_settings(env: dict[str, str]) -> str:
     # :data:`_ENV_EXTRA_DENY_DIRS`. Non-absolute entries fall into the same
     # `unusable` report below as a Windows-shaped HOME, so a typo announces
     # itself instead of quietly denying nothing.
-    for entry in (env.get(_ENV_EXTRA_DENY_DIRS) or "").split("\n"):
-        extra_deny = entry.strip().replace("\\", "/").rstrip("/")
-        if not extra_deny:
+    for raw in (env.get(_ENV_EXTRA_DENY_DIRS) or "").split("\n"):
+        entry = raw.strip()
+        if not entry:
             continue
+        # REJECT the spellings this rule syntax cannot carry, rather than
+        # rewriting them into a rule for some OTHER directory (#285 r3). The
+        # transcript and blob-root validators already enumerate this family and
+        # refuse it at the writing end; this is the same taxonomy at the
+        # declaring end, where fuko cannot rename the operator's directory and
+        # so can only decline to pretend it is covered.
+        #
+        # A silent wrong rule is the worst outcome available here: the operator
+        # sees a declaration, the denylist reports no problem, and the store
+        # stays readable. Every refusal below is therefore announced.
+        unrepresentable_reason = None
+        if entry.rstrip("/") == "":
+            # `rstrip("/")` turns the root into the empty string, which the old
+            # code dropped before the report could see it.
+            unrepresentable_reason = "it is the filesystem root"
+        elif os.name == "posix" and "\\" in entry:
+            # A backslash is an ORDINARY POSIX filename character. Rewriting it
+            # to `/` — which is what this builder used to do, and what #271
+            # still does for the HOME-derived rules — silently names a
+            # different directory: `/srv/cred\store` becomes `/srv/cred/store`.
+            unrepresentable_reason = (
+                "it contains a backslash, an ordinary POSIX filename character "
+                "that this rule syntax cannot carry"
+            )
+        if unrepresentable_reason:
+            print(
+                f"fuko: NOT denying declared path {entry!r} -- {unrepresentable_reason}. "
+                "That store is readable by the reviewer; move it or rename it.",
+                file=sys.stderr,
+            )
+            continue
+        extra_deny = entry.rstrip("/")
         candidates.append((extra_deny, True))
         # ALSO deny the canonical target. A rule is matched against the path
         # the agent spells, so an alias-only rule leaves the store readable

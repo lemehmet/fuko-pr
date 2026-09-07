@@ -1950,6 +1950,37 @@ def test_a_dotdot_operator_store_denies_its_canonical_target(tmp_path):
     assert f"Read(//{str(store.resolve()).lstrip('/')}/**)" in deny
 
 
+def test_a_backslash_in_a_declared_store_is_refused_not_rewritten(capsys):
+    """#285 r3: on POSIX a backslash is an ordinary filename character.
+
+    Rewriting it to `/` — which this builder used to do — turns
+    `/srv/cred\\store` into a rule for `/srv/cred/store`: a rule for the WRONG
+    directory, emitted silently, while the real store stays readable and the
+    operator sees a declaration that looks honoured. Refusing loudly is the
+    only outcome that does not lie.
+    """
+    deny = json.loads(
+        harness_mod._permission_settings(
+            {"HOME": "/home/runner", "FUKO_EXTRA_DENY_DIRS": "/srv/cred\\store"}
+        )
+    )["permissions"]["deny"]
+    assert not any("/srv/cred" in rule for rule in deny)
+    err = capsys.readouterr().err
+    assert "backslash" in err
+    assert "/srv/cred" in err
+
+
+def test_a_root_declared_store_is_reported_not_silently_dropped(capsys):
+    """`rstrip("/")` turns the root into "", which the old code dropped before
+    the report could see it — the same silent-skip `transcript_dir` refuses at
+    the writing end."""
+    deny = json.loads(
+        harness_mod._permission_settings({"HOME": "/home/runner", "FUKO_EXTRA_DENY_DIRS": "/"})
+    )["permissions"]["deny"]
+    assert not any(rule == "Read(///**)" or rule == "Read(//**)" for rule in deny)
+    assert "filesystem root" in capsys.readouterr().err
+
+
 def test_a_non_absolute_operator_store_is_reported_not_silently_dropped(capsys):
     """A typo must announce itself: a rule that matches nothing is worse than none.
 
