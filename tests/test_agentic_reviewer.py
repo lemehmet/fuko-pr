@@ -1237,20 +1237,39 @@ def test_a_desync_that_closes_on_a_bracket_still_salvages_rather_than_refusing()
     assert review.degraded.startswith("payload tail lost:")
 
 
-def test_a_whole_object_before_a_second_one_is_refused_even_under_a_desync():
+def test_a_desync_that_closes_on_a_brace_is_still_refused_when_an_object_follows():
     """The bracket witness does not spare a close that really is a `}`.
 
-    A desync whose bogus close lands on a brace is indistinguishable from a
-    document that ended there, so a `{` after it is still read as a rival and
-    the round is still refused. That is the residual case the witness does not
-    cover, and it is on the side this module chooses: a failed round, never a
-    verdict fuko cannot attribute.
+    The stray quote is in `summary`, so the scan and the decoder agree the
+    object ended at the `}` inside it -- a bogus close no lexical test can tell
+    from a real one, which is why the witness declines to try. A `{` after it is
+    still read as a rival and the round still refused. That is the residual case
+    the witness leaves open, and it is on the side this module chooses: a failed
+    round, never a verdict fuko cannot attribute. Anything weaker on this side
+    of the `char != "}"` test has to keep this passing.
     """
-    text = '{"summary": "s", "findings": [{"file": "a.py", "title": "t", "body": "b"}]} {"x": 1}'
     with pytest.raises(ReviewParseError) as excinfo:
-        parse_review(text)
+        parse_review('{"summary": "he said "} then {"findings": []}')
 
     assert "two candidate reviews" in str(excinfo.value)
+
+
+def test_a_desync_that_closes_on_a_brace_with_no_object_after_it_loses_only_prose():
+    """The one shape that publishes `done` on a bogus close, recorded as a decision.
+
+    A stray quote in `summary` -- the contract's only top-level string -- lets
+    the decoder agree with the scan that the object closed inside it, so the
+    body parses whole and nothing degrades. `main` refused this input outright.
+    The verdict survives regardless: `findings`, `examined` and `prior_status`
+    are lists whose entries open with a `{`, so a tail carrying any of them is
+    refused as a rival instead, and what is lost here is the rest of a sentence.
+    Correcting it would mean degrading a round on a guess about its tail, which
+    is exactly the loss #276 says must not be reported.
+    """
+    review = parse_review('{"summary": "he said "} below.", "findings": [], "examined": []}')
+
+    assert review.summary == "he said " and review.findings == []
+    assert review.degraded == ""
 
 
 def test_a_trailing_comma_costs_a_comma_and_is_not_reported_as_a_loss():

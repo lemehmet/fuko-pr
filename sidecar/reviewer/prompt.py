@@ -1088,21 +1088,40 @@ def _scan_object(body: str) -> _ObjectScan:
     with any lexical scan the tracking is only trustworthy up to the payload's
     first defect; past it an unescaped ``"`` inverts the string state, so
     :func:`_salvage_prefix` discards boundaries beyond the decoder's own error
-    offset rather than trusting the tail. A desync can only make ``end`` land
-    early -- on a closer that was really inside a string, leaving a body that
-    stops mid-structure and therefore cannot parse -- or never land at all, so
-    it never costs a false whole parse. It can cost more than a salvage, though:
-    an early ``end`` turns every later ``{`` into a rival, and the members that
-    carry objects (``examined``, ``prior_status``) follow the verdict, so the
-    round the salvage would have published is refused instead
-    (``qwen-anthropic/qwen3.8-max`` on #281). The common desync is cheap to
-    witness: ``body`` starts at a ``{``, so its outermost object can only be
-    closed by a ``}``, and reaching depth 0 on a ``]`` proves the depth has been
-    one too low since some earlier miscount. That is reported as never closing
-    rather than as an end, which hands the salvage all the text and leaves no
-    close for a rival to follow. The residual case -- a desync whose bogus close
-    is a ``}`` inside a string, with a ``{`` after it -- still refuses the
-    round, which is the direction this module has chosen to be wrong in.
+    offset rather than trusting the tail. A desync moves ``end``, and it is
+    worth being exact about how far that reaches, because none of the three
+    outcomes can cost a finding and one of them is not a salvage at all
+    (``qwen-anthropic/qwen3.8-max`` on #281):
+
+    * **It never lands.** The salvage runs over everything, as for any
+      truncation.
+    * **It lands early on a closer that was really inside a string.** The body
+      stops mid-structure and cannot parse, so the salvage runs -- but if a
+      ``{`` follows, that bogus close makes it a rival and the round is refused
+      instead. ``examined`` and ``prior_status`` both carry objects and both
+      follow the verdict, so this is the damage shape #255 describes, and it is
+      the one the bracket witness below exists to catch.
+    * **It lands on a ``}`` the decoder also reads as a complete object.** Only
+      a stray quote in a TOP-LEVEL string can do this, and then the shortened
+      body parses WHOLE and publishes on ``done`` with the rest of that string
+      dropped. ``summary`` is the contract's only top-level string, and every
+      other member is a list whose entries open with a ``{``, so a tail holding
+      a finding, a coverage entry or a carried verdict is refused as a rival
+      rather than published without it. What this costs is the tail of one
+      sentence. It is left uncorrected deliberately: the only tell is that the
+      tail resumes mid-string, which no lexical test separates from the closing
+      prose #276 requires be published clean, and buying the ``done`` label back
+      with a guess about the tail is the trade that issue refused.
+
+    The second outcome is cheap to witness, and worth witnessing because it
+    costs a verdict rather than a sentence: ``body`` starts at a ``{``, so its
+    outermost object can only be closed by a ``}``, and reaching depth 0 on a
+    ``]`` proves the depth has been one too low since some earlier miscount.
+    That is reported as never closing rather than as an end, which hands the
+    salvage all the text and leaves no close for a rival to follow. A desync
+    whose bogus close is a ``}`` is not separable this way and still refuses the
+    round when a ``{`` follows, which is the direction this module has chosen to
+    be wrong in.
 
     Past the close nothing is tracked but the one fact that changes the verdict:
     ANY ``{``, unconditionally, is treated as a second candidate review. The
