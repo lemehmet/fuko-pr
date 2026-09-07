@@ -186,6 +186,15 @@ jobs:
           # Token Plan key (sk-sp-…). Distinct from every other bucket above —
           # a QwenCloud throttle cools only henry.
           QWEN_TOKEN_PLAN_KEY: ${{ secrets.QWEN_TOKEN_PLAN_KEY }}
+          # gray's codex-proxy seat. NOT a secret and deliberately not one: the
+          # translating proxy on the runner substitutes its own stored ChatGPT
+          # session for whatever arrives, so this value never leaves the box.
+          # It is still required — Claude Code refuses to start without some
+          # client credential, and an unset var resolves `auth = "auto"` to
+          # subscription mode, which the preset refuses (see sidecar/presets.py).
+          # The seat's real credential is the proxy's; there is nothing here to
+          # rotate. See runner-setup.md.
+          CODEX_PROXY_KEY: unused
           # Pass the PR URL through the environment rather than expanding
           # ${{ github.event... }} directly in run: (avoids shell injection).
           PR_URL: ${{ github.event.pull_request.html_url }}
