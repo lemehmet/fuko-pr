@@ -155,6 +155,14 @@ SENSITIVE_HOME_DIRS = (
     ".gnupg",
     ".config/gh",
     ".config/gcloud",
+    # An Anthropic-to-Codex translating proxy (the `codex-proxy` preset) owns a
+    # ChatGPT OAuth session here and refreshes it IN PLACE, so unlike every
+    # model credential this backend injects, it is a long-lived one that lives
+    # on disk in the runner's home for the life of the box. It is also the one
+    # credential the environment denial below cannot reach: the harness never
+    # holds it -- the proxy substitutes it downstream -- so `/proc/self/environ`
+    # is not the channel, the filesystem is.
+    ".config/claude-code-proxy",
     ".docker",
     ".kube",
 )

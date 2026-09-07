@@ -1891,6 +1891,21 @@ def test_permission_rules_deny_the_runners_own_registration_credentials():
     assert "Read(//home/runner/actions-runner/.credentials_rsautokey)" in deny
 
 
+def test_permission_rules_deny_the_codex_translators_oauth_store():
+    """The `codex-proxy` preset puts a long-lived ChatGPT session on the runner.
+
+    Every other model credential this backend handles is injected into the
+    harness process and denied via `/proc`; this one is never in the
+    environment at all -- the proxy substitutes it downstream -- so the
+    filesystem is the only channel, and it is the only one a published finding
+    can carry out.
+    """
+    deny = json.loads(harness_mod._permission_settings({"HOME": "/home/runner"}))["permissions"][
+        "deny"
+    ]
+    assert "Read(//home/runner/.config/claude-code-proxy/**)" in deny
+
+
 def test_runner_credentials_are_denied_as_files_not_as_a_directory():
     """The runner's workspace lives under the same directory as its credentials.
 

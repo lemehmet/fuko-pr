@@ -44,6 +44,39 @@ A Linux x64 host with:
   preset) must be exported in the workflow's `env:` block from a repo secret —
   the driver reads it on the runner, not on the sidecar.
 
+- **For a `codex-proxy` seat only**: an Anthropic-to-Codex translator on the
+  runner. ChatGPT/Codex serves no Anthropic-compatible `/v1/messages`, so this
+  preset is not a base-URL swap like the other gateways — the harness speaks
+  Anthropic and something local has to translate to Codex's Responses API.
+  Install [`claude-code-proxy`](https://claude-code-proxy.raine.dev/)
+  version-pinned, run it under systemd, and log it in once per host (a device
+  code flow — it then owns and refreshes its own ChatGPT OAuth session, so
+  there is nothing to rotate and nothing to push).
+
+  Three properties are load-bearing, and each fails quietly if dropped:
+
+  - **`CCP_BIND_ADDRESS=127.0.0.1`.** The proxy does not authenticate its
+    callers — it substitutes its stored ChatGPT session for whatever credential
+    arrives — so any host that reaches the listener spends the subscription.
+    Note that loopback is not a complete answer on a runner: any OTHER job on
+    the same host, including an untrusted fork's test payload, is already
+    inside it. Reviews are safe from that direction (the harness has no `Bash`
+    and no network tools) but co-tenants are not, so put the proxy on hosts
+    whose job mix you accept.
+  - **`CODEX_PROXY_KEY` exported to any non-empty value.** Claude Code refuses
+    to start without a client credential; this one is never sent upstream. It
+    is not a secret, but it is not optional either — and leaving it unset does
+    not fail cleanly, it resolves `auth = "auto"` to subscription mode, which
+    the preset then refuses (deliberately: see `sidecar/presets.py`).
+  - **`CCP_TRAFFIC_LOG` absent, not `0`.** Captures preserve prompts, diffs and
+    tool results in full; on a review runner that directory is a copy of every
+    pull request the fleet has read.
+
+  `max_context` on the entry must be the ChatGPT plan's window for the model,
+  not the model's headline window — it is what sizes the harness's auto-compact,
+  and set too high a long review dies at the upstream limit instead of
+  compacting before it. Re-check it whenever you change the model.
+
 ## 1. Register the GitHub runner
 
 Follow [GitHub's self-hosted runner guide](https://docs.github.com/en/actions/hosting-your-own-runners).

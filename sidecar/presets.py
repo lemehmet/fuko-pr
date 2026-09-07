@@ -12,11 +12,16 @@ from dataclasses import dataclass, field
 class ProviderPreset:
     """Connection details and quirks for one model provider.
 
-    ``requires_base_url`` marks presets with no meaningful default endpoint
-    (e.g. rented GPU boxes, whose address changes per rental): the model entry
-    in ``.fuko.toml`` must supply ``base_url``, and a backend fails fast if it
-    doesn't — otherwise the preset's key would silently go to the SDK's
-    default endpoint.
+    ``requires_base_url`` marks presets that reach their model ONLY through
+    ``base_url``. Usually that is because there is no meaningful default
+    endpoint (e.g. rented GPU boxes, whose address changes per rental), and
+    then the model entry in ``.fuko.toml`` must supply one; a backend fails
+    fast if it doesn't, because otherwise the preset's key would silently go to
+    the SDK's default endpoint. A preset may carry BOTH a default and this flag
+    (``codex-proxy``): the default answers "which endpoint", the flag is what
+    makes the agentic backend refuse subscription auth, which injects no
+    endpoint at all and would therefore reach Anthropic rather than the
+    gateway.
     """
 
     litellm_prefix: str
@@ -116,6 +121,47 @@ PRESETS: dict[str, ProviderPreset] = {
         base_url="https://api.z.ai/api/anthropic",
         key_env="ZAI_KEY",
         quirks={"small_model": "glm-4.5-air"},
+    ),
+    # ChatGPT/Codex, through an Anthropic-to-Codex translator on the runner.
+    # Added 2026-09-07: OpenAI serves no Anthropic-compatible /v1/messages (and
+    # neither does OpenRouter), so unlike every gateway preset above this one is
+    # not a base-URL swap -- something on the box has to translate Anthropic
+    # Messages into Codex's Responses API. That something is claude-code-proxy
+    # (raine, MIT), installed and pinned by the runner playbook; see
+    # runner-setup.md.
+    #
+    # WHAT THE SUBSCRIPTION BUYS AND WHAT IT DOES NOT: this is the ChatGPT plan,
+    # reached through the proxy's own stored OAuth session. It is NOT the OpenAI
+    # API, which the `openai` preset above reaches with OPENAI_KEY and bills as
+    # separate credits -- a ChatGPT subscription does not include them.
+    #
+    # The base URL is the unit's pinned loopback listener, so the entry does not
+    # have to spell it -- but `requires_base_url` is set anyway, and it is the
+    # tooth that matters here: the proxy is the ONLY thing that can serve this
+    # entry's `gpt-*` slugs, and subscription auth injects no endpoint, so
+    # without the flag an entry that left `auth` at its `auto` default with
+    # CODEX_PROXY_KEY unexported would run against api.anthropic.com under the
+    # runner's own Claude login -- a real Claude review published under a
+    # `gpt-…` label.
+    #
+    # `small_model` is what keeps the harness's background haiku-class and
+    # subagent calls off the expensive tier; the plan does have a cheap one,
+    # unlike the single-model deployments `anthropic-compatible` serves.
+    # VERIFY it against the account when flipping the main model -- a slug the
+    # plan does not serve fails only on the auxiliary calls, which is the
+    # quietest way this class breaks.
+    #
+    # STANDING (recorded because it is asked every time): the operator's own
+    # subscription, on the operator's own repositories, no resale and no second
+    # user. The reverse direction -- an Anthropic subscription token through a
+    # third-party proxy -- does violate Anthropic's terms, and nothing here does
+    # it.
+    "codex-proxy": ProviderPreset(
+        litellm_prefix="anthropic/",
+        base_url="http://127.0.0.1:18765",
+        key_env="CODEX_PROXY_KEY",
+        quirks={"small_model": "gpt-5.6-luna"},
+        requires_base_url=True,
     ),
     # Any gateway that speaks the Anthropic Messages API and is not one of the
     # named vendors above -- a self-hosted LiteLLM or vLLM, a rented box, a
