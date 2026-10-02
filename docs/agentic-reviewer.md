@@ -488,7 +488,7 @@ shape; `runner-setup.md` covers installing and pinning the proxy.
 ```toml
 [[review.models]]
 provider = "codex-proxy"
-name = "gpt-5.6-sol"    # the slug the proxy routes, verbatim
+name = "gpt-6.1-sol"    # the slug the proxy routes, verbatim — it must be in the pinned proxy's allowlist (gpt-6.1-sol: v0.1.43+)
 auth = "api-key"        # CODEX_PROXY_KEY — any non-empty value
 backend = "agentic"
 max_context = 272000    # the PLAN's window, not the model's headline number

@@ -186,11 +186,22 @@ token_env = "FUKO_GITHUB_TOKEN_DORIAN"
 # variable, and a gating seat should run what everyone else runs. Do not read
 # this seat's receipts as either arm of #159.
 #
-# `max_context` is the ChatGPT PLAN's window for gpt-5.6, not the model's
-# headline number. It sizes the harness's auto-compact; set too high, a long
-# review dies at the upstream limit instead of compacting before it. RE-CHECK
-# it when flipping the model (GPT-6 Astra), and re-check the preset's
-# `small_model` against the account in the same pass.
+# `max_context` is the ChatGPT PLAN's window, not the model's headline number.
+# It sizes the harness's auto-compact; set too high, a long review dies at the
+# upstream limit instead of compacting before it. RE-CHECKED 2026-10-02 for the
+# gpt-6.1-sol flip: upstream documents 272K for GPT-5.6 and publishes no
+# separate number for the gpt-6 generation, but its own reference config still
+# pairs the gpt-6 slugs with 272000, and a too-low window only compacts early.
+# Re-check it, and the preset's `small_model` against the account, on the next
+# flip.
+#
+# `name` MOVES WITH THE RUNNER'S PROXY PIN. claude-code-proxy keeps a model
+# allowlist and refuses anything outside it; `gpt-6.1-sol` entered that list in
+# v0.1.43, which the runner fleet was bumped to (infra 44a557f) and verified on
+# every review-capable host — /v1/models lists the slug, a /v1/messages
+# tool-use call answers `stop_reason: tool_use` — before this entry changed
+# from `gpt-5.6-sol` (2026-10-02). Flip the slug ahead of the pin and this seat
+# fails every round in a way CI cannot tell from a dead provider.
 #
 # auth is PINNED for the same reason henry's is, with one extra tooth: for a
 # `requires_base_url` preset fuko REFUSES subscription mode outright, because
@@ -205,9 +216,19 @@ token_env = "FUKO_GITHUB_TOKEN_DORIAN"
 # round spends real wall-clock before it says so. It still fails over honestly
 # (or dies on tool_timeout, which is throttle-class too) — it is just slow to
 # admit it. See docs/agentic-reviewer.md.
+# TRANSITION NOTE for the flip (henry, fuko-pr#303): run receipts are labelled
+# provider/name, and `fuko status` marks a receipt whose label is no longer in
+# this file `superseded` — non-gating, "seat renamed or removed". So for one
+# window after this change every open PR's existing gray receipt
+# (`codex-proxy/gpt-5.6-sol`) reads as superseded until that PR's next round
+# posts a `codex-proxy/gpt-6.1-sol` row, and rounds fire only on push /
+# reopen / ready-for-review — a quiet PR does not heal by itself. Read "no
+# valid gray row" during that window as "awaiting the first gpt-6.1-sol
+# round", not as a removed seat. The ledger is unaffected (its key is the
+# token_env slot, not the label).
 [[review.models]]
 provider = "codex-proxy"
-name = "gpt-5.6-sol"
+name = "gpt-6.1-sol"
 max_context = 272000
 auth = "api-key"
 backend = "agentic"

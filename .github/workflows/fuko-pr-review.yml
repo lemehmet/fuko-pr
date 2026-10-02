@@ -13,12 +13,19 @@
 # resolve to an unreachable host and the review would degrade to KB-less — still
 # runs, just without injected learnings.
 #
-# Concurrent A/B under two App identities: branch a (GLM-5.2) posts as fuko-dorian,
-# branch b (qwen3.8-max) as fuko-gray. Each App = a repo VARIABLE (App ID) + secret
-# (private key): FUKO_DORIAN_APP_ID/FUKO_DORIAN_APP_PRIVATE_KEY and
-# FUKO_GRAY_APP_ID/FUKO_GRAY_APP_PRIVATE_KEY. With only one App the A/B runs
-# sequentially under it; with none it posts as github-actions[bot]. Observe-only —
-# posts reviews, gates nothing.
+# Seats, as of 2026-10-02 (the roster lives in .fuko.toml; this is the map
+# from seat to posting identity): gray = codex-proxy/gpt-6.1-sol, the ONLY
+# active (gating) seat, posting as fuko-gray; henry and dorian = qwen3.8-max
+# trials, non-gating, posting as fuko-henry / fuko-dorian. The 2026-08 GLM vs
+# qwen A/B this header used to describe ended 2026-09-07. Each App = a repo
+# VARIABLE (App ID) + secret (private key): FUKO_<SEAT>_APP_ID /
+# FUKO_<SEAT>_APP_PRIVATE_KEY. The identity rule is all-or-nothing (#106): if
+# ANY configured seat's App is missing, the whole round runs sequentially
+# under the base identity — dorian's token, else gray's, else
+# github-actions[bot] — so the seat without an App does not get the bot
+# login, it drags every seat onto one login. gray's verdict is the one that
+# gates (role = active in .fuko.toml); the trials post findings and gate
+# nothing.
 
 name: fuko-pr review
 
@@ -66,14 +73,14 @@ jobs:
       pull-requests: write
       issues: write
     steps:
-      # Two App identities for concurrent A/B: branch a (GLM-5.2) posts as
-      # fuko-dorian, branch b (qwen3.8-max) as fuko-gray, so the runner reviews under
+      # One App identity per seat (gray = codex-proxy gating seat, henry and
+      # dorian = qwen trials; see the header), so the runner reviews under
       # per-branch tokens (distinct throttle buckets + author separation). Each App
       # is configured by a repo VARIABLE (App ID) + secret (private key); App IDs
       # aren't secret material, and keeping them in `vars` makes the mint gates
       # below plain data-presence checks.
-      # If the gray App is absent the runner degrades to a sequential single-token
-      # A/B; if both are absent it falls back to github-actions[bot].
+      # Any of the three Apps absent = the whole round sequential under the base
+      # identity (dorian's token, else gray's, else github-actions[bot]).
       - name: Mint fuko-dorian app token
         id: app-token-dorian
         if: ${{ vars.FUKO_DORIAN_APP_ID != '' }}
@@ -117,8 +124,9 @@ jobs:
 
       # Make a failed mint LOUD: continue-on-error above hides the failure from
       # the job status (the step still reports success), the token output comes
-      # out empty, and the runner then silently degrades — gray missing means
-      # sequential A/B under dorian, dorian missing means github-actions[bot].
+      # out empty, and the runner then silently degrades — any seat's identity
+      # missing means the WHOLE round runs sequentially under the base
+      # identity (dorian's token, else gray's, else github-actions[bot]).
       # `outcome` is the pre-continue-on-error result, so it sees the failure;
       # a skipped mint (App intentionally unconfigured) stays silent.
       # (Found on mepro#1455: a bad gray PEM 401'd and nothing flagged it.)
@@ -133,7 +141,7 @@ jobs:
             echo "::warning title=fuko-dorian App token mint failed::check vars.FUKO_DORIAN_APP_ID / secrets.FUKO_DORIAN_APP_PRIVATE_KEY and the App installation; the base identity falls back to fuko-gray, then github-actions[bot]"
           fi
           if [ "$GRAY_OUTCOME" = "failure" ]; then
-            echo "::warning title=fuko-gray App token mint failed::check vars.FUKO_GRAY_APP_ID / secrets.FUKO_GRAY_APP_PRIVATE_KEY and the App installation; the A/B falls back to sequential under the base identity"
+            echo "::warning title=fuko-gray App token mint failed::check vars.FUKO_GRAY_APP_ID / secrets.FUKO_GRAY_APP_PRIVATE_KEY and the App installation; the WHOLE round falls back to sequential under the base identity"
           fi
           if [ "$HENRY_OUTCOME" = "failure" ]; then
             echo "::warning title=fuko-henry App token mint failed::check vars.FUKO_HENRY_APP_ID / secrets.FUKO_HENRY_APP_PRIVATE_KEY and the App installation; the WHOLE round falls back to sequential under the base identity"
@@ -162,8 +170,9 @@ jobs:
           # .fuko.toml. Each is the App token or EMPTY (no github.token fallback):
           # an unminted App must leave its var empty so _resolve_branch_identities
           # falls back to sequential rather than racing fuko-gray against
-          # github-actions[bot]. Concurrency activates only when both resolve to
-          # distinct actors; otherwise the run is sequential under GITHUB_TOKEN.
+          # github-actions[bot]. Concurrency activates only when ALL configured
+          # seats (actives and trials alike, #106) resolve to distinct actors;
+          # otherwise the run is sequential under GITHUB_TOKEN.
           FUKO_GITHUB_TOKEN_DORIAN: ${{ steps.app-token-dorian.outputs.token }}
           FUKO_GITHUB_TOKEN_GRAY: ${{ steps.app-token-gray.outputs.token }}
           FUKO_GITHUB_TOKEN_HENRY: ${{ steps.app-token-henry.outputs.token }}
@@ -172,12 +181,14 @@ jobs:
           # no injected learnings.
           FUKO_URL: ${{ secrets.FUKO_URL }}
           FUKO_TOKEN: ${{ secrets.FUKO_TOKEN }}
-          # Reviewer model keys for the .fuko.toml A/B pool: GLM-5.2 via z.ai
-          # (zai-coding, branch a) and a model via OpenRouter (openrouter,
-          # branch b). Separate keys = separate throttle buckets. OLLAMA_API_KEY
-          # covers the ollama-cloud BACKUP entry: without it an OpenRouter
-          # outage cools gray and its OpenRouter backup together, and the only
-          # surviving failover would then fail to authenticate.
+          # Provider keys for presets NO configured seat uses today (2026-10-02:
+          # .fuko.toml has no zai-coding, openrouter or ollama-cloud entry, and
+          # gray has had no backup since 2026-09-01). Retained exports, so a
+          # backup re-add is a .fuko.toml change and not a workflow change —
+          # every preset's key_env must be exported HERE for the driver to find
+          # it (see the transcript-redaction note below). Separate keys =
+          # separate throttle buckets, which is what makes a backup on another
+          # vendor worth having.
           ZAI_KEY: ${{ secrets.ZAI_KEY }}
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
@@ -232,7 +243,7 @@ jobs:
           # does not hit its case.
           #
           # No gateway model is in Claude Code's window table — not
-          # `gpt-5.6-sol`, not `qwen3.8-max` — so an enforcement that refuses
+          # `gpt-6.1-sol`, not `qwen3.8-max` — so an enforcement that refuses
           # unrecognised models refuses every model this fleet runs, by
           # construction. The main model is not flying blind: each entry's
           # `max_context` still arrives as CLAUDE_CODE_MAX_CONTEXT_TOKENS.
