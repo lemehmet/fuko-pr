@@ -120,8 +120,9 @@ jobs:
 
       # Make a failed mint LOUD: continue-on-error above hides the failure from
       # the job status (the step still reports success), the token output comes
-      # out empty, and the runner then silently degrades — gray missing means
-      # sequential A/B under dorian, dorian missing means github-actions[bot].
+      # out empty, and the runner then silently degrades — any seat's identity
+      # missing means the WHOLE round runs sequentially under the base
+      # identity (dorian's token, else gray's, else github-actions[bot]).
       # `outcome` is the pre-continue-on-error result, so it sees the failure;
       # a skipped mint (App intentionally unconfigured) stays silent.
       # (Found on mepro#1455: a bad gray PEM 401'd and nothing flagged it.)
@@ -165,8 +166,9 @@ jobs:
           # .fuko.toml. Each is the App token or EMPTY (no github.token fallback):
           # an unminted App must leave its var empty so _resolve_branch_identities
           # falls back to sequential rather than racing fuko-gray against
-          # github-actions[bot]. Concurrency activates only when both resolve to
-          # distinct actors; otherwise the run is sequential under GITHUB_TOKEN.
+          # github-actions[bot]. Concurrency activates only when ALL configured
+          # seats (actives and trials alike, #106) resolve to distinct actors;
+          # otherwise the run is sequential under GITHUB_TOKEN.
           FUKO_GITHUB_TOKEN_DORIAN: ${{ steps.app-token-dorian.outputs.token }}
           FUKO_GITHUB_TOKEN_GRAY: ${{ steps.app-token-gray.outputs.token }}
           FUKO_GITHUB_TOKEN_HENRY: ${{ steps.app-token-henry.outputs.token }}
@@ -175,12 +177,14 @@ jobs:
           # no injected learnings.
           FUKO_URL: ${{ secrets.FUKO_URL }}
           FUKO_TOKEN: ${{ secrets.FUKO_TOKEN }}
-          # Reviewer model keys for the .fuko.toml A/B pool: GLM-5.2 via z.ai
-          # (zai-coding, branch a) and a model via OpenRouter (openrouter,
-          # branch b). Separate keys = separate throttle buckets. OLLAMA_API_KEY
-          # covers the ollama-cloud BACKUP entry: without it an OpenRouter
-          # outage cools gray and its OpenRouter backup together, and the only
-          # surviving failover would then fail to authenticate.
+          # Provider keys for presets NO configured seat uses today (2026-10-02:
+          # .fuko.toml has no zai-coding, openrouter or ollama-cloud entry, and
+          # gray has had no backup since 2026-09-01). Retained exports, so a
+          # backup re-add is a .fuko.toml change and not a workflow change —
+          # every preset's key_env must be exported HERE for the driver to find
+          # it (see the transcript-redaction note below). Separate keys =
+          # separate throttle buckets, which is what makes a backup on another
+          # vendor worth having.
           ZAI_KEY: ${{ secrets.ZAI_KEY }}
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
