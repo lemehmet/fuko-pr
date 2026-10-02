@@ -19,9 +19,13 @@
 # trials, non-gating, posting as fuko-henry / fuko-dorian. The 2026-08 GLM vs
 # qwen A/B this header used to describe ended 2026-09-07. Each App = a repo
 # VARIABLE (App ID) + secret (private key): FUKO_<SEAT>_APP_ID /
-# FUKO_<SEAT>_APP_PRIVATE_KEY. A seat whose App is not configured posts as
-# github-actions[bot]. gray's verdict is the one that gates (role = active in
-# .fuko.toml); the trials post findings and gate nothing.
+# FUKO_<SEAT>_APP_PRIVATE_KEY. The identity rule is all-or-nothing (#106): if
+# ANY configured seat's App is missing, the whole round runs sequentially
+# under the base identity — dorian's token, else gray's, else
+# github-actions[bot] — so the seat without an App does not get the bot
+# login, it drags every seat onto one login. gray's verdict is the one that
+# gates (role = active in .fuko.toml); the trials post findings and gate
+# nothing.
 
 name: fuko-pr review
 
@@ -75,8 +79,8 @@ jobs:
       # is configured by a repo VARIABLE (App ID) + secret (private key); App IDs
       # aren't secret material, and keeping them in `vars` makes the mint gates
       # below plain data-presence checks.
-      # If the gray App is absent the runner degrades to a sequential single-token
-      # A/B; if both are absent it falls back to github-actions[bot].
+      # Any of the three Apps absent = the whole round sequential under the base
+      # identity (dorian's token, else gray's, else github-actions[bot]).
       - name: Mint fuko-dorian app token
         id: app-token-dorian
         if: ${{ vars.FUKO_DORIAN_APP_ID != '' }}
@@ -137,7 +141,7 @@ jobs:
             echo "::warning title=fuko-dorian App token mint failed::check vars.FUKO_DORIAN_APP_ID / secrets.FUKO_DORIAN_APP_PRIVATE_KEY and the App installation; the base identity falls back to fuko-gray, then github-actions[bot]"
           fi
           if [ "$GRAY_OUTCOME" = "failure" ]; then
-            echo "::warning title=fuko-gray App token mint failed::check vars.FUKO_GRAY_APP_ID / secrets.FUKO_GRAY_APP_PRIVATE_KEY and the App installation; the A/B falls back to sequential under the base identity"
+            echo "::warning title=fuko-gray App token mint failed::check vars.FUKO_GRAY_APP_ID / secrets.FUKO_GRAY_APP_PRIVATE_KEY and the App installation; the WHOLE round falls back to sequential under the base identity"
           fi
           if [ "$HENRY_OUTCOME" = "failure" ]; then
             echo "::warning title=fuko-henry App token mint failed::check vars.FUKO_HENRY_APP_ID / secrets.FUKO_HENRY_APP_PRIVATE_KEY and the App installation; the WHOLE round falls back to sequential under the base identity"
