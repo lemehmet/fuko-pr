@@ -232,7 +232,7 @@ jobs:
           # does not hit its case.
           #
           # No gateway model is in Claude Code's window table — not
-          # `gpt-5.6-sol`, not `qwen3.8-max` — so an enforcement that refuses
+          # `gpt-6.1-sol`, not `qwen3.8-max` — so an enforcement that refuses
           # unrecognised models refuses every model this fleet runs, by
           # construction. The main model is not flying blind: each entry's
           # `max_context` still arrives as CLAUDE_CODE_MAX_CONTEXT_TOKENS.

@@ -216,6 +216,16 @@ token_env = "FUKO_GITHUB_TOKEN_DORIAN"
 # round spends real wall-clock before it says so. It still fails over honestly
 # (or dies on tool_timeout, which is throttle-class too) — it is just slow to
 # admit it. See docs/agentic-reviewer.md.
+# TRANSITION NOTE for the flip (henry, fuko-pr#303): run receipts are labelled
+# provider/name, and `fuko status` marks a receipt whose label is no longer in
+# this file `superseded` — non-gating, "seat renamed or removed". So for one
+# window after this change every open PR's existing gray receipt
+# (`codex-proxy/gpt-5.6-sol`) reads as superseded until that PR's next round
+# posts a `codex-proxy/gpt-6.1-sol` row, and rounds fire only on push /
+# reopen / ready-for-review — a quiet PR does not heal by itself. Read "no
+# valid gray row" during that window as "awaiting the first gpt-6.1-sol
+# round", not as a removed seat. The ledger is unaffected (its key is the
+# token_env slot, not the label).
 [[review.models]]
 provider = "codex-proxy"
 name = "gpt-6.1-sol"
