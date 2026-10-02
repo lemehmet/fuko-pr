@@ -13,12 +13,15 @@
 # resolve to an unreachable host and the review would degrade to KB-less — still
 # runs, just without injected learnings.
 #
-# Concurrent A/B under two App identities: branch a (GLM-5.2) posts as fuko-dorian,
-# branch b (qwen3.8-max) as fuko-gray. Each App = a repo VARIABLE (App ID) + secret
-# (private key): FUKO_DORIAN_APP_ID/FUKO_DORIAN_APP_PRIVATE_KEY and
-# FUKO_GRAY_APP_ID/FUKO_GRAY_APP_PRIVATE_KEY. With only one App the A/B runs
-# sequentially under it; with none it posts as github-actions[bot]. Observe-only —
-# posts reviews, gates nothing.
+# Seats, as of 2026-10-02 (the roster lives in .fuko.toml; this is the map
+# from seat to posting identity): gray = codex-proxy/gpt-6.1-sol, the ONLY
+# active (gating) seat, posting as fuko-gray; henry and dorian = qwen3.8-max
+# trials, non-gating, posting as fuko-henry / fuko-dorian. The 2026-08 GLM vs
+# qwen A/B this header used to describe ended 2026-09-07. Each App = a repo
+# VARIABLE (App ID) + secret (private key): FUKO_<SEAT>_APP_ID /
+# FUKO_<SEAT>_APP_PRIVATE_KEY. A seat whose App is not configured posts as
+# github-actions[bot]. gray's verdict is the one that gates (role = active in
+# .fuko.toml); the trials post findings and gate nothing.
 
 name: fuko-pr review
 
@@ -66,8 +69,8 @@ jobs:
       pull-requests: write
       issues: write
     steps:
-      # Two App identities for concurrent A/B: branch a (GLM-5.2) posts as
-      # fuko-dorian, branch b (qwen3.8-max) as fuko-gray, so the runner reviews under
+      # One App identity per seat (gray = codex-proxy gating seat, henry and
+      # dorian = qwen trials; see the header), so the runner reviews under
       # per-branch tokens (distinct throttle buckets + author separation). Each App
       # is configured by a repo VARIABLE (App ID) + secret (private key); App IDs
       # aren't secret material, and keeping them in `vars` makes the mint gates

@@ -53,6 +53,31 @@ A Linux x64 host with:
   code flow — it then owns and refreshes its own ChatGPT OAuth session, so
   there is nothing to rotate and nothing to push).
 
+  **The pin must cover every slug `.fuko.toml` names.** The proxy carries a
+  compiled model allowlist and refuses anything outside it, and the list only
+  grows with releases (`gpt-6.1-sol` arrived in v0.1.43, 2026-09-30). So the
+  version is not a free choice: it is the oldest release whose allowlist holds
+  the entry's `name` AND the preset's `small_model` (`gpt-5.6-luna`), and a
+  model flip in `.fuko.toml` is preceded by the pin bump, never followed by
+  it — a seat naming a slug its host's proxy does not serve fails every round
+  in a way CI cannot tell from a dead provider. After install or bump, on
+  EVERY host that can be scheduled a review, prove both halves:
+
+  ```bash
+  curl -s http://127.0.0.1:18765/v1/models | grep -o '"id":"gpt-6.1-sol"'   # the allowlist
+  curl -s http://127.0.0.1:18765/v1/messages -H 'content-type: application/json' \
+    -H 'x-api-key: unused' -H 'anthropic-version: 2023-06-01' \
+    -d '{"model":"gpt-6.1-sol","max_tokens":200,
+         "tools":[{"name":"ping","description":"ping","input_schema":{"type":"object","properties":{}}}],
+         "messages":[{"role":"user","content":"Call the ping tool."}]}' \
+    | grep -o '"stop_reason":"tool_use"'                                   # the plan serves it, through translation
+  ```
+
+  The listing proves the allowlist; only the tool-use call proves the plan
+  serves the model and the harness's tool protocol survives translation. Do
+  it for the small model too — a slug the plan does not serve fails only on
+  the auxiliary calls, which is the quietest way this class breaks.
+
   **Check your glibc before you plan on the release binary.** Upstream ships
   one Linux build and it is linked against `GLIBC_2.39` (Ubuntu 24.04). On an
   Ubuntu 22.04 runner it installs cleanly and then fails every invocation with
