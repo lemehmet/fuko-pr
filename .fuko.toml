@@ -107,6 +107,13 @@ job_budget_minutes = 110
 # var, which is global rather than per-entry and is OFF. It is not part of this
 # A/B; turning it on would change both arms at once.
 
+# PAUSED 2026-10-19 (operator decision), both QwenCloud seats: henry and
+# dorian are COMMENTED OUT, header included, not left as dark trials. The
+# QwenCloud plans are being paused fleet-wide (infra
+# docs/agent-karma-2026-10.md), so a trial branch here would only burn a
+# round's wall-clock against a plan nobody is paying for. Restore by
+# uncommenting once a plan is live again.
+#
 # henry — DARK since 2026-09-07 (QwenCloud plan exhausted) and DEMOTED to trial
 # for the duration. Left configured on purpose: the entry is cheap when dead and
 # the reasoning below is not recoverable from a git log a year from now.
@@ -139,14 +146,14 @@ job_budget_minutes = 110
 # would resolve to subscription mode, which never injects a base URL — the seat
 # would silently review with real Claude, the exact substitution class receipts
 # exist to catch.
-[[review.models]]
-provider = "qwen-anthropic"
-name = "qwen3.8-max"
-max_context = 1000000
-auth = "api-key"
-backend = "agentic"
-role = "trial"
-token_env = "FUKO_GITHUB_TOKEN_HENRY"
+# [[review.models]]
+# provider = "qwen-anthropic"
+# name = "qwen3.8-max"
+# max_context = 1000000
+# auth = "api-key"
+# backend = "agentic"
+# role = "trial"
+# token_env = "FUKO_GITHUB_TOKEN_HENRY"
 
 # dorian — DARK since 2026-09-07, same plan exhaustion as henry, and now a
 # control with nothing to control for (see the amendment at the top). Kept as a
@@ -155,18 +162,19 @@ token_env = "FUKO_GITHUB_TOKEN_HENRY"
 # It was #159's A/B control — the stateless arm. Inherits dorian's retired App
 # identity; the name on the App no longer describes the seat, which is why
 # receipts are scored by provider/model and role, never by bot login.
-[[review.models]]
-provider = "qwen-anthropic"
-name = "qwen3.8-max"
-max_context = 1000000
-auth = "api-key"
-backend = "agentic"
-role = "trial"
-coverage_ledger = false
-findings_ledger = false
-token_env = "FUKO_GITHUB_TOKEN_DORIAN"
+# [[review.models]]
+# provider = "qwen-anthropic"
+# name = "qwen3.8-max"
+# max_context = 1000000
+# auth = "api-key"
+# backend = "agentic"
+# role = "trial"
+# coverage_ledger = false
+# findings_ledger = false
+# token_env = "FUKO_GITHUB_TOKEN_DORIAN"
 
-# gray — the ChatGPT/Codex seat, ACTIVE and gating (2026-09-07).
+# gray — the ChatGPT/Codex seat, ACTIVE and gating (2026-09-07). Since
+# 2026-10-19 the ONLY live seat in this file (henry and dorian paused above).
 #
 # WHAT THIS REPLACED, said plainly: this slot was #159's stateful arm, and
 # taking it ENDS that A/B rather than pausing it — a treatment arm with no
@@ -207,7 +215,10 @@ token_env = "FUKO_GITHUB_TOKEN_DORIAN"
 # admit it. See docs/agentic-reviewer.md.
 [[review.models]]
 provider = "codex-proxy"
-name = "gpt-5.6-sol"
+# gpt-5.6-sol -> gpt-6.1-sol 2026-10-19, matching mepro's gray (since
+# 2026-10-02); the fleet proxy (v0.1.43) already serves it. 272000 re-checked
+# there: upstream still pairs the gpt-6 slugs with the same plan window.
+name = "gpt-6.1-sol"
 max_context = 272000
 auth = "api-key"
 backend = "agentic"
