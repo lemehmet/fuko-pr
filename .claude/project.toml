@@ -25,7 +25,14 @@ url = "https://github.com/lemehmet/fuko-pr"
 # and address-pr-reviews.md both do a hard `c['bots']['copilot']['login']`
 # lookup in their preamble load block, so deleting the section crashes every
 # child before it starts.
-gate_reviewers = ["coderabbit"]
+# CodeRabbit OFF THE GATE 2026-10-25 (operator decision, fleet-wide: mepro,
+# fuko-pr, claude-skills, proswatch, zapollo). Its findings are still triaged
+# through triage_logins below when it reviews under its included allowance,
+# but no round waits on it and nothing requests, resumes or `--use-credits`
+# for it -- the skill's observe-only reviewer rule (claude-skills >= 0.7.2).
+# What gates a round here is the fuko seats' own roles in .fuko.toml: gray
+# and ivy are `active`. Restore ["coderabbit"] to put CR back on the gate.
+gate_reviewers = []
 # Substring-matched (case-insensitive) against comment author logins. "fuko-"
 # matches every fuko reviewer App instance (fuko-dorian[bot], fuko-gray[bot], …)
 # so a GitHub-App rename or a second instance can't silently drop fuko findings
@@ -48,7 +55,7 @@ resume_command = "@coderabbitai resume"
 # Primary fuko reviewer instance. The §10 reply audit matches via triage_logins'
 # "fuko-" substring (covers all instances); this scalar is only bound to
 # $FUKO_PR_LOGIN for display, so the exact instance named here is not critical.
-login = "fuko-dorian[bot]"
+login = "fuko-gray[bot]"
 gated = false   # observe-only: triaged + replied, but not a round-gate participant
 
 [ci]

@@ -42,8 +42,8 @@ tools = ["review", "improve"]   # PR-Agent tools to run
 # so a config with none would have nothing that gates).
 #
 # Known presets: zai-coding, ollama, ollama-cloud, lemonade, openrouter,
-# prodia, anthropic, openai, qwen-anthropic, zai-anthropic, codex-proxy,
-# anthropic-compatible. (lemonade = any Lemonade server,
+# prodia, anthropic, openai, qwen-anthropic, zai-anthropic, kimi-code,
+# codex-proxy, anthropic-compatible. (lemonade = any Lemonade server,
 # e.g. a LAN AMD box; OpenAI-compatible, no real auth — set LEMONADE_API_KEY
 # to any non-empty value and point base_url at the host. prodia = a rented
 # OpenAI-compatible GPU box, key from PRODIA_KEY; it has no default base_url,
@@ -56,8 +56,13 @@ tools = ["review", "improve"]   # PR-Agent tools to run
 # ChatGPT/Codex reached through a translating proxy ON THE RUNNER — the ChatGPT
 # subscription, NOT the OpenAI API the `openai` preset bills separately; needs
 # the proxy installed (see runner-setup.md) and, like the two above, agentic +
-# api-key. anthropic-compatible = any other gateway speaking the Anthropic
-# Messages API; it has no default endpoint, so the entry must set base_url.)
+# api-key. kimi-code = Moonshot's Kimi membership (Plus and up, with Kimi
+# Code benefits) at its Anthropic-compatible coding endpoint, key from
+# KIMI_CODE_KEY (minted in the Kimi Code Console -- NOT a platform.moonshot.ai
+# pay-per-token key); agentic + api-key, name the plain slug (`k3.1-pro`,
+# never the `[1m]` spelling). anthropic-compatible = any other gateway
+# speaking the Anthropic Messages API; it has no default endpoint, so the
+# entry must set base_url.)
 #
 # `auth` (agentic backend only): "auto" (default) | "api-key" | "subscription".
 # api-key reads the preset's key env var; subscription runs as the runner's own

@@ -12,7 +12,7 @@ costly. fuko-pr puts a thin, swappable layer in front of an open reviewer
 ([PR-Agent](https://github.com/the-pr-agent/pr-agent) today; more later) so you
 can:
 
-- **choose your review model/provider** (z.ai/GLM, Anthropic, Ollama, …) with one
+- **choose your review model/provider** (z.ai/GLM, Anthropic, Kimi Code, Ollama, …) with one
   config edit — no relearning each bot's settings,
 - **own your knowledge base** — repo-specific learnings live in *your* store
   (Postgres or a sqlite-vec file in your own S3/R2 bucket) and survive switching

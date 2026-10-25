@@ -107,6 +107,18 @@ job_budget_minutes = 110
 # var, which is global rather than per-entry and is OFF. It is not part of this
 # A/B; turning it on would change both arms at once.
 
+# AMENDED 2026-10-25 — THREE SEATS AGAIN, two of them gating. CodeRabbit left
+# the fleet-wide merge gate (operator decision: its credit spend hit the $200
+# cap with days left in the cycle, for a second opinion the agentic seats
+# already out-catch). ivy — the Claude seat mepro has run as a trial since
+# 2026-10-21 — joins here as a GATING seat beside gray, which is the first
+# time this repo's gate has had two model families on it since sybil went
+# dark. basil returns as a TRIAL seat on Kimi Code (K3.1 Pro), the slot's
+# second life on a Kimi model, this time on a membership rather than
+# OpenRouter's per-token rate. The budget line: 3 branches * 1 tool * 1800s
+# = 90m + ~5m setup, inside job_budget_minutes = 110; concurrent (all three
+# Apps minting) is ~30m.
+#
 # PAUSED 2026-10-19 (operator decision), both QwenCloud seats: henry and
 # dorian are COMMENTED OUT, header included, not left as dark trials. The
 # QwenCloud plans are being paused fleet-wide (infra
@@ -224,6 +236,70 @@ auth = "api-key"
 backend = "agentic"
 role = "active"
 token_env = "FUKO_GITHUB_TOKEN_GRAY"
+
+# ivy — the Claude seat, GATING here from day one (2026-10-25). Same shape as
+# mepro's entry: headless Claude Code reviewing with a Claude model, no
+# gateway, no translator. It skipped the trial step on THIS repo because the
+# trial already ran on mepro (since 2026-10-21, the operator's call to
+# promote it fleet-wide on 2026-10-25 when CodeRabbit left the gate) and
+# because a one-gate fleet is what the amendment above is escaping.
+#
+# auth is PINNED to subscription, the inverse of every other seat's pin:
+# here subscription IS the intent. The workflow exports the Team seat's
+# `claude setup-token` (secret FUKO_IVY_CLAUDE_OAUTH_TOKEN) as
+# CLAUDE_CODE_OAUTH_TOKEN; the runner strips it from every branch's ambient
+# env and re-injects it into subscription branches only, so gray and basil
+# never see it and ivy never reaches a gateway. ONE subscription seat per
+# round: api-key branches get a private CLAUDE_CONFIG_DIR, subscription
+# branches share the runner's, so two would race (mepro #2064).
+#
+# max_context is the SAFE side of the auto-compact asymmetry (a review reads
+# ~120k tokens; too high compacts after the plan's real limit and dies late).
+# The receipt's `model` is the tally key — flip the name to claude-fable-5-1
+# only once a round proves the plan serves it.
+[[review.models]]
+provider = "anthropic"
+name = "claude-opus-5-5"
+max_context = 200000
+auth = "subscription"
+backend = "agentic"
+role = "active"
+token_env = "FUKO_GITHUB_TOKEN_IVY"
+
+# basil — Kimi K3.1 Pro on Kimi Code, the TRIAL seat (2026-10-25). The App
+# identity last posted as `moonshotai/kimi-k3` over OpenRouter on mepro
+# (promoted 2026-08-06 on receipts, demoted to backup 2026-08-21 on COST —
+# the most expensive seat per round at OpenRouter's per-token rate), and
+# that cost argument is what a flat membership answers. Everything else
+# starts over: new model generation (K3.1), new harness (agentic, not the
+# diff backend), so the old scorecard says nothing about this seat. Fresh
+# receipts-only tally from this commit; promote by flipping `role` after
+# ~two weeks against gray and ivy on the same PRs.
+#
+# `kimi-code` is a base-URL swap like z.ai's preset, not a translator like
+# gray's: the endpoint answers /v1/messages natively (probed 2026-10-25 —
+# model echoed verbatim, tool_use honoured, prompt caching live). The slug is
+# the plain one on purpose; `k3.1-pro[1m]` is a Claude Code hint stripped
+# before the call and would put label != model on every receipt. The
+# endpoint is THINKING-ONLY (every slug reports supports_thinking_type:
+# only), the QwenCloud shape that drove this file's tool_timeout to 1800 —
+# the fleet number holds for the budget arithmetic above; raise per-entry
+# only from a receipt that says the honest cost is higher.
+#
+# auth is PINNED to api-key for the usual reason: `auto` on a runner with a
+# logged-in Claude session resolves to subscription, which injects no base
+# URL — a real Claude review under a Kimi label. The plan serves 1M context
+# to k3.1-pro; 262144 is the safe side of the compaction asymmetry and what
+# Kimi's own Claude Code setup uses. No small_model: the plan has no cheap
+# tier, so the entry's model serves every slot.
+[[review.models]]
+provider = "kimi-code"
+name = "k3.1-pro"
+max_context = 262144
+auth = "api-key"
+backend = "agentic"
+role = "trial"
+token_env = "FUKO_GITHUB_TOKEN_BASIL"
 
 # NO BACKUP as of 2026-09-01, on purpose. The z.ai seat that sat here was
 # dropped so that account's capacity goes to mepro, which is in active
