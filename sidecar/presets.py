@@ -163,6 +163,40 @@ PRESETS: dict[str, ProviderPreset] = {
         quirks={"small_model": "gpt-5.6-luna"},
         requires_base_url=True,
     ),
+    # Kimi Code -- Moonshot's Kimi membership (the Plus/Pro/Max/Ultra tiers
+    # with "Kimi Code benefits"), reached at its Anthropic-compatible endpoint.
+    # Added 2026-10-25 for the basil seat's return as a Kimi K3.1 Pro trial.
+    #
+    # A base-URL swap like `zai-anthropic`, NOT a translator like
+    # `codex-proxy`: the endpoint answers /v1/messages natively (verified
+    # 2026-10-25 -- the response `model` echoes the requested slug verbatim,
+    # a tool definition answers `stop_reason: tool_use`, prompt caching
+    # reports cache_read_input_tokens). The key is minted in the Kimi Code
+    # Console (kimi.ai -> Kimi Code -> Console, up to five, shown once) and is
+    # NOT a platform.moonshot.ai key: that is the pay-per-token API, a
+    # different product the `openrouter` preset's `moonshotai/kimi-k3` also
+    # reaches, billed separately. Plans and keys must not be mixed.
+    #
+    # `api.kimi.ai` is the overseas host; `api.kimi.com` serves the same
+    # product for China. Both accept the same key.
+    #
+    # Every model this endpoint serves is THINKING-ONLY (`/v1/models` reports
+    # `supports_thinking_type: only`): a bare call returns a `thinking` block
+    # unrequested, exactly as the QwenCloud gateway did, so a seat here pays
+    # reasoning tokens on every tool-call turn and wants the same generous
+    # per-entry `tool_timeout` that lesson produced. Kimi's own Claude Code
+    # setup points every model-tier variable at the main model and names no
+    # cheap tier (the `-highspeed` variants cost MORE quota), so there is no
+    # `small_model` quirk: the entry's own model serves every slot, as for
+    # `anthropic-compatible`. Name the plain slug (`k3.1-pro`), never the
+    # `[1m]` spelling: that suffix is a Claude Code hint stripped before the
+    # call, and the receipt's label would then disagree with the answering
+    # model on every round. `max_context` on the entry sizes the window.
+    "kimi-code": ProviderPreset(
+        litellm_prefix="anthropic/",
+        base_url="https://api.kimi.ai/coding",
+        key_env="KIMI_CODE_KEY",
+    ),
     # Any gateway that speaks the Anthropic Messages API and is not one of the
     # named vendors above -- a self-hosted LiteLLM or vLLM, a rented box, a
     # provider we have not earned a preset for yet. The endpoint is the

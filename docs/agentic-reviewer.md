@@ -436,6 +436,40 @@ classified as throttling, so the branch fails over to a backup entry; an
 authentication failure is deliberately **not**, because failing over would
 burn every provider in the pool on what is a one-line runner fix.
 
+### A subscription gateway without a cheap tier: `kimi-code`
+
+Moonshot's Kimi membership (Plus and up, with the "Kimi Code" benefit
+activated) serves an Anthropic-compatible endpoint at
+`https://api.kimi.ai/coding` (`api.kimi.com` for China; same key):
+
+```toml
+[[review.models]]
+provider = "kimi-code"
+name = "k3.1-pro"                  # the plain slug; never `k3.1-pro[1m]`
+max_context = 262144
+auth = "api-key"                   # key from KIMI_CODE_KEY
+backend = "agentic"
+role = "trial"
+tool_timeout = 2100
+```
+
+The key is minted in the Kimi Code Console (up to five per account, shown
+once). It is **not** a `platform.moonshot.ai` key — that is the pay-per-token
+API, a different product the `openrouter` preset also reaches, billed
+separately. Plans and keys must not be mixed.
+
+Two things measured on 2026-10-25 shape the entry. Every model this endpoint
+serves is thinking-only (`/v1/models` reports `supports_thinking_type: only`),
+so a bare call returns a `thinking` block unrequested — the QwenCloud shape —
+and each tool-call turn pays reasoning tokens first; size `tool_timeout` the
+way that lesson sized henry's, not from the diff backend's numbers. And the
+plan names no cheap tier (the `-highspeed` variants cost *more* quota), so the
+preset carries no `small_model` quirk and the entry's model serves every slot,
+exactly as `anthropic-compatible` does. The response `model` field echoes the
+requested slug verbatim, so the substitution detector is live on this seat;
+the `[1m]` spelling would break that on every round, because Claude Code
+strips it before the call.
+
 ### A self-hosted gateway: `anthropic-compatible`
 
 Any endpoint that speaks the Anthropic Messages API can host a seat — a LiteLLM
@@ -838,7 +872,7 @@ Current limits, on purpose:
   `litellm_prefix`, not its name: any preset whose prefix is `anthropic/`
   qualifies, because the harness is headless Claude Code and it speaks that
   protocol. That is `anthropic` itself, the vendor gateways
-  (`qwen-anthropic`, `zai-anthropic`) and `anthropic-compatible` — the model
+  (`qwen-anthropic`, `zai-anthropic`, `kimi-code`) and `anthropic-compatible` — the model
   behind those endpoints is not Claude. Other model families arrive with an
   OSS agentic harness implementing the same `run_review` signature — the
   strategy and driver do not change for it.

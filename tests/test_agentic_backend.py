@@ -227,6 +227,25 @@ def test_zai_anthropic_preset_builds_gateway_env(monkeypatch):
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "glm-5.3"
 
 
+def test_kimi_code_preset_builds_gateway_env(monkeypatch):
+    """Kimi Code (2026-10-25, basil's return as a K3.1 Pro trial) is a plain
+    base-URL swap: anthropic/ prefix, the membership's coding endpoint,
+    KIMI_CODE_KEY -- and NO cheap tier, so every slot routes to the entry's
+    own model, the `anthropic-compatible` shape rather than the vendor one."""
+    monkeypatch.setenv("KIMI_CODE_KEY", "sk-kimi-test")
+    env = AgenticBackend().build_env(
+        get_preset("kimi-code"),
+        ModelConfig(provider="kimi-code", name="k3.1-pro", auth="api-key"),
+        knowledge="",
+        tools=["review"],
+    )
+    assert env["FUKO_AGENTIC_MODEL"] == "k3.1-pro"
+    assert env["ANTHROPIC_API_KEY"] == "sk-kimi-test"
+    assert env["ANTHROPIC_BASE_URL"] == "https://api.kimi.ai/coding"
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "k3.1-pro"  # no small_model quirk
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "k3.1-pro"
+
+
 def test_anthropic_compatible_preset_serves_every_slot_from_one_model(monkeypatch):
     """A self-hosted gateway preset routes all three model slots to the entry.
 

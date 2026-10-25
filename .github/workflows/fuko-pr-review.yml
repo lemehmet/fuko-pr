@@ -13,12 +13,14 @@
 # resolve to an unreachable host and the review would degrade to KB-less — still
 # runs, just without injected learnings.
 #
-# Concurrent A/B under two App identities: branch a (GLM-5.2) posts as fuko-dorian,
-# branch b (qwen3.8-max) as fuko-gray. Each App = a repo VARIABLE (App ID) + secret
-# (private key): FUKO_DORIAN_APP_ID/FUKO_DORIAN_APP_PRIVATE_KEY and
-# FUKO_GRAY_APP_ID/FUKO_GRAY_APP_PRIVATE_KEY. With only one App the A/B runs
-# sequentially under it; with none it posts as github-actions[bot]. Observe-only —
-# posts reviews, gates nothing.
+# Concurrent seats under per-branch App identities (.fuko.toml token_env):
+# gray (gpt-6.1-sol via codex-proxy, GATING), ivy (claude-opus-5-5 on the
+# Team subscription, GATING since 2026-10-25) and basil (k3.1-pro on Kimi
+# Code, TRIAL since 2026-10-25). Each App = a repo VARIABLE (App ID) + secret
+# (private key). Identity is all-or-nothing: one unminted seat token makes the
+# whole round sequential under the base identity; with none it posts as
+# github-actions[bot]. The review loop gates on the seats' .fuko.toml roles;
+# CodeRabbit is observe-only here since 2026-10-25 (.claude/project.toml).
 
 name: fuko-pr review
 
@@ -115,25 +117,64 @@ jobs:
           permission-pull-requests: write
           permission-issues: write
 
+      # ivy — the Claude GATING seat (2026-10-25, .fuko.toml). The App is the
+      # seat's GitHub identity only; the MODEL credential is
+      # CLAUDE_CODE_OAUTH_TOKEN in the Review step's env, a different secret.
+      - name: Mint fuko-ivy app token
+        id: app-token-ivy
+        if: ${{ vars.FUKO_IVY_APP_ID != '' }}
+        continue-on-error: true # absent/failed App degrades the round to sequential under the base identity
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.FUKO_IVY_APP_ID }}
+          private-key: ${{ secrets.FUKO_IVY_APP_PRIVATE_KEY }}
+          permission-contents: read
+          permission-pull-requests: write
+          permission-issues: write
+
+      # basil — the Kimi Code TRIAL seat (2026-10-25, .fuko.toml). Non-gating
+      # for its findings, NOT for its identity: a missing token here collapses
+      # the whole round to sequential, gray and ivy included.
+      - name: Mint fuko-basil app token
+        id: app-token-basil
+        if: ${{ vars.FUKO_BASIL_APP_ID != '' }}
+        continue-on-error: true # absent/failed App degrades the round to sequential under the base identity
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.FUKO_BASIL_APP_ID }}
+          private-key: ${{ secrets.FUKO_BASIL_APP_PRIVATE_KEY }}
+          permission-contents: read
+          permission-pull-requests: write
+          permission-issues: write
+
       # Make a failed mint LOUD: continue-on-error above hides the failure from
       # the job status (the step still reports success), the token output comes
-      # out empty, and the runner then silently degrades — gray missing means
-      # sequential A/B under dorian, dorian missing means github-actions[bot].
+      # out empty, and the runner then silently degrades — any seat token
+      # missing means sequential under the base identity, and a missing base
+      # identity shifts down the chain to github-actions[bot].
       # `outcome` is the pre-continue-on-error result, so it sees the failure;
       # a skipped mint (App intentionally unconfigured) stays silent.
       # (Found on mepro#1455: a bad gray PEM 401'd and nothing flagged it.)
       - name: Surface App token mint failures
-        if: ${{ steps.app-token-dorian.outcome == 'failure' || steps.app-token-gray.outcome == 'failure' || steps.app-token-henry.outcome == 'failure' }}
+        if: ${{ steps.app-token-dorian.outcome == 'failure' || steps.app-token-gray.outcome == 'failure' || steps.app-token-henry.outcome == 'failure' || steps.app-token-ivy.outcome == 'failure' || steps.app-token-basil.outcome == 'failure' }}
         env:
           DORIAN_OUTCOME: ${{ steps.app-token-dorian.outcome }}
           GRAY_OUTCOME: ${{ steps.app-token-gray.outcome }}
           HENRY_OUTCOME: ${{ steps.app-token-henry.outcome }}
+          IVY_OUTCOME: ${{ steps.app-token-ivy.outcome }}
+          BASIL_OUTCOME: ${{ steps.app-token-basil.outcome }}
         run: |
+          if [ "$IVY_OUTCOME" = "failure" ]; then
+            echo "::warning title=fuko-ivy App token mint failed::check vars.FUKO_IVY_APP_ID / secrets.FUKO_IVY_APP_PRIVATE_KEY and the App installation; ivy is a GATING seat and identity is all-or-nothing, so the WHOLE round falls back to sequential under the base identity"
+          fi
+          if [ "$BASIL_OUTCOME" = "failure" ]; then
+            echo "::warning title=fuko-basil App token mint failed::check vars.FUKO_BASIL_APP_ID / secrets.FUKO_BASIL_APP_PRIVATE_KEY and the App installation; basil is a TRIAL seat but identity is all-or-nothing, so the WHOLE round falls back to sequential under the base identity"
+          fi
           if [ "$DORIAN_OUTCOME" = "failure" ]; then
             echo "::warning title=fuko-dorian App token mint failed::check vars.FUKO_DORIAN_APP_ID / secrets.FUKO_DORIAN_APP_PRIVATE_KEY and the App installation; the base identity falls back to fuko-gray, then github-actions[bot]"
           fi
           if [ "$GRAY_OUTCOME" = "failure" ]; then
-            echo "::warning title=fuko-gray App token mint failed::check vars.FUKO_GRAY_APP_ID / secrets.FUKO_GRAY_APP_PRIVATE_KEY and the App installation; the A/B falls back to sequential under the base identity"
+            echo "::warning title=fuko-gray App token mint failed::check vars.FUKO_GRAY_APP_ID / secrets.FUKO_GRAY_APP_PRIVATE_KEY and the App installation; gray is a GATING seat, so the round falls back to sequential under the base identity (ivy's token, then dorian's)"
           fi
           if [ "$HENRY_OUTCOME" = "failure" ]; then
             echo "::warning title=fuko-henry App token mint failed::check vars.FUKO_HENRY_APP_ID / secrets.FUKO_HENRY_APP_PRIVATE_KEY and the App installation; the WHOLE round falls back to sequential under the base identity"
@@ -151,13 +192,24 @@ jobs:
         with:
           version: "0.11.22"
 
+      - name: Surface missing model keys
+        env:
+          FUKO_IVY_CLAUDE_OAUTH_TOKEN: ${{ secrets.FUKO_IVY_CLAUDE_OAUTH_TOKEN }}
+          KIMI_CODE_KEY: ${{ secrets.KIMI_CODE_KEY }}
+        run: |
+          if [ -z "$FUKO_IVY_CLAUDE_OAUTH_TOKEN" ]; then
+            echo "::warning title=FUKO_IVY_CLAUDE_OAUTH_TOKEN secret is not set::ivy (the agentic Claude GATING seat, auth = subscription) authenticates with this token and fails its auth check every round without it. Mint one with 'claude setup-token' under the Team seat's login and add the repo secret"
+          fi
+          if [ -z "$KIMI_CODE_KEY" ]; then
+            echo "::warning title=KIMI_CODE_KEY secret is not set::basil (the agentic Kimi Code TRIAL seat) fails its branch every round without it. Mint one in the Kimi Code Console and add the repo secret"
+          fi
+
       - name: Review
         env:
-          # Base identity for PR reads + the sequential fallback: whichever App
-          # token minted (dorian preferred), else github-actions[bot] — so a
-          # single configured App drives the sequential A/B under its own
-          # identity regardless of which one it is.
-          GITHUB_TOKEN: ${{ steps.app-token-dorian.outputs.token || steps.app-token-gray.outputs.token || github.token }}
+          # Base identity for PR reads + the sequential fallback: the gating
+          # seats first (gray, then ivy), then the legacy dorian App, else
+          # github-actions[bot]. A trial identity (basil) never fronts a round.
+          GITHUB_TOKEN: ${{ steps.app-token-gray.outputs.token || steps.app-token-ivy.outputs.token || steps.app-token-dorian.outputs.token || github.token }}
           # Per-branch identities for concurrent A/B — referenced by token_env in
           # .fuko.toml. Each is the App token or EMPTY (no github.token fallback):
           # an unminted App must leave its var empty so _resolve_branch_identities
@@ -167,6 +219,17 @@ jobs:
           FUKO_GITHUB_TOKEN_DORIAN: ${{ steps.app-token-dorian.outputs.token }}
           FUKO_GITHUB_TOKEN_GRAY: ${{ steps.app-token-gray.outputs.token }}
           FUKO_GITHUB_TOKEN_HENRY: ${{ steps.app-token-henry.outputs.token }}
+          FUKO_GITHUB_TOKEN_IVY: ${{ steps.app-token-ivy.outputs.token }}
+          FUKO_GITHUB_TOKEN_BASIL: ${{ steps.app-token-basil.outputs.token }}
+          # ivy's MODEL credential: a `claude setup-token` minted under the
+          # Team seat's login (one-year OAuth token; model requests only). The
+          # runner strips this from the AMBIENT env of every branch and
+          # re-injects it into subscription-auth branches only, so the api-key
+          # seats never see it. Same secret on every repo ivy reviews.
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.FUKO_IVY_CLAUDE_OAUTH_TOKEN }}
+          # basil's Kimi Code key (kimi-code preset) — the membership's key
+          # from the Kimi Code Console, NOT a platform.moonshot.ai key.
+          KIMI_CODE_KEY: ${{ secrets.KIMI_CODE_KEY }}
           # Knowledge base: the LAN fuko sidecar reached from the self-hosted
           # runner. If unreachable the review degrades to KB-less — harmless, just
           # no injected learnings.
