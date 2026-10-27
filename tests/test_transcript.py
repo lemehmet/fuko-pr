@@ -977,6 +977,29 @@ def test_the_index_is_derived_from_the_scrubbed_bytes():
     assert transcript.index().tool_result_bytes == len("key=[REDACTED:TOKEN]".encode())
 
 
+def test_the_meter_reads_the_gemini_cli_dialect():
+    """Top-level tool_use events count, read_file re-reads count, and the terminal
+    result marks the feed whole. The feed carries no tool output, so the byte
+    figure stays 0 -- documented as 'not in the feed', not 'fed nothing'."""
+    transcript, _ = _transcript()
+    for event in (
+        {"type": "init", "model": "gemini-x"},
+        {"type": "tool_use", "tool_name": "read_file", "parameters": {"file_path": "a.go"}},
+        {"type": "tool_result", "status": "success", "output": ""},
+        {"type": "tool_use", "tool_name": "read_file", "parameters": {"file_path": "a.go"}},
+        {"type": "tool_use", "tool_name": "grep_search", "parameters": {"pattern": "x"}},
+        {"type": "tool_use", "tool_name": ["not", "a", "name"], "parameters": "nope"},
+        {"type": "result", "status": "success", "stats": {}},
+    ):
+        transcript.write(json.dumps(event) + "\n")
+    transcript.close()
+    index = transcript.index()
+    assert index.tool_calls == {"read_file": 2, "grep_search": 1, "?": 1}
+    assert index.repeated_read_files == 1
+    assert index.tool_result_bytes == 0
+    assert index.complete is True
+
+
 def test_the_meter_skips_what_it_cannot_parse():
     """Same tolerance the progress fold has: a blank, non-JSON or non-object
     line -- including the truncated final event `scrub_partial` leaves -- costs

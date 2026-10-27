@@ -606,6 +606,107 @@ blocked for minutes before the text reaches the classifier. It *is* classified
 as throttling once it does, so the branch fails over honestly — it is just
 slower to say so than a normal 429.
 
+### Gemini on Vertex AI: the `vertex` preset and the Gemini CLI harness
+
+The first seat that does not speak the Anthropic Messages API. Instead of a
+translator in front of Claude Code, it gets a harness of its own —
+`sidecar/reviewer/gemini_harness.py`, headless Gemini CLI behind the same
+`run_review` signature — so the strategy, the output contract, the ledgers
+and the driver are shared, and the seat brings a second context construction
+as well as a second model family.
+
+```toml
+[[review.models]]
+provider = "vertex"
+name = "gemini-3.8-flash"          # the Vertex model id, verbatim
+gcp_project = "my-project"         # REQUIRED: who pays
+# gcp_location = "global"          # default; current models are global-only
+auth = "adc"                       # the only mode; "auto" means the same
+backend = "agentic"                # the pr-agent driver refuses this preset
+role = "trial"
+```
+
+**Authentication is Google Application Default Credentials.** No key: the
+CLI reads `GOOGLE_APPLICATION_CREDENTIALS`, or the metadata server on a GCE
+runner, or — on a laptop — the `gcloud auth application-default login` file
+under your real `HOME`, which the harness finds before it swaps `HOME` for a
+private one. Project and location come from the entry: the harness strips the
+runner's `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, base-URL overrides,
+API keys and every `GEMINI_*` variable, then sets the three that select
+Vertex. Two facts measured on Gemini CLI 0.65.0 shape this: the Vertex path
+ignores `GOOGLE_CLOUD_ACCESS_TOKEN` (Code Assist reads it, Vertex does not),
+so a short-lived token has to arrive through an ADC source; and a runner with
+no ADC configured at all falls back to the VM's metadata identity, which on a
+shared CI box is usually far broader than a reviewer needs — point
+`GOOGLE_APPLICATION_CREDENTIALS` (or `GCE_METADATA_HOST`) at a narrow
+identity on such a runner.
+
+Credential failures (`Could not load the default credentials`,
+`UNAUTHENTICATED`, `PERMISSION_DENIED`) classify as auth and do not fail
+over; Vertex quota (`429`, `RESOURCE_EXHAUSTED`) is throttle-class and does.
+
+**Isolation was measured, not assumed**, against a hostile checkout carrying
+`.gemini/settings.json` (hooks, an MCP server, a tool-discovery command, a
+context-file rename), `.env` and `.gemini/.env` (a `GEMINI_SYSTEM_MD`
+takeover), `GEMINI.md` at the root and in a subdirectory, and a skill, an
+agent and a custom command:
+
+| vector | naive¹ | this harness |
+| --- | --- | --- |
+| shell command executed | **ran** | no such tool |
+| skill / agent / command / renamed context file in context | loaded | not loaded |
+| repo `.env` reaches the process | loaded | not loaded |
+| read outside the workspace roots | refused | refused |
+| root `GEMINI.md` in context | loaded | stripped |
+| `GEMINI.md` attached when a sibling file is read | loaded | stripped |
+
+¹ run from the checkout with `--skip-trust --yolo`.
+
+What produces the right-hand column, each property load-bearing:
+
+1. **The CLI never runs from the checkout.** Workspace settings, `.env`
+   discovery and trust are decided by the working directory, which is a clean
+   scratch directory; the checkout is an `--include-directories` root.
+   `--skip-trust` trusts that clean directory, which headless mode requires.
+2. **A private home per run** (`HOME` = `GEMINI_CLI_HOME`), created outside
+   the readable cwd and removed on every exit path, holding only fuko's
+   settings: `tools.core` pinned to `read_file`, `read_many_files`, `glob`,
+   `grep_search`, `list_directory`; hooks, skills, agents, checkpointing,
+   telemetry, usage statistics and update checks off; `.env` discovery off;
+   `model.maxSessionTurns` from `max_turns`. `TMPDIR` points inside it, so the
+   CLI's own error reports — which can quote the request, i.e. the reviewed
+   code — never land in a shared `/tmp`.
+3. **The tool registry is the boundary.** Nothing outside `tools.core` is
+   registered, so there is no shell, write or network tool to approve; headless
+   `default` approval mode refuses anything needing confirmation should a
+   future CLI widen the registry.
+4. **Reads are confined by the CLI.** Unlike Claude Code's, Gemini's read
+   tools refuse paths outside the workspace roots ("Path not in workspace"),
+   so the credential denylist above has no Gemini counterpart. Keep
+   `GOOGLE_APPLICATION_CREDENTIALS` outside the checkout and the cwd.
+5. **`GEMINI.md` is stripped at every depth, in any letter case**, with
+   `.gemini/`. The CLI loads it from an included root eagerly and from any
+   directory it reads lazily, whatever `context.loadMemoryFromIncludeDirectories`
+   says, so no setting closes it. `AGENTS.md` and `CLAUDE.md` are not read by
+   this CLI and are left for the reviewer to read as code. A consequence worth
+   designing for: rules a seat must follow belong in `extra_instructions` or
+   the knowledge base — from the base branch — never in a context file the
+   PR under review can edit.
+
+An operator who bakes admin settings into the runner image can point
+`FUKO_GEMINI_SYSTEM_SETTINGS` at them; the CLI ignores a system settings file
+whose directory is not owned by root, so this is for an image, not a per-run
+file.
+
+**What the receipts can and cannot say on this seat.** Tokens are real: the
+terminal `result` event's `stats` map onto the metrics columns, with Gemini's
+uncached `input` as `input_tokens` and `cached` as `cache_read_tokens`, the
+raw stats kept under `usage.gemini`. There is no cost feed, so `cost_usd` is
+NULL, and no turn count (the CLI reports tool calls, a different quantity), so
+`turns` is NULL too. The stream carries no tool OUTPUT, so a transcript
+records what the agent asked for — tool calls and re-reads are exact — but
+`tool_result_bytes` is 0 for "not in the feed", not "fed nothing".
+
 ## Session transcripts (`FUKO_TRANSCRIPT_DIR`)
 
 The harness reads the CLI's whole NDJSON event feed and folds it away, keeping
@@ -868,14 +969,13 @@ Current limits, on purpose:
 - **Runner prerequisite:** the `claude` CLI must be installed on the runner
   and authenticated per the mode above; a missing binary fails that branch
   with a clear message instead of throttling.
-- **Anthropic-protocol presets only.** The gate is the preset's
-  `litellm_prefix`, not its name: any preset whose prefix is `anthropic/`
-  qualifies, because the harness is headless Claude Code and it speaks that
-  protocol. That is `anthropic` itself, the vendor gateways
-  (`qwen-anthropic`, `zai-anthropic`, `kimi-code`) and `anthropic-compatible` — the model
-  behind those endpoints is not Claude. Other model families arrive with an
-  OSS agentic harness implementing the same `run_review` signature — the
-  strategy and driver do not change for it.
+- **Two harnesses, chosen by the preset.** Any preset whose `litellm_prefix`
+  is `anthropic/` runs on headless Claude Code, because it speaks that
+  protocol: `anthropic` itself, the vendor gateways (`qwen-anthropic`,
+  `zai-anthropic`, `kimi-code`) and `anthropic-compatible` — the model behind
+  those endpoints is not Claude. A preset that names an `agentic_harness`
+  runs on that one instead; today that is `vertex`, on the Gemini CLI (below).
+  Every other preset is refused by this backend.
 - **One tool.** `review` only; `improve`/`describe` in `[review].tools` are
   ignored for this backend — accepted rather than rejected so a shared list
   keeps working. Worth knowing when sizing a job: the budget arithmetic

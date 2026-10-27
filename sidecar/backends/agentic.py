@@ -47,7 +47,14 @@ from ..config import settings
 from ..fukoconfig import ModelConfig, ReviewConfig
 from ..objectstore import BlobStoreConfig, local_blob_root
 from ..logfmt import flatten_for_log as _flatten_for_log
-from ..presets import PRESETS, ProviderPreset
+from ..presets import (
+    HARNESS_CLAUDE_CODE,
+    HARNESS_GEMINI_CLI,
+    PRESETS,
+    ProviderPreset,
+    agentic_harness,
+)
+from ..reviewer import gemini_harness
 from ..reviewer.checkout import (
     CheckoutError,
     checkout_pr_head,
@@ -585,6 +592,13 @@ def _identity(token: str) -> str:
 
 _AUTH_API_KEY = "api-key"
 _AUTH_SUBSCRIPTION = "subscription"
+_AUTH_ADC = "adc"
+# Which harness the entry runs on, and -- for the Gemini CLI one -- where its
+# Vertex calls go. Set by `build_env` from config; `invoke` reads them back
+# from the branch env, never from the ambient one.
+_ENV_HARNESS = "FUKO_AGENTIC_HARNESS"
+_ENV_GCP_PROJECT = "FUKO_AGENTIC_GCP_PROJECT"
+_ENV_GCP_LOCATION = "FUKO_AGENTIC_GCP_LOCATION"
 # Everything ambient that can decide WHO PAYS or WHERE THE TRAFFIC GOES. The
 # credential three: Claude Code's precedence is ANTHROPIC_AUTH_TOKEN >
 # ANTHROPIC_API_KEY > apiKeyHelper > CLAUDE_CODE_OAUTH_TOKEN > the runner's
@@ -727,14 +741,22 @@ class AgenticBackend:
         in its own variable and with the opposite polarity -- present only to
         DISABLE (#159), because Tier 1 defaults on.
         """
-        if preset.litellm_prefix != "anthropic/":
+        harness = agentic_harness(preset)
+        if harness is None:
             raise ValueError(
-                f"backend 'agentic' currently supports only the 'anthropic' preset "
-                f"(its harness is headless Claude Code); got provider "
-                f"'{model.provider}'. Other model families arrive with an OSS "
-                f"harness -- until then run them on the pr-agent backend."
+                f"backend 'agentic' runs the 'anthropic/'-prefixed presets on "
+                f"headless Claude Code and 'vertex' on the Gemini CLI; got "
+                f"provider '{model.provider}'. Run it on the pr-agent backend."
             )
+        if harness == HARNESS_GEMINI_CLI:
+            return self._gemini_env(model, knowledge)
         auth = self._resolve_auth(preset, model)
+        if auth == _AUTH_ADC:
+            raise ValueError(
+                f"model entry '{model.provider}/{model.name}' asks for auth = 'adc', "
+                f"which only the 'vertex' preset (Gemini CLI) uses; Claude Code "
+                f"presets take 'api-key' or 'subscription'."
+            )
         # Both refusals below are ABOVE the auth branch on purpose. The
         # pr-agent backend has always enforced `requires_base_url`; the agentic
         # one never had to, because until `anthropic-compatible` no such preset
@@ -806,6 +828,45 @@ class AgenticBackend:
         # source of truth for both consumers.
         if model.max_context:
             env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(model.max_context)
+        env.update(self._entry_env(model, knowledge))
+        return env
+
+    def _gemini_env(self, model: ModelConfig, knowledge: str) -> dict[str, str]:
+        """The branch environment for a Gemini CLI entry (the 'vertex' preset).
+
+        ADC is the only authentication this harness has, so ``auto`` resolves
+        to it and the Claude Code modes are refused rather than ignored. The
+        project is REQUIRED from config: the harness strips the runner's
+        ``GOOGLE_CLOUD_PROJECT``, so an entry naming none has no project to
+        bill rather than an accidental one. ``max_context`` is not forwarded;
+        the CLI sizes its window from the model it is given.
+        """
+        if model.auth not in ("auto", _AUTH_ADC):
+            raise ValueError(
+                f"model entry '{model.provider}/{model.name}' asks for auth = "
+                f"'{model.auth}', but the Gemini CLI harness authenticates only "
+                f"with Google Application Default Credentials; use auth = 'adc' "
+                f"or leave it at 'auto'."
+            )
+        if not model.gcp_project:
+            raise ValueError(
+                f"model entry '{model.provider}/{model.name}' has no gcp_project; "
+                f"set it on its [[review.models]] entry in .fuko.toml"
+            )
+        env: dict[str, str] = {
+            _ENV_MODEL: model.name,
+            _ENV_AUTH: _AUTH_ADC,
+            _ENV_HARNESS: HARNESS_GEMINI_CLI,
+            _ENV_GCP_PROJECT: model.gcp_project,
+            _ENV_GCP_LOCATION: model.gcp_location or gemini_harness.DEFAULT_LOCATION,
+        }
+        env.update(self._entry_env(model, knowledge))
+        return env
+
+    @staticmethod
+    def _entry_env(model: ModelConfig, knowledge: str) -> dict[str, str]:
+        """The harness-independent part of a branch env: ledgers and steering."""
+        env: dict[str, str] = {}
         # Read off the entry the runner hands in, which on a FAILOVER attempt is
         # the backup already carrying the rescued branch's ledger flags: the
         # ledger is keyed per seat, a backup is not a seat, and the seat is the
@@ -837,7 +898,16 @@ class AgenticBackend:
         traffic went somewhere it never did (the same substitution class the
         receipt's endpoint field exists to expose). Empty string = the SDK's
         own default endpoint, matching the receipt field's convention.
+
+        A Gemini CLI entry reports the Vertex project and location it bills,
+        since that pair -- not a base URL -- is what decides where it went.
         """
+        if agentic_harness(preset) == HARNESS_GEMINI_CLI:
+            if not model.gcp_project:
+                return ""
+            return gemini_harness.vertex_endpoint(
+                model.gcp_project, model.gcp_location or gemini_harness.DEFAULT_LOCATION
+            )
         if self._resolve_auth(preset, model) == _AUTH_SUBSCRIPTION:
             return ""
         return model.base_url or preset.base_url or ""
@@ -1042,43 +1112,61 @@ class AgenticBackend:
         raw_extra_deny = os.environ.get(_ENV_EXTRA_DENY_DIRS, "")
         if raw_extra_deny.strip():
             harness_env[_ENV_EXTRA_DENY_DIRS] = raw_extra_deny
-        # DELIVERY-side receipt (mepro#2012 r2, both gating seats converged):
-        # a workflow validator can only prove the CONFIG carries a window;
-        # this line is the one place that knows what the spawned harness
-        # will actually read, so log it — the absent case especially, since
-        # with unknown-model enforcement disabled that seat silently reviews
-        # at the harness's ~200k default while its receipt reads done.
-        print(
-            "fuko: agentic harness %s: CLAUDE_CODE_MAX_CONTEXT_TOKENS=%s"
-            % (
-                env.get(_ENV_MODEL, "?"),
-                harness_env.get(
-                    "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
-                    "ABSENT (harness default ~200k)",
-                ),
-            ),
-            file=sys.stderr,
-        )
-        if auth == _AUTH_API_KEY:
-            for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", *_MODEL_ROUTING_VARS):
-                if key in env:
-                    harness_env[key] = env[key]
-        else:
-            # The CI form of a subscription login: a long-lived token from
-            # `claude setup-token`. An interactive login instead lives under
-            # HOME/CLAUDE_CONFIG_DIR, which never left the environment.
-            oauth = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
-            if oauth:
-                harness_env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth
-            status = check_auth(harness_env)
-            if status is not None and not status.get("loggedIn"):
+        harness = env.get(_ENV_HARNESS, HARNESS_CLAUDE_CODE)
+        if harness == HARNESS_GEMINI_CLI:
+            project = env.get(_ENV_GCP_PROJECT, "")
+            if not project:
                 return _failure_result(
                     "failed:exit 1",
-                    "agentic backend is in subscription auth mode but this "
-                    "runner has no logged-in Claude session; run `claude "
-                    "setup-token` and export CLAUDE_CODE_OAUTH_TOKEN, or set "
-                    "auth = 'api-key' on this model entry",
+                    f"no Vertex project in the harness environment ({_ENV_GCP_PROJECT} unset)",
                 )
+            location = env.get(_ENV_GCP_LOCATION) or gemini_harness.DEFAULT_LOCATION
+            harness_env = gemini_harness.harness_environment(
+                harness_env, project=project, location=location
+            )
+            print(
+                f"fuko: agentic harness {model_name}: gemini-cli on "
+                f"{gemini_harness.vertex_endpoint(project, location)}",
+                file=sys.stderr,
+            )
+        else:
+            # DELIVERY-side receipt (mepro#2012 r2, both gating seats converged):
+            # a workflow validator can only prove the CONFIG carries a window;
+            # this line is the one place that knows what the spawned harness
+            # will actually read, so log it — the absent case especially, since
+            # with unknown-model enforcement disabled that seat silently reviews
+            # at the harness's ~200k default while its receipt reads done.
+            print(
+                "fuko: agentic harness %s: CLAUDE_CODE_MAX_CONTEXT_TOKENS=%s"
+                % (
+                    env.get(_ENV_MODEL, "?"),
+                    harness_env.get(
+                        "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+                        "ABSENT (harness default ~200k)",
+                    ),
+                ),
+                file=sys.stderr,
+            )
+            if auth == _AUTH_API_KEY:
+                for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", *_MODEL_ROUTING_VARS):
+                    if key in env:
+                        harness_env[key] = env[key]
+            else:
+                # The CI form of a subscription login: a long-lived token from
+                # `claude setup-token`. An interactive login instead lives under
+                # HOME/CLAUDE_CONFIG_DIR, which never left the environment.
+                oauth = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+                if oauth:
+                    harness_env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth
+                status = check_auth(harness_env)
+                if status is not None and not status.get("loggedIn"):
+                    return _failure_result(
+                        "failed:exit 1",
+                        "agentic backend is in subscription auth mode but this "
+                        "runner has no logged-in Claude session; run `claude "
+                        "setup-token` and export CLAUDE_CODE_OAUTH_TOKEN, or set "
+                        "auth = 'api-key' on this model entry",
+                    )
 
         try:
             ctx = fetch_pr_context(pr.repo, pr.number, token=token, api_url=api_url)
@@ -1216,7 +1304,10 @@ class AgenticBackend:
                 if refused
                 else open_transcript(_transcript_secrets(harness_env, token), label=model_name)
             )
-            result = run_review(
+            # Looked up at call time rather than bound at import, so a test that
+            # patches either module attribute reaches the run it means to.
+            run = gemini_harness.run_review if harness == HARNESS_GEMINI_CLI else run_review
+            result = run(
                 prompt,
                 Path(checkout),
                 cwd=workdir,

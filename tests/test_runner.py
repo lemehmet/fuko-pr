@@ -2573,3 +2573,13 @@ def test_sequential_header_crash_does_not_kill_siblings(monkeypatch):
     # was ever created to rewrite.
     assert finalized == [("p/first", None, 1), ("p/second", 42, 0)]
     assert result.returncode == 0
+
+
+def test_pragent_refuses_an_agentic_only_preset():
+    from sidecar.fukoconfig import ModelConfig as _MC
+    from sidecar.presets import get_preset as _gp
+
+    with pytest.raises(ValueError, match="agentic backend"):
+        pragent.PrAgentBackend().build_env(
+            _gp("vertex"), _MC(provider="vertex", name="gemini-x"), "", ["review"]
+        )
