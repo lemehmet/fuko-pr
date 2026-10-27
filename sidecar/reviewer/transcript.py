@@ -355,6 +355,13 @@ class ShippingTranscriptSink:
 #: is where that is answerable exactly.
 READ_TOOL = "Read"
 
+#: The Gemini CLI's spelling of the same whole-file read. Its feed is a
+#: different dialect -- one top-level ``tool_use`` event per call, carrying
+#: ``tool_name`` and ``parameters`` -- and carries no tool OUTPUT at all, so a
+#: Gemini transcript's ``tool_result_bytes`` is always 0: not "fed nothing" but
+#: "not in the feed". Its call counts and re-reads are exact.
+GEMINI_READ_TOOL = "read_file"
+
 
 @dataclass(frozen=True)
 class TranscriptIndex:
@@ -495,6 +502,8 @@ class _Meter:
             self._assistant(event)
         elif kind == "user":
             self._tool_results(event)
+        elif kind == "tool_use":
+            self._gemini_tool_use(event)
         elif kind == "result":
             # The terminal event, and the only evidence the feed is whole. A
             # transcript without it was cut short -- by the `tool_timeout` kill,
@@ -518,6 +527,15 @@ class _Meter:
             self.tool_calls[name] = self.tool_calls.get(name, 0) + 1
             if name == READ_TOOL:
                 self._read(block.get("input"))
+
+    def _gemini_tool_use(self, event: dict) -> None:
+        # Same placeholder and the same isinstance guard as `_assistant`, for
+        # the same reason: a malformed name costs a label, never the review.
+        raw_name = event.get("tool_name")
+        name = raw_name if isinstance(raw_name, str) and raw_name else "?"
+        self.tool_calls[name] = self.tool_calls.get(name, 0) + 1
+        if name == GEMINI_READ_TOOL:
+            self._read(event.get("parameters"))
 
     def _read(self, tool_input) -> None:
         path = tool_input.get("file_path") if isinstance(tool_input, dict) else None

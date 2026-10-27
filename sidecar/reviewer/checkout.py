@@ -173,12 +173,21 @@ def fetch_pr_context(
     )
 
 
-#: Agent-runtime config THIS harness would read, removed at ANY depth: a
+#: Agent-runtime config the harnesses would read, removed at ANY depth: a
 #: subdirectory of a checkout is a project root in its own right, so a nested
 #: ``.claude/`` (settings, skills, subagents) or ``.mcp.json`` is the same
 #: vector as the top-level one. Bare names, matched against each directory
-#: entry during the walk -- not paths.
-AGENT_CONFIG_NAMES = (".claude", ".mcp.json")
+#: entry during the walk -- not paths. ``.gemini/`` is the Gemini CLI's
+#: (settings, skills, agents, commands, ``.env``).
+AGENT_CONFIG_NAMES = (".claude", ".mcp.json", ".gemini")
+
+#: Context files matched in ANY letter case, at any depth. The Gemini CLI loads
+#: ``GEMINI.md`` from an included root eagerly and from every directory it reads
+#: lazily, whatever ``loadMemoryFromIncludeDirectories`` says (verified on
+#: 0.65.0), so stripping is the only switch that holds. Casefolded because a
+#: case-insensitive filesystem serves ``gemini.md`` under the name the CLI asks
+#: for, and removing a stray lowercase file costs nothing -- it stays in the diff.
+AGENT_CONTEXT_FILES_CASEFOLDED = frozenset({"gemini.md"})
 
 #: Other tools' agent config, removed at the checkout ROOT only. These are not
 #: read by this harness at all; clearing them just keeps the reviewer from
@@ -276,7 +285,10 @@ def strip_agent_config(root: Path) -> list[str]:
                     removed.append(str((here / name).relative_to(root)))
                 dirnames.remove(name)
         for name in filenames:
-            if name in AGENT_CONFIG_NAMES and _remove_path(here / name):
+            is_config = (
+                name in AGENT_CONFIG_NAMES or name.casefold() in AGENT_CONTEXT_FILES_CASEFOLDED
+            )
+            if is_config and _remove_path(here / name):
                 removed.append(str((here / name).relative_to(root)))
     return removed
 

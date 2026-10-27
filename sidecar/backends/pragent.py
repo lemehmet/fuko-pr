@@ -90,6 +90,15 @@ class PrAgentBackend:
         sub-issues of ``#<n>`` refs in the PR body and throws on a ref that
         resolves to a PR rather than an issue, and it is irrelevant to a review.
         """
+        if preset.agentic_harness:
+            # Nothing here would carry the harness's own auth and routing (the
+            # Vertex project and location for `vertex`), so the container would
+            # fail after pulling its image. Say so at config time instead.
+            raise ValueError(
+                f"provider '{model.provider}' runs only on the agentic backend "
+                f"(harness '{preset.agentic_harness}'); set backend = 'agentic' "
+                f"on its [[review.models]] entry"
+            )
         model_id = preset.litellm_prefix + model.name
         family = preset.litellm_prefix.rstrip("/").upper()
         env: dict[str, str] = {

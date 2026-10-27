@@ -577,7 +577,13 @@ DEFAULT_MAX_TURNS = 250
 # burn the whole pool on what is a one-line runner fix.
 _AUTH_FAILURE_RE = re.compile(
     r"not logged in|please run /login|invalid api key|authentication_error|"
-    r"\bunauthorized\b|\b401\b",
+    r"\bunauthorized\b|\b401\b|"
+    # Google's spellings, for the Gemini CLI harness: no ADC on the runner, a
+    # credential Vertex rejects, and a project/model the identity may not use.
+    # The last is a configuration fault rather than capacity, so it must not
+    # read as a throttle and burn the failover pool (Vertex quota is 429 /
+    # RESOURCE_EXHAUSTED, which `sidecar.throttle` already owns).
+    r"could not load the default credentials|\bunauthenticated\b|permission[_ ]denied",
     re.IGNORECASE,
 )
 
@@ -997,12 +1003,19 @@ def _drive(
     timeout: int,
     emit,
     transcript: Transcript | None = None,
+    consume=None,
 ) -> tuple[int, _StreamOutcome, str, bool]:
     """Run ``cmd`` streaming stdout through :func:`_consume_stream`.
 
     With a ``transcript``, the pipe is wrapped in :func:`_tee` on the way to the
     fold; without one it is passed through untouched, so capture that is off
     costs nothing per event rather than a no-op call per event.
+
+    ``consume`` swaps the fold for another harness's event dialect (the Gemini
+    CLI's, in :mod:`sidecar.reviewer.gemini_harness`). Everything else here --
+    the three pipes, the kill timer, the tee -- is about the subprocess, not
+    the dialect, and is shared rather than copied. ``None`` is Claude Code's
+    :func:`_consume_stream`.
 
     Returns ``(returncode, outcome, stderr, timed_out)``. Three pipes need
     three actors to avoid deadlock on a large prompt or chatty child: stdin is
@@ -1067,7 +1080,7 @@ def _drive(
     stdin_thread.start()
     try:
         stream = proc.stdout if transcript is None else _tee(proc.stdout, transcript)
-        outcome = _consume_stream(stream, emit)
+        outcome = (consume or _consume_stream)(stream, emit)
         proc.wait()
     finally:
         timer.cancel()

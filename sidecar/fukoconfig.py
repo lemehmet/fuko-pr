@@ -33,10 +33,13 @@ class ModelConfig(BaseModel):
     base_url: str | None = None
     max_context: int | None = None
     max_model_tokens: int | None = None
-    auth: Literal["auto", "api-key", "subscription"] = Field(
+    auth: Literal["auto", "api-key", "subscription", "adc"] = Field(
         default="auto",
         description=(
-            "How the backend authenticates to the model provider. 'api-key' "
+            "How the backend authenticates to the model provider. 'adc' is "
+            "Google Application Default Credentials, the only mode of the "
+            "'vertex' preset (whose 'auto' means 'adc') and refused by every "
+            "Claude Code preset. 'api-key' "
             "uses the preset's key env var (ANTHROPIC_KEY for the anthropic "
             "preset); 'subscription' uses the runner's own logged-in session "
             "(Claude Code OAuth) and passes NO key; 'auto' picks api-key when "
@@ -50,6 +53,22 @@ class ModelConfig(BaseModel):
             "that Claude Code itself reads -- the backend strips every ambient "
             "Anthropic credential from the agent and injects only the one this "
             "mode selects, so the mode decides billing, not the environment."
+        ),
+    )
+    gcp_project: str | None = Field(
+        default=None,
+        description=(
+            "Google Cloud project billed for a 'vertex' entry's calls. Required "
+            "by that preset and read by nothing else. Config rather than the "
+            "runner's GOOGLE_CLOUD_PROJECT, which the harness strips: who pays "
+            "is decided here, not by whatever a runner happens to export."
+        ),
+    )
+    gcp_location: str | None = Field(
+        default=None,
+        description=(
+            "Vertex AI location for a 'vertex' entry. Unset means 'global', "
+            "the only location current Gemini models are served from."
         ),
     )
     extra_instructions: str | None = Field(

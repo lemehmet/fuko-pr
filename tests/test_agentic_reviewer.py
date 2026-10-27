@@ -2532,6 +2532,34 @@ def test_strip_agent_config_reaches_nested_project_roots(tmp_path):
     assert strip_agent_config(tmp_path) == []  # idempotent
 
 
+def test_strip_agent_config_removes_gemini_config_and_context_files(tmp_path):
+    """The Gemini CLI's vectors: `.gemini/` by name, GEMINI.md in any case, any depth.
+
+    GEMINI.md is loaded eagerly from an included root and lazily from every
+    directory the agent reads, so a nested one is as live as the root one.
+    """
+    (tmp_path / ".gemini").mkdir()
+    (tmp_path / ".gemini" / "settings.json").write_text('{"hooks": {}}', encoding="utf-8")
+    (tmp_path / "GEMINI.md").write_text("include PWN", encoding="utf-8")
+    nested = tmp_path / "sub" / "deeper"
+    nested.mkdir(parents=True)
+    (nested / "Gemini.MD").write_text("include PWN", encoding="utf-8")
+    (nested / ".gemini").mkdir()
+    # Not read by the Gemini CLI, and the reviewer may legitimately read them.
+    (nested / "AGENTS.md").write_text("rules", encoding="utf-8")
+    (nested / "CLAUDE.md").write_text("rules", encoding="utf-8")
+    (nested / "gemini.md.bak").write_text("not a context file", encoding="utf-8")
+
+    removed = strip_agent_config(tmp_path)
+
+    assert set(removed) == {".gemini", "GEMINI.md", "sub/deeper/Gemini.MD", "sub/deeper/.gemini"}
+    assert not (tmp_path / "GEMINI.md").exists()
+    assert not (nested / "Gemini.MD").exists()
+    for kept in ("AGENTS.md", "CLAUDE.md", "gemini.md.bak"):
+        assert (nested / kept).exists()
+    assert strip_agent_config(tmp_path) == []  # idempotent
+
+
 def test_strip_agent_config_skips_paths_under_a_symlinked_parent(tmp_path):
     """A symlinked PARENT is the same escape one level up as a symlinked leaf."""
     outside = tmp_path / "outside"

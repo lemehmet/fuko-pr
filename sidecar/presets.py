@@ -29,6 +29,12 @@ class ProviderPreset:
     key_env: str | None = None
     quirks: dict[str, object] = field(default_factory=dict)
     requires_base_url: bool = False
+    #: The agentic backend's harness for this preset when it is not headless
+    #: Claude Code. ``None`` keeps the original rule: an ``anthropic/`` prefix
+    #: runs on Claude Code and anything else is refused by that backend.
+    #: ``"gemini-cli"`` selects :mod:`sidecar.reviewer.gemini_harness`, and also
+    #: marks the preset agentic-only -- the pr-agent driver refuses it.
+    agentic_harness: str | None = None
 
 
 PRESETS: dict[str, ProviderPreset] = {
@@ -217,7 +223,36 @@ PRESETS: dict[str, ProviderPreset] = {
         key_env="ANTHROPIC_COMPAT_KEY",
         requires_base_url=True,
     ),
+    # Gemini on Vertex AI, through the Gemini CLI harness. No key: the CLI
+    # authenticates with Google Application Default Credentials, and the
+    # project and location come from the model entry (`gcp_project`,
+    # `gcp_location`) so config, not the runner's environment, decides who
+    # pays. The prefix is LiteLLM's Vertex spelling, so the receipt's model id
+    # reads the way every other provider's does.
+    "vertex": ProviderPreset(
+        litellm_prefix="vertex_ai/",
+        agentic_harness="gemini-cli",
+    ),
 }
+
+#: The one non-Claude agentic harness registered today.
+HARNESS_GEMINI_CLI = "gemini-cli"
+#: The agentic backend's original harness.
+HARNESS_CLAUDE_CODE = "claude-code"
+
+
+def agentic_harness(preset: ProviderPreset) -> str | None:
+    """Return the agentic harness a preset runs on, or None if it has none.
+
+    An explicit ``agentic_harness`` wins; otherwise any ``anthropic/`` preset
+    runs on headless Claude Code, which is the rule the agentic backend
+    enforced before a second harness existed.
+    """
+    if preset.agentic_harness:
+        return preset.agentic_harness
+    if preset.litellm_prefix == "anthropic/":
+        return HARNESS_CLAUDE_CODE
+    return None
 
 
 class UnknownPresetError(KeyError):

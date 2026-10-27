@@ -2962,3 +2962,142 @@ def test_invoke_reports_a_missing_harness_with_no_index(monkeypatch, tmp_path):
     assert result.detail == "failed:exit 1: claude not on PATH"
     assert result.transcript is None
     assert result.channels == {"agentic-review": "failed:exit 1"}
+
+
+# --- the Gemini CLI harness ('vertex' preset) -------------------------------------
+
+
+def _vertex(**kw) -> ModelConfig:
+    base = {"provider": "vertex", "name": "gemini-3.8-flash", "gcp_project": "dev-proj"}
+    base.update(kw)
+    return ModelConfig(**base)
+
+
+def test_vertex_entry_builds_a_gemini_branch_env():
+    env = AgenticBackend().build_env(
+        get_preset("vertex"),
+        _vertex(extra_instructions="focus", findings_ledger=False),
+        "kb",
+        ["review"],
+    )
+    assert env == {
+        "FUKO_AGENTIC_MODEL": "gemini-3.8-flash",
+        "FUKO_AGENTIC_AUTH": "adc",
+        "FUKO_AGENTIC_HARNESS": "gemini-cli",
+        "FUKO_AGENTIC_GCP_PROJECT": "dev-proj",
+        "FUKO_AGENTIC_GCP_LOCATION": "global",
+        "FUKO_AGENTIC_FINDINGS_LEDGER": "0",
+        "FUKO_AGENTIC_INSTRUCTIONS": "focus",
+        "FUKO_AGENTIC_KNOWLEDGE": "kb",
+    }
+
+
+def test_vertex_entry_keeps_an_explicit_location_and_no_claude_variables():
+    env = AgenticBackend().build_env(
+        get_preset("vertex"),
+        _vertex(gcp_location="us-central1", auth="adc", max_context=1_000_000),
+        "",
+        ["review"],
+    )
+    assert env["FUKO_AGENTIC_GCP_LOCATION"] == "us-central1"
+    assert not any(k.startswith(("ANTHROPIC_", "CLAUDE_")) for k in env)
+
+
+@pytest.mark.parametrize("auth", ["api-key", "subscription"])
+def test_vertex_entry_refuses_the_claude_auth_modes(auth):
+    with pytest.raises(ValueError, match="Application Default Credentials"):
+        AgenticBackend().build_env(get_preset("vertex"), _vertex(auth=auth), "", ["review"])
+
+
+def test_vertex_entry_without_a_project_fails_at_build_time():
+    with pytest.raises(ValueError, match="gcp_project"):
+        AgenticBackend().build_env(get_preset("vertex"), _vertex(gcp_project=None), "", ["review"])
+
+
+def test_a_claude_preset_refuses_adc(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_KEY", raising=False)
+    with pytest.raises(ValueError, match="only the 'vertex' preset"):
+        AgenticBackend().build_env(get_preset("anthropic"), _model(auth="adc"), "", ["review"])
+
+
+def test_the_refusal_names_both_harnesses():
+    with pytest.raises(ValueError, match="Gemini CLI"):
+        AgenticBackend().build_env(
+            get_preset("openrouter"),
+            ModelConfig(provider="openrouter", name="x"),
+            knowledge="",
+            tools=["review"],
+        )
+
+
+def test_configured_endpoint_for_vertex_is_the_billed_project_and_location():
+    backend = AgenticBackend()
+    assert backend.configured_endpoint(get_preset("vertex"), _vertex()) == (
+        "https://aiplatform.googleapis.com/v1/projects/dev-proj/locations/global"
+    )
+    assert backend.configured_endpoint(get_preset("vertex"), _vertex(gcp_project=None)) == ""
+
+
+def _gemini_invoke(monkeypatch, harness_result, branch_env):
+    monkeypatch.setattr(agentic_mod, "fetch_pr_context", lambda *a, **k: _ctx())
+    monkeypatch.setattr(agentic_mod, "checkout_pr_head", lambda *a, **k: "/tmp/nowhere")
+    monkeypatch.setattr(agentic_mod, "rmtree", lambda *a, **k: None)
+    monkeypatch.setattr(agentic_mod, "strip_agent_config", lambda *a, **k: [])
+
+    def no_claude(*a, **k):
+        raise AssertionError("the Claude Code path must not run for a Gemini entry")
+
+    monkeypatch.setattr(agentic_mod, "check_auth", no_claude)
+    monkeypatch.setattr(agentic_mod, "run_review", no_claude)
+    captured = {}
+
+    def fake_gemini(prompt, checkout, *, cwd, model, env, timeout, max_turns, transcript=None):
+        captured.update(model=model, env=env, cwd=cwd, checkout=checkout)
+        return harness_result
+
+    monkeypatch.setattr(agentic_mod.gemini_harness, "run_review", fake_gemini)
+    return AgenticBackend().invoke(PR, branch_env, ["review"]), captured
+
+
+def test_invoke_routes_a_gemini_entry_to_its_harness_with_vertex_routing(monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "ambient-proj")
+    monkeypatch.setenv("GEMINI_API_KEY", "ambient-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ambient-anthropic")
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/secrets/adc.json")
+    branch_env = AgenticBackend().build_env(get_preset("vertex"), _vertex(), "", ["review"])
+
+    result, captured = _gemini_invoke(
+        monkeypatch, HarnessResult(returncode=0, text=REVIEW_JSON), branch_env
+    )
+
+    assert result.channels == {"agentic-review": "done"}
+    assert captured["model"] == "gemini-3.8-flash"
+    env = captured["env"]
+    assert env["GOOGLE_GENAI_USE_VERTEXAI"] == "true"
+    assert env["GOOGLE_CLOUD_PROJECT"] == "dev-proj"  # config, not ambient
+    assert env["GOOGLE_CLOUD_LOCATION"] == "global"
+    assert env["GOOGLE_APPLICATION_CREDENTIALS"] == "/secrets/adc.json"
+    assert "GEMINI_API_KEY" not in env
+    assert "ANTHROPIC_API_KEY" not in env
+
+
+def test_invoke_classifies_a_gemini_credential_failure_as_auth_not_throttle(monkeypatch):
+    branch_env = AgenticBackend().build_env(get_preset("vertex"), _vertex(), "", ["review"])
+    failed = HarnessResult(
+        returncode=1, text="", stderr="Error: Could not load the default credentials."
+    )
+    result, _ = _gemini_invoke(monkeypatch, failed, branch_env)
+    assert result.throttled is False
+    assert result.channels == {"agentic-review": "failed:exit 1"}
+    assert "could not authenticate in adc mode" in result.detail
+
+
+def test_invoke_refuses_a_gemini_branch_env_without_a_project(monkeypatch):
+    branch_env = {
+        "FUKO_AGENTIC_MODEL": "gemini-x",
+        "FUKO_AGENTIC_AUTH": "adc",
+        "FUKO_AGENTIC_HARNESS": "gemini-cli",
+    }
+    result, captured = _gemini_invoke(monkeypatch, HarnessResult(returncode=0, text=""), branch_env)
+    assert result.channels == {"agentic-review": "failed:exit 1"}
+    assert captured == {}
