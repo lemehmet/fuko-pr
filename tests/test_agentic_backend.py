@@ -1580,6 +1580,49 @@ def test_normalize_visible_label_in_ab_mode(monkeypatch):
     assert comment["body"].startswith("🤖 `anthropic/claude-x`")
 
 
+def test_solo_review_header_names_provider_not_litellm_id(monkeypatch):
+    """A one-branch round heads its review with ``provider/name`` (mepro#3212).
+
+    The marker keeps the litellm ``model_id`` and no visible per-finding label
+    appears, because those are A/B-only and this is not an A/B round.
+    """
+    backend = AgenticBackend()
+    _seed(backend, model_key="gpt-6.1-sol")
+    fake = _FakeHttpx([200])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    backend.normalize_output(
+        PR, "anthropic/gpt-6.1-sol", header_label="codex-proxy/gpt-6.1-sol", token="t"
+    )
+    payload = fake.posts[0][1]
+    assert payload["body"].splitlines()[0] == "## fuko agentic review — `codex-proxy/gpt-6.1-sol`"
+    (comment,) = payload["comments"]
+    assert not comment["body"].startswith("🤖")
+    (marker,) = extract_markers(comment["body"])
+    assert marker.model == "anthropic/gpt-6.1-sol"
+
+
+def test_ab_review_header_and_label_unchanged_with_header_label(monkeypatch):
+    """An A/B branch receives both labels (equal); header, visible tag and marker
+    are exactly what they were before ``header_label`` existed."""
+    backend = AgenticBackend()
+    _seed(backend, model_key="gpt-6.1-sol")
+    fake = _FakeHttpx([200])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    backend.normalize_output(
+        PR,
+        "anthropic/gpt-6.1-sol",
+        compare_label="codex-proxy/gpt-6.1-sol",
+        header_label="codex-proxy/gpt-6.1-sol",
+        token="t",
+    )
+    payload = fake.posts[0][1]
+    assert payload["body"].splitlines()[0] == "## fuko agentic review — `codex-proxy/gpt-6.1-sol`"
+    (comment,) = payload["comments"]
+    assert comment["body"].startswith("🤖 `codex-proxy/gpt-6.1-sol`")
+    (marker,) = extract_markers(comment["body"])
+    assert marker.model == "anthropic/gpt-6.1-sol"
+
+
 def test_normalize_retries_body_only_on_422(monkeypatch):
     backend = AgenticBackend()
     _seed(backend)
@@ -1731,6 +1774,24 @@ def test_read_back_matches_our_own_branch_in_ab_mode(monkeypatch, _no_sleep):
         PR, "anthropic/claude-x", compare_label="anthropic/claude-x", token="t"
     )
     assert len(fake.posts) == 1  # recognised as already posted
+
+
+def test_read_back_matches_a_solo_review_by_its_header_label(monkeypatch, _no_sleep):
+    """A solo round's lost POST must still be recognised once it landed.
+
+    The read-back fingerprint is the same header the post wrote, so it follows
+    ``header_label`` (``provider/name``), not the litellm id (mepro#3212).
+    """
+    backend = AgenticBackend()
+    _seed(backend, model_key="gpt-6.1-sol")
+    ours = _posted_review(head="beef", label="codex-proxy/gpt-6.1-sol")
+    fake = _FakeHttpx([httpx.ReadTimeout("lost"), 200], reviews=[ours])
+    monkeypatch.setattr(agentic_mod, "httpx", fake)
+    signals = backend.normalize_output(
+        PR, "anthropic/gpt-6.1-sol", header_label="codex-proxy/gpt-6.1-sol", token="t"
+    )
+    assert len(fake.posts) == 1  # recognised as already posted, not duplicated
+    assert len(signals) == 2
 
 
 def test_read_back_walks_past_the_first_page(monkeypatch, _no_sleep):

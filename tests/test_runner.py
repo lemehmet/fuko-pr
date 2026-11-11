@@ -975,6 +975,29 @@ def test_normalize_compare_label_uses_provider_not_litellm_prefix(monkeypatch):
     assert seen["compare_label"] is None
 
 
+@pytest.mark.parametrize("compare", [False, True])
+def test_normalize_header_label_is_provider_name_on_both_paths(compare):
+    """The review header names the seat by ``provider/name`` whether or not the
+    round is A/B (mepro#3212). A solo ``codex-proxy`` seat used to be headed by
+    its litellm id ``anthropic/gpt-6.1-sol``, which reads as an Anthropic model.
+    ``compare_label`` keeps its A/B-only meaning and the marker id keeps the
+    litellm prefix."""
+    from sidecar.fukoconfig import ModelConfig
+
+    seen = {}
+
+    class FakeBackend:
+        def normalize_output(self, pr, model="", *, compare_label=None, header_label=None, **_kw):
+            seen.update(model=model, compare_label=compare_label, header_label=header_label)
+            return []
+
+    model = ModelConfig(provider="codex-proxy", name="gpt-6.1-sol")
+    runner._normalize(FakeBackend(), PRRef("o/r", 8, "u"), model, compare=compare)
+    assert seen["header_label"] == "codex-proxy/gpt-6.1-sol"
+    assert seen["model"] == "anthropic/gpt-6.1-sol"
+    assert seen["compare_label"] == ("codex-proxy/gpt-6.1-sol" if compare else None)
+
+
 @pytest.mark.parametrize("returncodes,expected", [([1, 0], 0), ([0, 1], 0), ([1, 1], 1)])
 def test_review_compare_is_green_when_any_branch_posts(
     monkeypatch, tmp_path, returncodes, expected
@@ -1459,6 +1482,7 @@ def test_review_compare_runs_concurrently_under_per_branch_identity(monkeypatch,
             model="",
             *,
             compare_label=None,
+            header_label=None,
             token=None,
             api_url=None,
             actor=None,
@@ -1503,6 +1527,7 @@ def test_review_compare_concurrent_branch_gets_own_github_user_token(monkeypatch
             model="",
             *,
             compare_label=None,
+            header_label=None,
             token=None,
             api_url=None,
             actor=None,
@@ -1596,6 +1621,7 @@ def test_review_compare_falls_back_to_sequential_shared_token(monkeypatch, tmp_p
             model="",
             *,
             compare_label=None,
+            header_label=None,
             token=None,
             api_url=None,
             actor=None,
@@ -1637,6 +1663,7 @@ def test_review_compare_concurrent_branch_failure_is_isolated(monkeypatch, tmp_p
             model="",
             *,
             compare_label=None,
+            header_label=None,
             token=None,
             api_url=None,
             actor=None,
@@ -1816,6 +1843,7 @@ def test_compare_branch_threads_actor_to_normalize(monkeypatch, tmp_path):
             model="",
             *,
             compare_label=None,
+            header_label=None,
             token=None,
             api_url=None,
             actor=None,

@@ -124,6 +124,7 @@ class ReviewBackend(Protocol):
         model: str = "",
         *,
         compare_label: str | None = None,
+        header_label: str | None = None,
         token: str | None = None,
         api_url: str | None = None,
         actor: str | None = None,
@@ -142,6 +143,12 @@ class ReviewBackend(Protocol):
         configured ``provider/name`` (matching the per-branch summary header), kept
         distinct from ``model`` (the litellm-prefixed id used in the invisible
         marker) so the visible tag never shows a provider's litellm alias.
+
+        ``header_label`` is the configured ``provider/name`` the runner passes on
+        every path, A/B or not. A backend that heads its review with a label uses
+        it there, so a solo round names the seat the way an A/B round does instead
+        of by its litellm id. It never turns on the visible per-finding tag; that
+        stays ``compare_label``'s. Backends that post no header ignore it.
 
         ``token``/``api_url`` pin the GitHub identity that reads and edits the
         comments; in concurrent A/B mode each branch passes its own so marking

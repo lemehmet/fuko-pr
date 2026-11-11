@@ -673,6 +673,12 @@ def _normalize(
     invisible marker — so a ``zai-coding`` branch reads ``zai-coding/<name>`` on the
     diff rather than its litellm alias ``openai/<name>``.
 
+    The review header label is that same ``provider/name`` on EVERY path, solo
+    included (``header_label``): a one-branch ``codex-proxy`` seat would otherwise
+    be headed by its litellm id ``anthropic/<name>``, which reads as an Anthropic
+    model (mepro#3212). It is passed separately because ``compare_label`` also
+    switches on the A/B-only per-finding visible tag.
+
     ``token``/``api_url`` pin the GitHub identity used to read and edit the comments;
     in concurrent A/B mode each branch passes its own so marking happens under that
     branch's identity. ``actor`` is that identity's user id (from the branch header
@@ -683,11 +689,12 @@ def _normalize(
     try:
         preset = get_preset(model.provider)
         model_id = preset.litellm_prefix + model.name
-        compare_label = f"{model.provider}/{model.name}" if compare else None
+        label = f"{model.provider}/{model.name}"
         signals = backend.normalize_output(
             pr,
             model=model_id,
-            compare_label=compare_label,
+            compare_label=label if compare else None,
+            header_label=label,
             token=token,
             api_url=api_url,
             actor=actor,
