@@ -192,10 +192,12 @@ class ReviewBackend(Protocol):
     def invoke(self, pr: PRRef, env: dict[str, str],
                tools: list[str]) -> InvokeResult: ...
 
-    # `model`/`compare_label` label the branch on the diff; `token`/`api_url`
+    # `model`/`compare_label` label the branch on the diff; `header_label`
+    # (provider/name, every path) heads the review; `token`/`api_url`
     # pin the identity that posts; `role` rides each marker (active vs trial).
     def normalize_output(self, pr: PRRef, model: str = "", *,
                          compare_label: str | None = None,
+                         header_label: str | None = None,
                          token: str | None = None,
                          api_url: str | None = None,
                          actor: str | None = None,

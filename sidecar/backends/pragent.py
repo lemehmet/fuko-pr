@@ -309,6 +309,7 @@ class PrAgentBackend:
         model: str = "",
         *,
         compare_label: str | None = None,
+        header_label: str | None = None,
         token: str | None = None,
         api_url: str | None = None,
         actor: str | None = None,
@@ -332,6 +333,9 @@ class PrAgentBackend:
         a compact visible tag of that label, so the producing branch is legible on
         the diff. The label is the configured ``provider/name`` (matching the branch
         header), distinct from the litellm-prefixed ``model`` in the marker.
+
+        ``header_label`` is unused (protocol parity): PR-Agent writes its own
+        review heading, and the A/B branch header is the runner's.
 
         ``token``/``api_url`` pin the GitHub identity that reads and edits comments;
         when unset they fall back to the process ``GITHUB_TOKEN``/``GITHUB_API_URL``.

@@ -1485,6 +1485,7 @@ class AgenticBackend:
         model: str = "",
         *,
         compare_label: str | None = None,
+        header_label: str | None = None,
         token: str | None = None,
         api_url: str | None = None,
         actor: str | None = None,
@@ -1502,6 +1503,12 @@ class AgenticBackend:
         so a placement quirk degrades presentation rather than losing the
         review. A post that still fails returns ``[]`` -- signals that never
         reached the PR must not count as posted findings.
+
+        The review header names the branch by ``header_label`` (the configured
+        ``provider/name``, passed on solo rounds too), falling back to
+        ``compare_label`` and then ``model`` for a caller that passes neither.
+        The read-back fingerprint is that same header, so a retry after a lost
+        POST matches what this call posted.
 
         ``actor`` is unused (protocol parity): output is born marked under this
         branch's own identity, so there is no foreign-comment scoping problem.
@@ -1561,9 +1568,8 @@ class AgenticBackend:
             else:
                 overflow.append((f, body))
 
-        posted = self._post_review(
-            pr, token, api_url, stash, inline, overflow, label=compare_label or model
-        )
+        label = header_label or compare_label or model
+        posted = self._post_review(pr, token, api_url, stash, inline, overflow, label=label)
         return signals if posted else []
 
     def _claim(self, pr_url: str, model: str, identity: str = "") -> _PendingReview | None:
