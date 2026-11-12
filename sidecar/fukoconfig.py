@@ -12,7 +12,7 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 DEFAULT_CONFIG_PATH = ".fuko.toml"
 
@@ -147,6 +147,27 @@ class ModelConfig(BaseModel):
         if value is not None and value <= 0:
             raise ValueError("token counts, timeouts and turn caps must be > 0 when set")
         return value
+
+    # Private, so `.fuko.toml` cannot set it: keys live in the environment only
+    # (#298), and the pool -- not the config -- decides which one an attempt uses.
+    _credential: int = PrivateAttr(default=1)
+
+    @property
+    def credential(self) -> int:
+        """1-based index of the provider credential this attempt authenticates with.
+
+        Always an index, never the key or anything derived from it. See
+        :func:`sidecar.presets.resolve_credentials`.
+        """
+        return self._credential
+
+    def on_credential(self, index: int) -> "ModelConfig":
+        """Return this entry pinned to credential ``index`` (itself when unchanged)."""
+        if index == self._credential:
+            return self
+        pinned = self.model_copy()
+        pinned._credential = index
+        return pinned
 
 
 class CompareModel(ModelConfig):

@@ -290,6 +290,7 @@ def metrics_run_endpoint(req: models.RunMetricRequest) -> dict:
         detail=req.detail or "",
         backend=req.backend,
         endpoint=req.endpoint,
+        credential=req.credential,
         input_tokens=req.input_tokens,
         output_tokens=req.output_tokens,
         cache_read_tokens=req.cache_read_tokens,

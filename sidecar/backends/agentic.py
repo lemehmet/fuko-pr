@@ -35,7 +35,7 @@ import random
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 from shutil import rmtree
@@ -47,7 +47,7 @@ from ..config import settings
 from ..fukoconfig import ModelConfig, ReviewConfig
 from ..objectstore import BlobStoreConfig, local_blob_root
 from ..logfmt import flatten_for_log as _flatten_for_log
-from ..presets import PRESETS, ProviderPreset
+from ..presets import CredentialGapError, ProviderPreset, provider_key_vars, resolve_credentials
 from ..reviewer.checkout import (
     CheckoutError,
     checkout_pr_head,
@@ -62,6 +62,7 @@ from ..reviewer.harness import (
     _ENV_TRANSCRIPT_DENY_DIR,
     check_auth,
     is_auth_failure,
+    is_key_rejection,
     run_review,
     usage_tokens,
 )
@@ -396,8 +397,14 @@ def _provider_key_vars() -> frozenset[str]:
     is meant to be data rather than code. Read live rather than snapshotted at
     import so a late table registration cannot outrun the strip -- the table is
     a handful of entries, so the cost is nothing next to a review run.
+
+    NUMBERED SIBLINGS INCLUDED (#299): a preset may be backed by several
+    credentials (``QWEN_TOKEN_PLAN_KEY_2``, ...), and a seat on credential 1
+    must not inherit credential 2. They are matched by the SHAPE of the names
+    this process actually holds, not by what the resolver would use, so a
+    sibling stranded past a gap is still stripped and still scrubbed.
     """
-    return frozenset(p.key_env for p in PRESETS.values() if p.key_env)
+    return provider_key_vars()
 
 
 #: fuko's own credential-bearing variables, scrubbed from a transcript by VALUE.
@@ -769,7 +776,8 @@ class AgenticBackend:
                 )
         env: dict[str, str] = {_ENV_MODEL: model.name, _ENV_AUTH: auth}
         if auth == _AUTH_API_KEY:
-            key = os.environ.get(preset.key_env or "", "")
+            credentials = resolve_credentials(preset)
+            key = credentials[model.credential - 1] if model.credential <= len(credentials) else ""
             if not key:
                 # Do not offer subscription as the way out of a missing key when
                 # the preset is gateway-only: the guard above refuses that mode,
@@ -853,8 +861,24 @@ class AgenticBackend:
         """
         if model.auth != "auto":
             return model.auth
-        has_key = bool(preset.key_env and os.environ.get(preset.key_env))
+        try:
+            has_key = bool(resolve_credentials(preset))
+        except CredentialGapError:
+            # SOME key is exported, so this is a key-holding runner; `build_env`
+            # then reports the gap instead of the seat quietly reviewing under
+            # the runner's own login.
+            has_key = True
         return _AUTH_API_KEY if has_key else _AUTH_SUBSCRIPTION
+
+    def credential_count(self, preset: ProviderPreset, model: ModelConfig) -> int:
+        """How many provider credentials ``model`` can fail over across.
+
+        Zero in subscription mode, which sends no key at all: expanding such an
+        entry would retry the same login once per unrelated exported key.
+        """
+        if self._resolve_auth(preset, model) != _AUTH_API_KEY:
+            return 0
+        return len(resolve_credentials(preset))
 
     def invoke(self, pr: PRRef, env: dict[str, str], tools: list[str]) -> InvokeResult:
         """Check out the PR head, run the agent, and stash the parsed findings.
@@ -1265,16 +1289,33 @@ class AgenticBackend:
             _dump_harness_output(
                 model_name, f"exit {result.returncode}", result.stderr, result.text
             )
-            if is_auth_failure(output):
+            evidence = result.stderr + ("\n" + result.text if result.error_result else "")
+            if is_auth_failure(output) or (
+                is_key_rejection(evidence) and not is_throttle(result.returncode, output)
+            ):
                 # Auth is neither a timeout nor a throttle -- failing over would burn
                 # the pool on a one-line runner fix -- so the channel is a plain fail.
+                # `auth_failed` lets the runner make the one exception: a rejected
+                # key with a sibling credential behind it moves on to the sibling.
                 auth_tail = _flatten_for_log(result.stderr)[:300]
-                return _failure_result(
-                    f"failed:exit {result.returncode}",
-                    f"agent could not authenticate in {auth} mode"
-                    + (f": {auth_tail}" if auth_tail else ""),
-                    costs=_run_costs(result),
-                    transcript=transcript_index,
+                return replace(
+                    _failure_result(
+                        f"failed:exit {result.returncode}",
+                        f"agent could not authenticate in {auth} mode"
+                        + (f": {auth_tail}" if auth_tail else ""),
+                        costs=_run_costs(result),
+                        transcript=transcript_index,
+                    ),
+                    # From HARNESS-authored text only, and never over throttle
+                    # evidence: this flag makes the runner spend another attempt
+                    # on a sibling key, and the agent's own text is PR-author
+                    # influenced. Harness-authored is stderr, plus the stream's
+                    # final text when the terminal event marked it an error
+                    # report. The fail-fast branch itself keeps scanning
+                    # everything, as it always has -- that direction costs
+                    # nothing.
+                    auth_failed=(is_auth_failure(evidence) or is_key_rejection(evidence))
+                    and not is_throttle(result.returncode, output),
                 )
             # FLATTENED, for the same reason the runner flattens progress
             # arguments (27011698) and the dump prefixes its lines: this text

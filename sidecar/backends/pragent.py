@@ -30,7 +30,7 @@ import httpx
 
 from ..fukoconfig import ModelConfig, ReviewConfig
 from ..normalizers import guide_signals, is_guide_comment, pragent_signals
-from ..presets import ProviderPreset
+from ..presets import ProviderPreset, resolve_credentials
 from ..throttle import is_throttle
 from .base import InvokeResult, PRRef
 from ..signals import ReviewSignal, extract_markers, with_marker, with_markers, with_visible_label
@@ -117,10 +117,9 @@ class PrAgentBackend:
                 f"provider '{model.provider}' has no default endpoint; set "
                 f"base_url on its [[review.models]] entry in .fuko.toml"
             )
-        if preset.key_env:
-            key = os.environ.get(preset.key_env)
-            if key:
-                env[f"{family}__KEY"] = key
+        credentials = resolve_credentials(preset)
+        if model.credential <= len(credentials):
+            env[f"{family}__KEY"] = credentials[model.credential - 1]
 
         quirks = preset.quirks
         if "custom_model_max_tokens" in quirks:

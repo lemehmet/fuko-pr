@@ -132,6 +132,20 @@ config needs (the model provider's key, e.g. `ZAI_KEY` or `ANTHROPIC_KEY`; plus
 fuko-pr and calls `fuko review`; PR-Agent runs from its Docker image, so the
 runner only needs Docker — not a working PR-Agent Python environment.
 
+**Several keys for one provider.** Add numbered sibling secrets next to the
+provider's key — `ZAI_KEY`, `ZAI_KEY_2`, `ZAI_KEY_3`, … (contiguous; any preset's
+key works the same way) — and export each in the workflow's `env:` block. A
+review stays on the first key and moves to the next only when that key is
+throttled (429, quota, overload, timeout), so a later key's quota window is not
+started until it is needed. On the agentic backend a key the provider *rejects*
+(revoked, expired) also moves on to the next one; the pr-agent backend still
+fails fast on a rejected key. Each key cools down on its own
+(`provider`, `provider#2`, … in the cooldown table), and receipts and the
+`review_runs.credential` column record which one answered — as an index, never
+the key. Use one secret per key rather than a list in one secret: GitHub masks
+a secret only as its whole value. Keys live in the environment only; there is
+no `.fuko.toml` setting for them.
+
 Optionally post reviews as a **"Fuko PR Review" GitHub App** instead of
 `github-actions[bot]`: create the App (Pull requests RW, Issues RW, Contents R),
 install it, then set repo **variable** `FUKO_APP_ID` + secret `FUKO_APP_PRIVATE_KEY`.

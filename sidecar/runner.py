@@ -36,8 +36,8 @@ from .fukoconfig import (
     ReviewModel,
     load_config,
 )
-from .pool import order_pool, partition_roles, resolve_models
-from .presets import get_preset
+from .pool import breaker_key, expand_credentials, order_pool, partition_roles, resolve_models
+from .presets import CredentialGapError, get_preset, resolve_credentials
 from .signals import RunReceipt, with_run_receipt
 from .status import escalation_needed
 from .sizing import required_context
@@ -274,7 +274,7 @@ def _cb_endpoint() -> tuple[str, str]:
 
 
 def _cb_cooldowns() -> set[str]:
-    """Provider ids currently in circuit-breaker cooldown (best-effort).
+    """Breaker keys (:func:`sidecar.pool.breaker_key`) currently cooling (best-effort).
 
     Reads the shared state from the sidecar over HTTP when ``FUKO_URL`` is set,
     else from the local Postgres. Any failure yields an empty set -- the breaker
@@ -487,6 +487,9 @@ def _record_run(
 ) -> None:
     """Persist one review-run metrics row (best-effort, never raises).
 
+    The row carries ``model.credential`` -- which of the provider's keys
+    answered, as an index (#299).
+
     Reaches the sidecar over HTTP when ``FUKO_URL`` is set, else the local
     Postgres module; both degrade to no-ops. Metrics are an observability
     layer -- a failure here must never affect the review that produced them.
@@ -529,6 +532,10 @@ def _record_run(
             "transcript": transcript,
             **(costs or {}),
         }
+        # Sent only when it says something: a sidecar older than the column
+        # then keeps receiving the body it has always accepted.
+        if model.credential > 1:
+            payload["credential"] = model.credential
         if fuko_url:
             headers = {"Content-Type": "application/json"}
             if fuko_token:
@@ -554,6 +561,7 @@ def _record_run(
                 backend=backend,
                 endpoint=endpoint,
                 transcript=transcript,
+                credential=model.credential,
                 **(costs or {}),
             )
     except Exception as e:
@@ -871,6 +879,7 @@ def _finalize_branch_header(
         # failover across providers (plan endpoint -> metered endpoint) is
         # invisible to the label==model check; the endpoint is what surfaces it.
         endpoint=result.endpoint or "",
+        credential=result.credential,
         app=app or "",
         # Carried verbatim: `returncode` tolerates an optional tool dying, so the
         # per-channel map is the only place that failure is still visible (#108).
@@ -957,6 +966,19 @@ def _with_branch_ledger(entry: ModelConfig, branch: ModelConfig | None) -> Model
     return entry.model_copy(update=update)
 
 
+def _credential_count(backend, model: ModelConfig) -> int:
+    """How many provider credentials ``model`` may be tried on under ``backend``.
+
+    A backend that authenticates some entries without a key says so itself
+    (agentic: subscription mode); otherwise it is however many keys the preset
+    resolves to. A gap in the numbering raises here, before any attempt, and
+    only for a preset this pool actually uses.
+    """
+    preset = get_preset(model.provider)
+    count_of = getattr(backend, "credential_count", None)
+    return count_of(preset, model) if count_of else len(resolve_credentials(preset))
+
+
 def _run_pool(
     backend,
     pr: PRRef,
@@ -983,6 +1005,8 @@ def _run_pool(
     hold the job and those in circuit-breaker cooldown demoted to last resort. The
     first provider is pinned for the whole job; a throttle (429/quota/overload/
     timeout) trips its breaker and fails over, while any other error fails fast.
+    An entry whose preset holds several credentials is tried once per
+    credential, in order, before the next entry (:func:`expand_credentials`).
     ``tools`` overrides the configured tool list (used to drop ``describe`` in A/B
     mode), ``fresh_comment`` posts a new summary instead of updating PR-Agent's
     persistent one, and ``compare`` tags each branch's inline suggestions with a
@@ -1006,11 +1030,51 @@ def _run_pool(
     """
     tools = review.tools if tools is None else tools
     branch = _ledger_owner(pool)
-    ordered = order_pool(pool, cooled, required)
+    # Expanded HERE, after the branch is fixed and never at the call sites: the
+    # callers' pool is what the job-budget arithmetic and `plan_escalation`
+    # count, and a second credential is a second attempt for the SAME seat, not
+    # a second branch.
+    #
+    # `origin` remembers which pool entry each attempt came from, by position:
+    # two entries may be field-for-field identical, and "another credential of
+    # the same entry" must not mean "the same credential of its twin".
+    origin: dict[int, int] = {}
+    expanded: list[ModelConfig] = []
+    gap: CredentialGapError | None = None
+    for position, entry in enumerate(pool):
+        try:
+            count = _credential_count(backend, entry)
+        except CredentialGapError as e:
+            # A misnumbered key on a BACKUP's provider must not take down a
+            # healthy primary that never needed the backup. The branch entry's
+            # own gap still raises: that seat cannot review at all. A pool of
+            # bare backups has no branch (`_ledger_owner`), so there every
+            # entry is a peer and only losing all of them is fatal.
+            if entry is branch:
+                raise
+            gap = e
+            print(
+                f"fuko: dropping {entry.provider}/{entry.name} from the failover pool: {e}",
+                file=sys.stderr,
+            )
+            continue
+        for attempt in expand_credentials([entry], lambda _m, n=count: n):
+            origin[id(attempt)] = position
+            expanded.append(attempt)
+    if gap is not None and not expanded:
+        raise gap
+    ordered = order_pool(expanded, cooled, required)
 
     result = InvokeResult(returncode=1, detail="no providers configured")
     attempt_started = time.monotonic()
-    for index, model in enumerate(ordered):
+    # A queue rather than a plain walk, because a rejected key reorders it: see
+    # the `auth_failed` branch below.
+    queue = list(ordered)
+    attempts = 0
+    model = None
+    while queue:
+        model = queue.pop(0)
+        attempts += 1
         attempt_started = time.monotonic()
         preset = get_preset(model.provider)
         env = backend.build_env(preset, _with_branch_ledger(model, branch), knowledge, tools)
@@ -1035,9 +1099,12 @@ def _run_pool(
             env.update(_FRESH_COMMENT_ENV)
 
         label = f"{model.provider}/{model.name}"
-        cooling = " (cooling — last resort)" if model.provider in cooled else ""
+        # Named in the log only when it is not the first, so a single-key
+        # deployment's log lines are unchanged. The index, never the key.
+        which = f" (credential #{model.credential})" if model.credential > 1 else ""
+        cooling = " (cooling — last resort)" if breaker_key(model) in cooled else ""
         print(
-            f"fuko: review attempt {index + 1}/{len(ordered)} via {label}{cooling}",
+            f"fuko: review attempt {attempts}/{attempts + len(queue)} via {label}{which}{cooling}",
             file=sys.stderr,
         )
 
@@ -1045,8 +1112,11 @@ def _run_pool(
         # a pool entry is provider+name, and a run receipt compares this against
         # the branch label to tell a promoted backup from the primary. A bare
         # provider never equals the label, so every successful primary run would
-        # otherwise be misreported as a promotion. Circuit-breaker keys stay bare
-        # (`_cb_trip(model.provider, …)`) — those are per-provider, not per-model.
+        # otherwise be misreported as a promotion. That is also why the
+        # credential index travels in its own field rather than as a suffix here:
+        # credential 2 of the branch entry is still the branch entry answering.
+        # Circuit-breaker keys are `breaker_key(model)` — per credential, not
+        # per model.
         # `endpoint` rides along for the same reason: attribution of the
         # ANSWERING entry, at the one place that knows which entry answered.
         # A backend that resolves its own routing (agentic: subscription auth
@@ -1059,7 +1129,49 @@ def _run_pool(
             endpoint=(
                 endpoint_of(preset, model) if endpoint_of else (model.base_url or preset.base_url)
             ),
+            credential=model.credential,
         )
+        # A REJECTED key is not a throttle and normally fails fast -- failing
+        # over would burn the pool on a one-line runner fix. The exception is a
+        # rejected key with another credential OF THE SAME ENTRY still ahead: a
+        # revoked or expired key 1 must not take the seat down while key 2 is
+        # good. "Same entry" is the entry itself (`origin`), not its provider:
+        # a subscription seat is never expanded and so never has one, and a
+        # second entry on the same provider holds the same keys, not new ones.
+        #
+        # The sibling is pulled to the FRONT of the queue rather than reached by
+        # walking: ordering can leave an available backup between two
+        # credentials of one entry (a cooling sibling is demoted behind it), and
+        # a rejection must not run that backup. It stays queued behind the
+        # sibling, so if the sibling then THROTTLES the backup is still there
+        # for the ordinary failover. Other queued attempts on the rejected key
+        # are dropped -- it would only be rejected again -- but only attempts
+        # that authenticate with a key: a subscription entry shares the
+        # provider's breaker key and none of its credentials.
+        #
+        # No breaker trip: the rejection costs seconds, and a cooldown would
+        # hide a dead key behind "cooling" instead of leaving it failing visibly.
+        sibling = next(
+            (later for later in queue if origin[id(later)] == origin[id(model)]),
+            None,
+        )
+        if result.auth_failed and sibling is not None:
+            queue = [sibling] + [
+                later
+                for later in queue
+                if later is not sibling
+                and not (
+                    breaker_key(later) == breaker_key(model)
+                    and _credential_count(backend, later) > 0
+                )
+            ]
+            _record_transcript(_transcript_of(result))
+            print(
+                f"fuko: {label}{which} was rejected by the provider ({result.detail}); "
+                f"trying the next credential",
+                file=sys.stderr,
+            )
+            continue
         if not result.throttled:
             findings = None
             if result.returncode == 0:
@@ -1078,7 +1190,7 @@ def _run_pool(
                 model,
                 slot=slot,
                 duration_s=time.monotonic() - attempt_started,
-                attempts=index + 1,
+                attempts=attempts,
                 outcome="ok" if result.returncode == 0 else "failed",
                 findings=findings,
                 detail=result.detail or "",
@@ -1100,20 +1212,20 @@ def _run_pool(
         # and the rule stays one sentence: a leg is indexed as it is abandoned,
         # rather than indexed only if a later branch happens to run and succeed.
         _record_transcript(_transcript_of(result))
-        _cb_trip(model.provider, review.cooldown_seconds, result.detail)
+        _cb_trip(breaker_key(model), review.cooldown_seconds, result.detail)
         print(
-            f"fuko: {label} throttled ({result.detail}); breaker tripped, failing over",
+            f"fuko: {label}{which} throttled ({result.detail}); breaker tripped, failing over",
             file=sys.stderr,
         )
 
     print("fuko: provider pool exhausted; all attempts throttled", file=sys.stderr)
-    if ordered:
+    if model is not None:
         _record_run(
             pr,
-            ordered[-1],
+            model,
             slot=slot,
             duration_s=time.monotonic() - attempt_started,
-            attempts=len(ordered),
+            attempts=attempts,
             outcome="throttled_out",
             findings=None,
             detail=result.detail or "",
