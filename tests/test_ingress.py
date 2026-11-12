@@ -110,6 +110,17 @@ def test_build_env_enables_live_verbosity():
     assert env["CONFIG__MAX_DESCRIPTION_TOKENS"] == "2000"
 
 
+def test_build_env_sends_both_spellings_of_committable_suggestions():
+    """The image is the operator's choice: PR-Agent before v0.47 reads only the
+    single-t key, and 1.0 drops it for the double-t one. Dropping either as
+    "cleanup" silently turns inline committable suggestions off on one side."""
+    env = PrAgentBackend().build_env(
+        get_preset("ollama"), ModelConfig(provider="ollama", name="m"), "", ["improve"]
+    )
+    assert env["PR_CODE_SUGGESTIONS__COMMITABLE_CODE_SUGGESTIONS"] == "true"
+    assert env["PR_CODE_SUGGESTIONS__COMMITTABLE_CODE_SUGGESTIONS"] == "true"
+
+
 def test_build_env_max_model_tokens_override_beats_preset(monkeypatch):
     monkeypatch.setenv("ZAI_KEY", "k")
     env = PrAgentBackend().build_env(
