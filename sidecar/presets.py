@@ -306,15 +306,17 @@ def provider_key_vars(environ: Mapping[str, str] | None = None) -> frozenset[str
     The bare name of every preset, plus whatever ``environ`` carries that is
     SHAPED like a sibling of one. Matched by shape rather than taken from
     :func:`resolve_credentials` on purpose: this set is what gets stripped from
-    an agent's environment and scrubbed from its transcript, so a sibling past a
-    gap -- which the resolver refuses to use -- must still be covered.
+    an agent's environment and scrubbed from its transcript, so a name the
+    resolver refuses to use must still be covered. The shape is therefore
+    WIDER than the resolver's -- any ``<key_env>_<digits>``, which takes in a
+    sibling past a gap and the natural misnamings of the first key (``_1``,
+    ``_01``) that are never read as credentials but hold one all the same.
     """
     environ = os.environ if environ is None else environ
     names: set[str] = set()
     for preset in PRESETS.values():
         if preset.key_env:
             names.add(preset.key_env)
-            names.update(
-                credential_env(preset.key_env, i) for i in _sibling_indexes(preset.key_env, environ)
-            )
+            shape = re.compile(re.escape(preset.key_env) + r"_\d+")
+            names.update(name for name in environ if shape.fullmatch(name))
     return frozenset(names)

@@ -577,7 +577,14 @@ DEFAULT_MAX_TURNS = 250
 # burn the whole pool on what is a one-line runner fix.
 _AUTH_FAILURE_RE = re.compile(
     r"not logged in|please run /login|invalid api key|authentication_error|"
-    r"\bunauthorized\b|\b401\b",
+    r"\bunauthorized\b|\b401\b|"
+    # The other ways a provider says "this key is no good": a 403 on the model
+    # call, and a key that was valid once. Kept to credential wording -- a bare
+    # "expired" would also match a session or a cache entry, and a bare 403
+    # would claim a quota refusal that some gateways send under that status,
+    # which must stay a throttle (this is checked BEFORE the throttle match).
+    r"\b403 forbidden\b|permission_error|"
+    r"(?:api.?key|token|credential)s? (?:is |has |was |has been )?(?:expired|revoked|disabled)",
     re.IGNORECASE,
 )
 

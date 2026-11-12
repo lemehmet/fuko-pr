@@ -424,3 +424,97 @@ def test_the_agentic_driver_flags_a_rejected_key_and_nothing_else(monkeypatch):
         monkeypatch, AgenticBackend(), helpers.HarnessResult(1, "", stderr="429 rate limit")
     )
     assert throttled.throttled and not throttled.auth_failed
+
+
+# --- review round 1 (#311) ------------------------------------------------------------
+
+
+def test_a_rejection_jumps_to_its_sibling_past_an_intervening_backup(monkeypatch):
+    """A cooling sibling is ordered BEHIND an available backup. A rejected key
+    is not a throttle, so the backup must not run on the way to the sibling."""
+    monkeypatch.setenv(KEY, "k1")
+    monkeypatch.setenv(f"{KEY}_2", "k2")
+    monkeypatch.setenv("ANTHROPIC_KEY", "a1")
+    backup = ReviewModel(provider="anthropic", name="b", auth="api-key", role="backup")
+    attempts: list[tuple[str, int]] = []
+
+    class Backend(_Backend):
+        def build_env(self, preset, model, knowledge, tools):
+            attempts.append((model.provider, model.credential))
+            return {}
+
+    result, _, trips = _run(
+        monkeypatch, Backend([_REJECTED, _OK]), [_qwen(), backup], cooled={"qwen-anthropic#2"}
+    )
+    assert attempts == [("qwen-anthropic", 1), ("qwen-anthropic", 2)]
+    assert result.returncode == 0 and result.credential == 2 and trips == []
+
+
+def test_a_rejected_login_does_not_walk_into_a_same_provider_backups_keys(monkeypatch):
+    """A subscription seat has no sibling: its entry is never expanded. A
+    backup on the same provider with two keys is a different entry."""
+    monkeypatch.setenv("ANTHROPIC_KEY", "a1")
+    monkeypatch.setenv("ANTHROPIC_KEY_2", "a2")
+    seat = ReviewModel(provider="anthropic", name="claude", auth="subscription")
+    backup = ReviewModel(provider="anthropic", name="claude", auth="api-key", role="backup")
+    counts = {"subscription": 0, "api-key": 2}
+
+    class Backend(_Backend):
+        def credential_count(self, preset, model):
+            return counts[model.auth]
+
+    backend = Backend([_REJECTED, _OK])
+    result, recorded, _ = _run(monkeypatch, backend, [seat, backup])
+    assert backend.seen == [1] and result.returncode == 1
+    assert recorded[0][1] == "failed"
+
+
+def test_a_rejected_key_is_not_retried_under_an_identical_entry(monkeypatch):
+    """Two entries on one provider hold the SAME keys: once both are rejected
+    the pool stops instead of re-sending each key a second time."""
+    monkeypatch.setenv(KEY, "k1")
+    monkeypatch.setenv(f"{KEY}_2", "k2")
+    backend = _Backend([_REJECTED, _REJECTED, _OK, _OK])
+    result, _, _ = _run(monkeypatch, backend, [_qwen(), _qwen(role="backup")])
+    assert backend.seen == [1, 2] and result.returncode == 1
+
+
+def test_misnamed_first_keys_are_stripped_and_scrubbed_but_never_used(monkeypatch):
+    """`_1` and `_01` are the natural misnamings of the first key. They are not
+    credentials to the resolver, and they still hold one."""
+    monkeypatch.setenv(f"{KEY}_1", "k1-misnamed")
+    monkeypatch.setenv(f"{KEY}_01", "k1-padded")
+    monkeypatch.setenv(f"{KEY}_ALT", "not-a-sibling")
+    assert resolve_credentials(QWEN) == []
+    assert {f"{KEY}_1", f"{KEY}_01"} <= _provider_key_vars()
+    assert f"{KEY}_ALT" not in _provider_key_vars()
+    scrubbed = dict(_transcript_secrets({}, ""))
+    assert scrubbed[f"{KEY}_1"] == "k1-misnamed" and scrubbed[f"{KEY}_01"] == "k1-padded"
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "API Error: 403 Forbidden",
+        '{"type":"error","error":{"type":"permission_error"}}',
+        "Your API key has expired.",
+        "the token was revoked",
+    ],
+)
+def test_a_dead_key_reads_as_rejected_in_every_wording(monkeypatch, stderr):
+    import tests.test_agentic_backend as helpers
+
+    result, _ = helpers._invoke(
+        monkeypatch, AgenticBackend(), helpers.HarnessResult(1, "", stderr=stderr)
+    )
+    assert result.auth_failed and not result.throttled
+
+
+@pytest.mark.parametrize("stderr", ["403 insufficient quota", "session expired, 429 rate limit"])
+def test_a_quota_refusal_stays_a_throttle(monkeypatch, stderr):
+    import tests.test_agentic_backend as helpers
+
+    result, _ = helpers._invoke(
+        monkeypatch, AgenticBackend(), helpers.HarnessResult(1, "", stderr=stderr)
+    )
+    assert result.throttled and not result.auth_failed

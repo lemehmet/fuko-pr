@@ -1040,7 +1040,22 @@ def _run_pool(
 
     result = InvokeResult(returncode=1, detail="no providers configured")
     attempt_started = time.monotonic()
+    # Breaker keys the provider REJECTED during this pool run, and -- while a
+    # rejection is being worked around -- the one entry whose remaining
+    # credentials may still be tried. See the `auth_failed` branch below.
+    rejected: set[str] = set()
+    siblings_only: ModelConfig | None = None
     for index, model in enumerate(ordered):
+        # The same key under another entry would only be rejected again.
+        if breaker_key(model) in rejected:
+            continue
+        if siblings_only is not None:
+            # Ordering can put another provider between two credentials of one
+            # entry (a cooling sibling is demoted behind an available backup).
+            # A rejection must not run that backup: it is not a throttle.
+            if model.on_credential(1) != siblings_only:
+                continue
+            siblings_only = None
         attempt_started = time.monotonic()
         preset = get_preset(model.provider)
         env = backend.build_env(preset, _with_branch_ledger(model, branch), knowledge, tools)
@@ -1099,14 +1114,21 @@ def _run_pool(
         )
         # A REJECTED key is not a throttle and normally fails fast -- failing
         # over would burn the pool on a one-line runner fix. The exception is a
-        # rejected key with a sibling credential still ahead: a revoked or
-        # expired key 1 must not take the seat down while key 2 is good. No
+        # rejected key with another credential OF THE SAME ENTRY still ahead: a
+        # revoked or expired key 1 must not take the seat down while key 2 is
+        # good. "Same entry" is the entry itself, not its provider: a
+        # subscription seat is never expanded and so never has one, and a
+        # second entry on the same provider holds the same keys, not new ones.
+        # The loop head then skips everything that is not that sibling. No
         # breaker trip: the rejection costs seconds, and a cooldown would hide
         # a dead key behind "cooling" instead of leaving it failing visibly.
         if result.auth_failed and any(
-            later.provider == model.provider and later.credential != model.credential
+            later.on_credential(1) == model.on_credential(1)
+            and breaker_key(later) not in rejected | {breaker_key(model)}
             for later in ordered[index + 1 :]
         ):
+            rejected.add(breaker_key(model))
+            siblings_only = model.on_credential(1)
             _record_transcript(_transcript_of(result))
             print(
                 f"fuko: {label}{which} was rejected by the provider ({result.detail}); "
