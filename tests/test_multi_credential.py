@@ -594,3 +594,44 @@ def test_review_prose_about_expired_tokens_is_not_a_rejected_key(monkeypatch):
         monkeypatch, AgenticBackend(), helpers.HarnessResult(1, prose, stderr="boom")
     )
     assert not plain.auth_failed
+
+
+# --- review round 3 (#311) ------------------------------------------------------------
+
+
+def test_a_gap_on_a_backups_provider_drops_the_backup_not_the_primary(monkeypatch, capsys):
+    monkeypatch.setenv(KEY, "k1")
+    monkeypatch.setenv("ANTHROPIC_KEY_2", "a2-secret")
+    backup = ReviewModel(provider="anthropic", name="b", auth="api-key", role="backup")
+    backend, attempts = _attempt_log([_THROTTLED])
+    result, _, _ = _run(monkeypatch, backend, [_qwen(), backup])
+    assert attempts == [("qwen-anthropic", 1)] and result.throttled
+    log = capsys.readouterr().err
+    assert "dropping anthropic/b from the failover pool" in log and "a2-secret" not in log
+    # The branch entry's own gap is still a hard error.
+    with pytest.raises(CredentialGapError):
+        _run(monkeypatch, _Backend([_OK]), [backup, _qwen(role="backup")])
+
+
+def test_an_identical_twin_entry_is_not_a_sibling(monkeypatch):
+    """Two field-for-field identical entries hold the same keys: after both
+    keys are rejected the pool fails fast instead of re-sending key 2."""
+    monkeypatch.setenv(KEY, "k1")
+    monkeypatch.setenv(f"{KEY}_2", "k2")
+    twin_a, twin_b = _qwen(role="backup"), _qwen(role="backup")
+    assert twin_a == twin_b and twin_a is not twin_b
+    backend = _Backend([_REJECTED, _REJECTED, _OK, _OK])
+    result, _, _ = _run(monkeypatch, backend, [twin_a, twin_b])
+    assert backend.seen == [1, 2] and result.returncode == 1
+
+
+@pytest.mark.parametrize("prose", ["the handler returns 401", "invalid api key is never logged"])
+def test_legacy_auth_wording_in_review_prose_does_not_spend_a_sibling_key(monkeypatch, prose):
+    """The fail-fast branch still scans the agent's text; `auth_failed`, which
+    buys another attempt, is derived from stderr alone."""
+    import tests.test_agentic_backend as helpers
+
+    result, _ = helpers._invoke(
+        monkeypatch, AgenticBackend(), helpers.HarnessResult(1, prose, stderr="boom")
+    )
+    assert "could not authenticate" in result.detail and not result.auth_failed

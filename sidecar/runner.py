@@ -37,7 +37,7 @@ from .fukoconfig import (
     load_config,
 )
 from .pool import breaker_key, expand_credentials, order_pool, partition_roles, resolve_models
-from .presets import get_preset, resolve_credentials
+from .presets import CredentialGapError, get_preset, resolve_credentials
 from .signals import RunReceipt, with_run_receipt
 from .status import escalation_needed
 from .sizing import required_context
@@ -1034,9 +1034,30 @@ def _run_pool(
     # callers' pool is what the job-budget arithmetic and `plan_escalation`
     # count, and a second credential is a second attempt for the SAME seat, not
     # a second branch.
-    ordered = order_pool(
-        expand_credentials(pool, lambda m: _credential_count(backend, m)), cooled, required
-    )
+    #
+    # `origin` remembers which pool entry each attempt came from, by position:
+    # two entries may be field-for-field identical, and "another credential of
+    # the same entry" must not mean "the same credential of its twin".
+    origin: dict[int, int] = {}
+    expanded: list[ModelConfig] = []
+    for position, entry in enumerate(pool):
+        try:
+            count = _credential_count(backend, entry)
+        except CredentialGapError as e:
+            # A misnumbered key on a BACKUP's provider must not take down a
+            # healthy primary that never needed the backup. The branch entry's
+            # own gap still raises: that seat cannot review at all.
+            if position == 0:
+                raise
+            print(
+                f"fuko: dropping {entry.provider}/{entry.name} from the failover pool: {e}",
+                file=sys.stderr,
+            )
+            continue
+        for attempt in expand_credentials([entry], lambda _m, n=count: n):
+            origin[id(attempt)] = position
+            expanded.append(attempt)
+    ordered = order_pool(expanded, cooled, required)
 
     result = InvokeResult(returncode=1, detail="no providers configured")
     attempt_started = time.monotonic()
@@ -1108,8 +1129,8 @@ def _run_pool(
         # over would burn the pool on a one-line runner fix. The exception is a
         # rejected key with another credential OF THE SAME ENTRY still ahead: a
         # revoked or expired key 1 must not take the seat down while key 2 is
-        # good. "Same entry" is the entry itself, not its provider: a
-        # subscription seat is never expanded and so never has one, and a
+        # good. "Same entry" is the entry itself (`origin`), not its provider:
+        # a subscription seat is never expanded and so never has one, and a
         # second entry on the same provider holds the same keys, not new ones.
         #
         # The sibling is pulled to the FRONT of the queue rather than reached by
@@ -1125,7 +1146,7 @@ def _run_pool(
         # No breaker trip: the rejection costs seconds, and a cooldown would
         # hide a dead key behind "cooling" instead of leaving it failing visibly.
         sibling = next(
-            (later for later in queue if later.on_credential(1) == model.on_credential(1)),
+            (later for later in queue if origin[id(later)] == origin[id(model)]),
             None,
         )
         if result.auth_failed and sibling is not None:

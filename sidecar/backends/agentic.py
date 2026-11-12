@@ -1305,7 +1305,13 @@ class AgenticBackend:
                         costs=_run_costs(result),
                         transcript=transcript_index,
                     ),
-                    auth_failed=True,
+                    # From STDERR only, and never over throttle evidence: this
+                    # flag makes the runner spend another attempt on a sibling
+                    # key, and the agent's own text is PR-author influenced. The
+                    # fail-fast branch itself keeps scanning both, as it always
+                    # has -- that direction costs nothing.
+                    auth_failed=(is_auth_failure(result.stderr) or is_key_rejection(result.stderr))
+                    and not is_throttle(result.returncode, output),
                 )
             # FLATTENED, for the same reason the runner flattens progress
             # arguments (27011698) and the dump prefixes its lines: this text
