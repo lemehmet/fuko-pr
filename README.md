@@ -136,8 +136,10 @@ runner only needs Docker — not a working PR-Agent Python environment.
 provider's key — `ZAI_KEY`, `ZAI_KEY_2`, `ZAI_KEY_3`, … (contiguous; any preset's
 key works the same way) — and export each in the workflow's `env:` block. A
 review stays on the first key and moves to the next only when that key is
-throttled (429, quota, overload, timeout) or rejected, so a later key's quota
-window is not started until it is needed. Each key cools down on its own
+throttled (429, quota, overload, timeout), so a later key's quota window is not
+started until it is needed. On the agentic backend a key the provider *rejects*
+(revoked, expired) also moves on to the next one; the pr-agent backend still
+fails fast on a rejected key. Each key cools down on its own
 (`provider`, `provider#2`, … in the cooldown table), and receipts and the
 `review_runs.credential` column record which one answered — as an index, never
 the key. Use one secret per key rather than a list in one secret: GitHub masks

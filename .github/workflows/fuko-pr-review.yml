@@ -232,7 +232,7 @@ jobs:
           KIMI_CODE_KEY: ${{ secrets.KIMI_CODE_KEY }}
           # Second credential for the same preset (numbered siblings, #298):
           # drained in order, so `_2` is only ever sent a request once the
-          # first key throttles or is rejected. An unset secret renders empty
+          # first key throttles or (agentic seats) is rejected. An unset secret renders empty
           # and reads as absent. One secret per key, never a list in one
           # secret -- GitHub masks a secret only as its whole value. Adding a
           # third key is a `_3` secret plus a line here.

@@ -34,6 +34,18 @@ def _no_ambient_provider_keys(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_review_state(monkeypatch):
+    """Same gate as ``tests/test_agentic_backend.py``: CI exports
+    ``FUKO_DATABASE_URL``, and the tests below that drive ``invoke`` must not
+    read or write the live test Postgres through the ledger."""
+    from sidecar import review_state
+    from sidecar import review_state_client as rsc
+
+    monkeypatch.setattr(review_state.settings, "database_url", "")
+    monkeypatch.setattr(rsc, "_transport_down", False)
+
+
 def _qwen(**kw):
     return ReviewModel(provider="qwen-anthropic", name="qwen3.8-max", auth="api-key", **kw)
 

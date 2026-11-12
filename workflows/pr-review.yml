@@ -128,8 +128,8 @@ jobs:
           ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY }}
           # Optional extra keys for one provider: add a numbered sibling secret
           # (<KEY>_2, <KEY>_3, ... contiguous) and export it here. fuko stays on
-          # the first key and moves to the next only when it throttles or is
-          # rejected. One secret per key -- do not put several keys in one
+          # the first key and moves to the next only when it throttles (429,
+          # quota, overload, timeout). One secret per key -- do not put several keys in one
           # secret, GitHub masks a secret only as its whole value.
           # ZAI_KEY_2: ${{ secrets.ZAI_KEY_2 }}
         run: fuko review --pr-url "${{ github.event.pull_request.html_url }}"
