@@ -609,8 +609,22 @@ def test_a_gap_on_a_backups_provider_drops_the_backup_not_the_primary(monkeypatc
     log = capsys.readouterr().err
     assert "dropping anthropic/b from the failover pool" in log and "a2-secret" not in log
     # The branch entry's own gap is still a hard error.
+    seat = ReviewModel(provider="anthropic", name="b", auth="api-key")
     with pytest.raises(CredentialGapError):
-        _run(monkeypatch, _Backend([_OK]), [backup, _qwen(role="backup")])
+        _run(monkeypatch, _Backend([_OK]), [seat, _qwen(role="backup")])
+
+
+def test_a_backups_only_pool_has_no_branch_so_a_gap_only_drops_its_entry(monkeypatch):
+    """`_ledger_owner` says a pool of bare backups has no branch: every entry
+    is a peer, and only losing all of them is fatal."""
+    monkeypatch.setenv(KEY, "k1")
+    monkeypatch.setenv("ANTHROPIC_KEY_2", "a2")
+    gapped = ReviewModel(provider="anthropic", name="b", auth="api-key", role="backup")
+    backend, attempts = _attempt_log([_OK])
+    result, _, _ = _run(monkeypatch, backend, [gapped, _qwen(role="backup")])
+    assert attempts == [("qwen-anthropic", 1)] and result.returncode == 0
+    with pytest.raises(CredentialGapError):
+        _run(monkeypatch, _Backend([_OK]), [gapped])
 
 
 def test_an_identical_twin_entry_is_not_a_sibling(monkeypatch):
@@ -635,3 +649,39 @@ def test_legacy_auth_wording_in_review_prose_does_not_spend_a_sibling_key(monkey
         monkeypatch, AgenticBackend(), helpers.HarnessResult(1, prose, stderr="boom")
     )
     assert "could not authenticate" in result.detail and not result.auth_failed
+
+
+# --- review round 4 (#311) ------------------------------------------------------------
+
+
+def test_an_auth_error_reported_in_the_stream_reaches_the_sibling_key(monkeypatch):
+    """The harness often reports an API error as the terminal event's text with
+    nothing on stderr. Marked `is_error`, that text is the harness's own and is
+    trusted; the same words as an ordinary answer are not."""
+    import tests.test_agentic_backend as helpers
+
+    reported, _ = helpers._invoke(
+        monkeypatch,
+        AgenticBackend(),
+        helpers.HarnessResult(1, "invalid api key", stderr="", error_result=True),
+    )
+    assert reported.auth_failed
+    prose, _ = helpers._invoke(
+        monkeypatch, AgenticBackend(), helpers.HarnessResult(1, "invalid api key", stderr="")
+    )
+    assert not prose.auth_failed and "could not authenticate" in prose.detail
+
+
+def test_the_stream_fold_marks_only_an_error_result():
+    import json
+
+    from sidecar.reviewer.harness import _consume_stream
+
+    def fold(**event):
+        line = json.dumps({"type": "result", "result": "API Error: 401", **event})
+        return _consume_stream([line], lambda *a: None)
+
+    assert fold(is_error=True).error_result
+    assert not fold(is_error=False).error_result
+    assert not fold().error_result
+    assert not fold(is_error="true").error_result

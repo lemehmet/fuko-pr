@@ -1040,15 +1040,19 @@ def _run_pool(
     # the same entry" must not mean "the same credential of its twin".
     origin: dict[int, int] = {}
     expanded: list[ModelConfig] = []
+    gap: CredentialGapError | None = None
     for position, entry in enumerate(pool):
         try:
             count = _credential_count(backend, entry)
         except CredentialGapError as e:
             # A misnumbered key on a BACKUP's provider must not take down a
             # healthy primary that never needed the backup. The branch entry's
-            # own gap still raises: that seat cannot review at all.
-            if position == 0:
+            # own gap still raises: that seat cannot review at all. A pool of
+            # bare backups has no branch (`_ledger_owner`), so there every
+            # entry is a peer and only losing all of them is fatal.
+            if entry is branch:
                 raise
+            gap = e
             print(
                 f"fuko: dropping {entry.provider}/{entry.name} from the failover pool: {e}",
                 file=sys.stderr,
@@ -1057,6 +1061,8 @@ def _run_pool(
         for attempt in expand_credentials([entry], lambda _m, n=count: n):
             origin[id(attempt)] = position
             expanded.append(attempt)
+    if gap is not None and not expanded:
+        raise gap
     ordered = order_pool(expanded, cooled, required)
 
     result = InvokeResult(returncode=1, detail="no providers configured")

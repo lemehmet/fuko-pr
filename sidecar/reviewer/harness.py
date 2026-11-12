@@ -616,6 +616,11 @@ class HarnessResult:
     usage: dict | None = None
     cost_usd: float | None = None
     turns: int | None = None
+    #: ``text`` is the harness's OWN error report (the terminal event carried
+    #: ``is_error``), not the agent's answer. This is the provenance that lets a
+    #: caller trust an auth error delivered in the stream as much as one on
+    #: stderr, without trusting review prose.
+    error_result: bool = False
 
 
 #: ``review_runs`` token column -> the key it reads from a ``result`` event's
@@ -873,6 +878,7 @@ def run_review(
         usage=outcome.usage,
         cost_usd=outcome.cost_usd,
         turns=outcome.turns,
+        error_result=outcome.error_result,
     )
 
 
@@ -917,6 +923,7 @@ class _StreamOutcome:
     cost_usd: float | None = None
     turns: int | None = None
     subtype: str | None = None
+    error_result: bool = False
 
 
 def _consume_stream(lines, emit) -> _StreamOutcome:
@@ -951,6 +958,7 @@ def _consume_stream(lines, emit) -> _StreamOutcome:
     reported_cost: float | None = None
     reported_turns: int | None = None
     reported_subtype: str | None = None
+    error_result = False
     turns = 0
     for raw in lines:
         raw = raw.strip()
@@ -983,6 +991,9 @@ def _consume_stream(lines, emit) -> _StreamOutcome:
                 reported_subtype = event["subtype"]
             if isinstance(event.get("result"), str):
                 result_text = event["result"]
+            # `is_error` on the terminal event: the `result` string is then the
+            # harness reporting a failure (an API error), not the agent's answer.
+            error_result = event.get("is_error") is True
     return _StreamOutcome(
         text=last_assistant_text if result_text is None else result_text,
         saw_result=result_text is not None,
@@ -990,6 +1001,7 @@ def _consume_stream(lines, emit) -> _StreamOutcome:
         cost_usd=reported_cost,
         turns=reported_turns,
         subtype=reported_subtype,
+        error_result=error_result and result_text is not None,
     )
 
 

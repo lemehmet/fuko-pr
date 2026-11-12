@@ -1289,8 +1289,9 @@ class AgenticBackend:
             _dump_harness_output(
                 model_name, f"exit {result.returncode}", result.stderr, result.text
             )
+            evidence = result.stderr + ("\n" + result.text if result.error_result else "")
             if is_auth_failure(output) or (
-                is_key_rejection(result.stderr) and not is_throttle(result.returncode, output)
+                is_key_rejection(evidence) and not is_throttle(result.returncode, output)
             ):
                 # Auth is neither a timeout nor a throttle -- failing over would burn
                 # the pool on a one-line runner fix -- so the channel is a plain fail.
@@ -1305,12 +1306,15 @@ class AgenticBackend:
                         costs=_run_costs(result),
                         transcript=transcript_index,
                     ),
-                    # From STDERR only, and never over throttle evidence: this
-                    # flag makes the runner spend another attempt on a sibling
-                    # key, and the agent's own text is PR-author influenced. The
-                    # fail-fast branch itself keeps scanning both, as it always
-                    # has -- that direction costs nothing.
-                    auth_failed=(is_auth_failure(result.stderr) or is_key_rejection(result.stderr))
+                    # From HARNESS-authored text only, and never over throttle
+                    # evidence: this flag makes the runner spend another attempt
+                    # on a sibling key, and the agent's own text is PR-author
+                    # influenced. Harness-authored is stderr, plus the stream's
+                    # final text when the terminal event marked it an error
+                    # report. The fail-fast branch itself keeps scanning
+                    # everything, as it always has -- that direction costs
+                    # nothing.
+                    auth_failed=(is_auth_failure(evidence) or is_key_rejection(evidence))
                     and not is_throttle(result.returncode, output),
                 )
             # FLATTENED, for the same reason the runner flattens progress
