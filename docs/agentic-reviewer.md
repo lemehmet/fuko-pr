@@ -412,9 +412,14 @@ auth = "subscription"   # "auto" (default) | "subscription" | "api-key"
 - **`api-key`** — the preset's env var (`ANTHROPIC_KEY`, or e.g.
   `ANTHROPIC_COMPAT_KEY`) is passed through as `ANTHROPIC_API_KEY`, with
   `ANTHROPIC_BASE_URL` for a gateway. A missing key is a config error, raised
-  before the run.
-- **`auto`** (default) — api-key when **the preset's own key env var** is set,
-  else subscription. Not `ANTHROPIC_KEY` specifically: `_resolve_auth` reads
+  before the run. A preset backed by numbered sibling keys (`<KEY>_2`, `_3`, …)
+  gets one attempt per key, in order: the harness is handed exactly one of
+  them, and every sibling is stripped from its environment and scrubbed from
+  its transcript like any other seat's key. A throttled key cools down alone
+  and the next attempt uses the next key; a key the provider *rejects* also
+  moves on while a sibling remains, and only then fails fast as before.
+- **`auto`** (default) — api-key when **the preset's own key env var** (or a
+  numbered sibling of it) is set, else subscription. Not `ANTHROPIC_KEY` specifically: `_resolve_auth` reads
   `preset.key_env`, which is `QWEN_TOKEN_PLAN_KEY` for `qwen-anthropic`,
   `ANTHROPIC_COMPAT_KEY` for `anthropic-compatible`, and so on. Exporting a
   real `ANTHROPIC_KEY` does not make `auto` resolve to api-key for a gateway

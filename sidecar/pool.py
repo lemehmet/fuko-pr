@@ -8,7 +8,7 @@ selection policy is unit-testable without a backend, a network, or a database.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 from .fukoconfig import ModelConfig, ReviewConfig, ReviewModel
 
@@ -67,7 +67,9 @@ def order_pool(
     fits+available > fits+cooled > too-small+available > too-small+cooled. A
     provider with no ``max_context`` is assumed to fit, and ``required_tokens=None``
     disables the fit check (cooldown-only ordering). ``cooled`` is keyed by
-    provider id because the cooldown is global per provider (a shared API key).
+    :func:`breaker_key` because the cooldown is global per credential (an API
+    key shared across repos), so a cooling credential does not demote its
+    siblings.
     """
     pool = list(pool)
 
@@ -79,6 +81,38 @@ def order_pool(
         )
 
     def rank(model: ModelConfig) -> tuple[int, int]:
-        return (0 if fits(model) else 1, 0 if model.provider not in cooled else 1)
+        return (0 if fits(model) else 1, 0 if breaker_key(model) not in cooled else 1)
 
     return sorted(pool, key=rank)
+
+
+def breaker_key(model: ModelConfig) -> str:
+    """Return the circuit-breaker key for ``model``'s credential.
+
+    Credential 1 keeps the bare provider id, so single-key deployments and
+    existing cooldown rows are unchanged; credential N is ``provider#N``. The
+    index only -- a key, its hash or a prefix of it must never land in a table
+    the metrics page renders.
+    """
+    if model.credential == 1:
+        return model.provider
+    return f"{model.provider}#{model.credential}"
+
+
+def expand_credentials(
+    pool: Iterable[ModelConfig], count_of: Callable[[ModelConfig], int]
+) -> list[ModelConfig]:
+    """Expand each pool entry into one attempt per provider credential.
+
+    ``count_of`` says how many credentials an entry can authenticate with; an
+    entry with zero or one stays a single attempt, untouched. The copies sit
+    next to each other in credential order, which makes the existing failover
+    loop drain them SEQUENTIALLY: credential 2 is never sent a request until
+    credential 1 throttles. That is the point rather than a side effect -- a
+    quota window's clock starts at first use, so round-robin would start every
+    window together and exhaust them together (#298).
+    """
+    expanded: list[ModelConfig] = []
+    for model in pool:
+        expanded.extend(model.on_credential(i) for i in range(1, max(1, count_of(model)) + 1))
+    return expanded

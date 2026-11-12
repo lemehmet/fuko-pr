@@ -383,6 +383,14 @@ class RunMetricRequest(BaseModel):
     detail: str | None = None
     backend: str = "pr-agent"
     endpoint: str = ""
+    credential: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "1-based index of the provider credential that answered, for a preset "
+            "backed by numbered sibling keys. The index only, never the key."
+        ),
+    )
     input_tokens: int | None = Field(
         default=None,
         ge=0,

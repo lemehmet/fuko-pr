@@ -162,6 +162,16 @@ class RunReceipt(BaseModel):
             "before this field existed, which decodes with no claim either way."
         ),
     )
+    credential: int = Field(
+        default=1,
+        description=(
+            "1-based index of the provider credential the answering entry used, "
+            "for a preset backed by numbered sibling keys (KEY, KEY_2, ...). The "
+            "index only -- never the key, a hash or a prefix of it. 1 is the "
+            "first or only key, and what a receipt written before this field "
+            "existed decodes as."
+        ),
+    )
     app: str = Field(
         default="",
         description=(

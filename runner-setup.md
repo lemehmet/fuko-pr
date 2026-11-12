@@ -42,7 +42,9 @@ A Linux x64 host with:
 
   The seat's model key (e.g. `QWEN_TOKEN_PLAN_KEY` for the `qwen-anthropic`
   preset) must be exported in the workflow's `env:` block from a repo secret —
-  the driver reads it on the runner, not on the sidecar.
+  the driver reads it on the runner, not on the sidecar. Extra keys for the
+  same preset go in numbered siblings (`QWEN_TOKEN_PLAN_KEY_2`, `_3`, …), each
+  exported the same way; they are drained in order (see the README).
 
 - **For a `codex-proxy` seat only**: an Anthropic-to-Codex translator on the
   runner. ChatGPT/Codex serves no Anthropic-compatible `/v1/messages`, so this
@@ -230,6 +232,7 @@ Secrets:
 | `FUKO_TOKEN`     | the `FUKO_AUTH_TOKEN` generated above                     |
 | `ZAI_KEY`        | your z.ai API key (if a configured model uses that provider) |
 | `OPENROUTER_KEY` | your OpenRouter API key (likewise)                        |
+| `<KEY>_2`, `_3`… | optional further keys for the same provider, used in order when the previous one throttles |
 
 `GITHUB_TOKEN` is provided automatically.
 

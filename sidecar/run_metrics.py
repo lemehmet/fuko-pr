@@ -298,8 +298,12 @@ def record(
     cost_usd: float | None = None,
     turns: int | None = None,
     transcript=None,
+    credential: int = 1,
 ) -> None:
     """Insert one review-run row (no-op when persistence is disabled).
+
+    ``credential`` is the 1-based index of the provider key that answered
+    (#299); 1 is both "the only key" and what the backfill gave older rows.
 
     ``backend`` is the driver that produced the run (#99); it defaults to
     ``"pr-agent"`` so an omitting caller writes the same value the schema backfill
@@ -329,9 +333,10 @@ def record(
         conn.execute(
             "INSERT INTO review_runs "
             "(repo, pr, provider, model, slot, duration_s, attempts, outcome, findings, "
-            "detail, backend, endpoint, input_tokens, output_tokens, cache_read_tokens, "
-            "cache_write_tokens, cost_usd, turns, transcript_key) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "detail, backend, endpoint, credential, input_tokens, output_tokens, "
+            "cache_read_tokens, cache_write_tokens, cost_usd, turns, transcript_key) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+            "%s)",
             (
                 repo,
                 pr,
@@ -345,6 +350,7 @@ def record(
                 (detail or "")[:500],
                 backend,
                 endpoint,
+                credential,
                 input_tokens,
                 output_tokens,
                 cache_read_tokens,

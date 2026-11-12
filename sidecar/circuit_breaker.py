@@ -1,7 +1,9 @@
 """Per-provider circuit-breaker cooldowns, shared across repos via Postgres.
 
 Throttling is enforced on a provider's API key (typically shared across a user's
-repos), so the cooldown is keyed by provider id and is global -- if one repo's
+repos), so the cooldown is keyed by provider id -- ``provider#N`` for the Nth of
+a preset's numbered sibling keys, see :func:`sidecar.pool.breaker_key` -- and is
+global: if one repo's
 review discovers a provider is throttled, every concurrent review skips it until
 the window elapses. The state lives in the same Postgres as the knowledge base
 (the ``provider_cooldown`` sibling table).

@@ -230,6 +230,13 @@ jobs:
           # basil's Kimi Code key (kimi-code preset) — the membership's key
           # from the Kimi Code Console, NOT a platform.moonshot.ai key.
           KIMI_CODE_KEY: ${{ secrets.KIMI_CODE_KEY }}
+          # Second credential for the same preset (numbered siblings, #298):
+          # drained in order, so `_2` is only ever sent a request once the
+          # first key throttles or is rejected. An unset secret renders empty
+          # and reads as absent. One secret per key, never a list in one
+          # secret -- GitHub masks a secret only as its whole value. Adding a
+          # third key is a `_3` secret plus a line here.
+          KIMI_CODE_KEY_2: ${{ secrets.KIMI_CODE_KEY_2 }}
           # Knowledge base: the LAN fuko sidecar reached from the self-hosted
           # runner. If unreachable the review degrades to KB-less — harmless, just
           # no injected learnings.
@@ -242,6 +249,7 @@ jobs:
           # outage cools gray and its OpenRouter backup together, and the only
           # surviving failover would then fail to authenticate.
           ZAI_KEY: ${{ secrets.ZAI_KEY }}
+          ZAI_KEY_2: ${{ secrets.ZAI_KEY_2 }}
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
           ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY }}
@@ -249,6 +257,10 @@ jobs:
           # Token Plan key (sk-sp-…). Distinct from every other bucket above —
           # a QwenCloud throttle cools only henry.
           QWEN_TOKEN_PLAN_KEY: ${{ secrets.QWEN_TOKEN_PLAN_KEY }}
+          # The second Token Plan account. Each plan is its own quota window
+          # whose clock starts at first use, which is why the keys are drained
+          # in order rather than alternated.
+          QWEN_TOKEN_PLAN_KEY_2: ${{ secrets.QWEN_TOKEN_PLAN_KEY_2 }}
           # gray's codex-proxy seat. NOT a secret and deliberately not one: the
           # translating proxy on the runner substitutes its own stored ChatGPT
           # session for whatever arrives, so this value never leaves the box.

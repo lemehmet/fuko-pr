@@ -94,6 +94,12 @@ class InvokeResult:
     #: run whose capture is off or failed, so a run with no transcript records
     #: no reference rather than one that would read as a blob gone missing.
     transcript: dict | None = None
+    #: 1-based index of the provider credential the answering entry used
+    #: (:attr:`sidecar.fukoconfig.ModelConfig.credential`). The index only.
+    credential: int = 1
+    #: The provider REJECTED the credential (401/403-class), as opposed to
+    #: throttling it. Not a failover signal on its own -- see ``_run_pool``.
+    auth_failed: bool = False
 
 
 @runtime_checkable
