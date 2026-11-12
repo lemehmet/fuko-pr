@@ -97,7 +97,12 @@ class PrAgentBackend:
             "CONFIG__FALLBACK_MODELS": f'["{model_id}"]',
             "CONFIG__VERBOSITY_LEVEL": "1",
             "CONFIG__MAX_DESCRIPTION_TOKENS": "2000",
+            # Both spellings, because the image is the operator's choice:
+            # PR-Agent renamed the key to `committable` in v0.47 and drops the
+            # old one in 1.0, while images before v0.47 know only the old one.
+            # Either set to true enables the mode; an unknown key is ignored.
             "PR_CODE_SUGGESTIONS__COMMITABLE_CODE_SUGGESTIONS": "true",
+            "PR_CODE_SUGGESTIONS__COMMITTABLE_CODE_SUGGESTIONS": "true",
             "PR_REVIEWER__REQUIRE_TICKET_ANALYSIS_REVIEW": "false",
             "PYTHONUNBUFFERED": "1",
         }
