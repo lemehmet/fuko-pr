@@ -577,12 +577,15 @@ DEFAULT_MAX_TURNS = 250
 # burn the whole pool on what is a one-line runner fix.
 _AUTH_FAILURE_RE = re.compile(
     r"not logged in|please run /login|invalid api key|authentication_error|"
-    r"\bunauthorized\b|\b401\b|"
-    # The other ways a provider says "this key is no good": a 403 on the model
-    # call, and a key that was valid once. Kept to credential wording -- a bare
-    # "expired" would also match a session or a cache entry, and a bare 403
-    # would claim a quota refusal that some gateways send under that status,
-    # which must stay a throttle (this is checked BEFORE the throttle match).
+    r"\bunauthorized\b|\b401\b",
+    re.IGNORECASE,
+)
+
+# The other ways a provider says "this key is no good": a 403 on the model call,
+# and a key that was valid once. Kept apart from the pattern above because these
+# wordings are weaker evidence and are held to a stricter standard -- see
+# :func:`is_key_rejection`.
+_KEY_REJECTION_RE = re.compile(
     r"\b403 forbidden\b|permission_error|"
     r"(?:api.?key|token|credential)s? (?:is |has |was |has been )?(?:expired|revoked|disabled)",
     re.IGNORECASE,
@@ -689,6 +692,18 @@ def usage_tokens(usage: dict | None) -> dict[str, int | None]:
 def is_auth_failure(output: str) -> bool:
     """Return whether ``output`` looks like a credential problem, not a capacity one."""
     return bool(output) and _AUTH_FAILURE_RE.search(output) is not None
+
+
+def is_key_rejection(stderr: str) -> bool:
+    """Return whether the harness's STDERR says the provider refused the key.
+
+    Covers the 403 / expired / revoked wordings :func:`is_auth_failure` does
+    not. Meant for stderr only: the agent's own review text is PR-author
+    influenced and talks about expired tokens and ``permission_error`` whenever
+    it reviews auth code. A caller must also let throttle evidence win, since
+    some gateways send a quota refusal as ``403 Forbidden``.
+    """
+    return bool(stderr) and _KEY_REJECTION_RE.search(stderr) is not None
 
 
 def check_auth(env: dict[str, str]) -> dict | None:

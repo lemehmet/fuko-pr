@@ -518,3 +518,79 @@ def test_a_quota_refusal_stays_a_throttle(monkeypatch, stderr):
         monkeypatch, AgenticBackend(), helpers.HarnessResult(1, "", stderr=stderr)
     )
     assert result.throttled and not result.auth_failed
+
+
+# --- review round 2 (#311) ------------------------------------------------------------
+
+
+def _attempt_log(results):
+    attempts: list[tuple[str, int]] = []
+
+    class Backend(_Backend):
+        def build_env(self, preset, model, knowledge, tools):
+            attempts.append((model.provider, model.credential))
+            return {}
+
+    return Backend(results), attempts
+
+
+def test_a_backup_passed_over_for_the_sibling_still_rescues_a_throttled_sibling(monkeypatch):
+    """Jumping to the sibling defers the backup; it must not consume it."""
+    monkeypatch.setenv(KEY, "k1")
+    monkeypatch.setenv(f"{KEY}_2", "k2")
+    monkeypatch.setenv("ANTHROPIC_KEY", "a1")
+    backup = ReviewModel(provider="anthropic", name="b", auth="api-key", role="backup")
+    backend, attempts = _attempt_log([_REJECTED, _THROTTLED, _OK])
+    result, _, trips = _run(monkeypatch, backend, [_qwen(), backup], cooled={"qwen-anthropic#2"})
+    assert attempts == [("qwen-anthropic", 1), ("qwen-anthropic", 2), ("anthropic", 1)]
+    assert result.returncode == 0 and trips == ["qwen-anthropic#2"]
+
+
+def test_a_rejected_key_does_not_drop_a_subscription_backup_on_the_same_provider(monkeypatch):
+    """A subscription entry shares the provider's breaker key and none of its
+    credentials, so a rejected key 1 says nothing about it."""
+    monkeypatch.setenv("ANTHROPIC_KEY", "a1")
+    monkeypatch.setenv("ANTHROPIC_KEY_2", "a2")
+    seat = ReviewModel(provider="anthropic", name="claude", auth="api-key")
+    backup = ReviewModel(provider="anthropic", name="claude", auth="subscription", role="backup")
+    names: list[str] = []
+    counts = {"subscription": 0, "api-key": 2}
+
+    class Backend(_Backend):
+        def credential_count(self, preset, model):
+            return counts[model.auth]
+
+        def build_env(self, preset, model, knowledge, tools):
+            names.append(f"{model.auth}#{model.credential}")
+            return {}
+
+    result, _, _ = _run(monkeypatch, Backend([_REJECTED, _THROTTLED, _OK]), [seat, backup])
+    assert names == ["api-key#1", "api-key#2", "subscription#1"]
+    assert result.returncode == 0
+
+
+def test_a_quota_refusal_sent_as_403_forbidden_stays_a_throttle(monkeypatch):
+    import tests.test_agentic_backend as helpers
+
+    result, _ = helpers._invoke(
+        monkeypatch,
+        AgenticBackend(),
+        helpers.HarnessResult(1, "", stderr="API Error: 403 Forbidden: insufficient quota"),
+    )
+    assert result.throttled and not result.auth_failed
+
+
+def test_review_prose_about_expired_tokens_is_not_a_rejected_key(monkeypatch):
+    """The agent's own text is PR-author influenced; only stderr may say the
+    key was refused in the weaker wordings."""
+    import tests.test_agentic_backend as helpers
+
+    prose = "The token has expired branch never refreshes; permission_error is swallowed."
+    result, _ = helpers._invoke(
+        monkeypatch, AgenticBackend(), helpers.HarnessResult(1, prose, stderr="429 rate limit")
+    )
+    assert result.throttled and not result.auth_failed
+    plain, _ = helpers._invoke(
+        monkeypatch, AgenticBackend(), helpers.HarnessResult(1, prose, stderr="boom")
+    )
+    assert not plain.auth_failed

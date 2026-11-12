@@ -62,6 +62,7 @@ from ..reviewer.harness import (
     _ENV_TRANSCRIPT_DENY_DIR,
     check_auth,
     is_auth_failure,
+    is_key_rejection,
     run_review,
     usage_tokens,
 )
@@ -1288,7 +1289,9 @@ class AgenticBackend:
             _dump_harness_output(
                 model_name, f"exit {result.returncode}", result.stderr, result.text
             )
-            if is_auth_failure(output):
+            if is_auth_failure(output) or (
+                is_key_rejection(result.stderr) and not is_throttle(result.returncode, output)
+            ):
                 # Auth is neither a timeout nor a throttle -- failing over would burn
                 # the pool on a one-line runner fix -- so the channel is a plain fail.
                 # `auth_failed` lets the runner make the one exception: a rejected

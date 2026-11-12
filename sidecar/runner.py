@@ -1040,22 +1040,14 @@ def _run_pool(
 
     result = InvokeResult(returncode=1, detail="no providers configured")
     attempt_started = time.monotonic()
-    # Breaker keys the provider REJECTED during this pool run, and -- while a
-    # rejection is being worked around -- the one entry whose remaining
-    # credentials may still be tried. See the `auth_failed` branch below.
-    rejected: set[str] = set()
-    siblings_only: ModelConfig | None = None
-    for index, model in enumerate(ordered):
-        # The same key under another entry would only be rejected again.
-        if breaker_key(model) in rejected:
-            continue
-        if siblings_only is not None:
-            # Ordering can put another provider between two credentials of one
-            # entry (a cooling sibling is demoted behind an available backup).
-            # A rejection must not run that backup: it is not a throttle.
-            if model.on_credential(1) != siblings_only:
-                continue
-            siblings_only = None
+    # A queue rather than a plain walk, because a rejected key reorders it: see
+    # the `auth_failed` branch below.
+    queue = list(ordered)
+    attempts = 0
+    model = None
+    while queue:
+        model = queue.pop(0)
+        attempts += 1
         attempt_started = time.monotonic()
         preset = get_preset(model.provider)
         env = backend.build_env(preset, _with_branch_ledger(model, branch), knowledge, tools)
@@ -1085,7 +1077,7 @@ def _run_pool(
         which = f" (credential #{model.credential})" if model.credential > 1 else ""
         cooling = " (cooling — last resort)" if breaker_key(model) in cooled else ""
         print(
-            f"fuko: review attempt {index + 1}/{len(ordered)} via {label}{which}{cooling}",
+            f"fuko: review attempt {attempts}/{attempts + len(queue)} via {label}{which}{cooling}",
             file=sys.stderr,
         )
 
@@ -1119,16 +1111,33 @@ def _run_pool(
         # good. "Same entry" is the entry itself, not its provider: a
         # subscription seat is never expanded and so never has one, and a
         # second entry on the same provider holds the same keys, not new ones.
-        # The loop head then skips everything that is not that sibling. No
-        # breaker trip: the rejection costs seconds, and a cooldown would hide
-        # a dead key behind "cooling" instead of leaving it failing visibly.
-        if result.auth_failed and any(
-            later.on_credential(1) == model.on_credential(1)
-            and breaker_key(later) not in rejected | {breaker_key(model)}
-            for later in ordered[index + 1 :]
-        ):
-            rejected.add(breaker_key(model))
-            siblings_only = model.on_credential(1)
+        #
+        # The sibling is pulled to the FRONT of the queue rather than reached by
+        # walking: ordering can leave an available backup between two
+        # credentials of one entry (a cooling sibling is demoted behind it), and
+        # a rejection must not run that backup. It stays queued behind the
+        # sibling, so if the sibling then THROTTLES the backup is still there
+        # for the ordinary failover. Other queued attempts on the rejected key
+        # are dropped -- it would only be rejected again -- but only attempts
+        # that authenticate with a key: a subscription entry shares the
+        # provider's breaker key and none of its credentials.
+        #
+        # No breaker trip: the rejection costs seconds, and a cooldown would
+        # hide a dead key behind "cooling" instead of leaving it failing visibly.
+        sibling = next(
+            (later for later in queue if later.on_credential(1) == model.on_credential(1)),
+            None,
+        )
+        if result.auth_failed and sibling is not None:
+            queue = [sibling] + [
+                later
+                for later in queue
+                if later is not sibling
+                and not (
+                    breaker_key(later) == breaker_key(model)
+                    and _credential_count(backend, later) > 0
+                )
+            ]
             _record_transcript(_transcript_of(result))
             print(
                 f"fuko: {label}{which} was rejected by the provider ({result.detail}); "
@@ -1154,7 +1163,7 @@ def _run_pool(
                 model,
                 slot=slot,
                 duration_s=time.monotonic() - attempt_started,
-                attempts=index + 1,
+                attempts=attempts,
                 outcome="ok" if result.returncode == 0 else "failed",
                 findings=findings,
                 detail=result.detail or "",
@@ -1183,13 +1192,13 @@ def _run_pool(
         )
 
     print("fuko: provider pool exhausted; all attempts throttled", file=sys.stderr)
-    if ordered:
+    if model is not None:
         _record_run(
             pr,
-            ordered[-1],
+            model,
             slot=slot,
             duration_s=time.monotonic() - attempt_started,
-            attempts=len(ordered),
+            attempts=attempts,
             outcome="throttled_out",
             findings=None,
             detail=result.detail or "",
