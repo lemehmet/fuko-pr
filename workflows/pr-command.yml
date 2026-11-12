@@ -91,8 +91,13 @@ jobs:
           permission-pull-requests: write
           permission-issues: write
 
+      # The SHA pins upstream's Action WRAPPER only. Its Dockerfile is
+      # `FROM pragent/pr-agent:github_action`, a rolling tag, so the code that
+      # runs can be newer than the release named here. Since v0.47 the Action
+      # also FAILS when a tool errors (it used to log and stay green); set
+      # github_action_config.fail_on_tool_errors = false to get that back.
       - name: PR-Agent (run the comment command)
-        uses: the-pr-agent/pr-agent@570f67ed5fc8db5be74c18df070bc20079b64b0d # v0.41.0
+        uses: the-pr-agent/pr-agent@e673a02076ce09a4726c3d0c3cc85780e59ca52b # v0.50.0
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           # PR-Agent loads settings via dynaconf (envvar_prefix=False), so nested
@@ -108,5 +113,7 @@ jobs:
           # GLM Coding-plan subscription lives on the coding endpoint; the
           # standard /api/paas/v4 is pay-per-token and 429s without a balance.
           OPENAI__API_BASE: "https://api.z.ai/api/coding/paas/v4"
-          # Post code suggestions as inline committable blocks.
-          PR_CODE_SUGGESTIONS__COMMITABLE_CODE_SUGGESTIONS: "true"
+          # Post code suggestions as inline committable blocks. Spelled
+          # `committable` since PR-Agent v0.47; the old single-t key is a
+          # deprecated alias that goes away in 1.0.
+          PR_CODE_SUGGESTIONS__COMMITTABLE_CODE_SUGGESTIONS: "true"

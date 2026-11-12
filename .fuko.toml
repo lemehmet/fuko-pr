@@ -1,5 +1,5 @@
 [review]
-image = "ghcr.io/lemehmet/pr-agent:0.41.0@sha256:7341dc6214be964534ce3e68fc73143f3d642240829fe66894b87864db417223"
+image = "ghcr.io/lemehmet/pr-agent:0.50.0@sha256:492ccfd74b5e24c42723f7f5cc8093dbf7afa6c1f71f1f14713b143fd31805c6"
 # 600 -> 900 -> 1800 (2026-08-19): henry's agentic runs were KILLED at 600s
 # AND at 900s (receipts on PR #130). Measured cause, not guessed: the QwenCloud
 # token-plan gateway forces THINKING mode on (a bare /v1/messages call returns
