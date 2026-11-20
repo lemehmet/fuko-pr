@@ -14,7 +14,7 @@
 # runs, just without injected learnings.
 #
 # Concurrent seats under per-branch App identities (.fuko.toml token_env):
-# gray (gpt-6.1-sol via codex-proxy, GATING), ivy (claude-opus-5-5 on the
+# gray (gpt-6.2-sol via codex-proxy, GATING), ivy (claude-opus-5-5 on the
 # Team subscription, GATING since 2026-10-25) and basil (k3.1-pro on Kimi
 # Code, TRIAL since 2026-10-25). Each App = a repo VARIABLE (App ID) + secret
 # (private key). Identity is all-or-nothing: one unminted seat token makes the
