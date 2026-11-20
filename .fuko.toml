@@ -227,10 +227,19 @@ job_budget_minutes = 110
 # admit it. See docs/agentic-reviewer.md.
 [[review.models]]
 provider = "codex-proxy"
-# gpt-5.6-sol -> gpt-6.1-sol 2026-10-19, matching mepro's gray (since
-# 2026-10-02); the fleet proxy (v0.1.43) already serves it. 272000 re-checked
-# there: upstream still pairs the gpt-6 slugs with the same plan window.
-name = "gpt-6.1-sol"
+# gpt-6.1-sol -> gpt-6.2-sol 2026-11-20 (gpt-5.6-sol -> gpt-6.1-sol was
+# 2026-10-19). THE SLUG AND THE RUNNER'S PROXY MOVE TOGETHER, and this time
+# the proxy side is not a plain pin: no claude-code-proxy release lists a 6.2
+# slug yet, so the fleet runs v0.1.48 built from source and admits
+# `gpt-6.2-sol` through its model catalog (infra
+# `_ansible/roles/ci_runner_toolchain/defaults/main.yml`, ci_ccp_version).
+# Verified on all four review-capable hosts before this line landed:
+# `/v1/models` lists the slug and a /v1/messages tool call on it answers
+# `stop_reason: tool_use`. A runner without that catalog refuses the slug, and
+# nothing in CI distinguishes that from a dead provider. 272000 stands:
+# upstream publishes no separate plan window for 6.2, and a too-low window
+# only compacts early.
+name = "gpt-6.2-sol"
 max_context = 272000
 auth = "api-key"
 backend = "agentic"
